@@ -63,24 +63,28 @@ jobs:
           go-version: ${{ env.GO_VERSION }}
           cache-dependency-path: ${{ matrix.module }}/go.sum
 
-      - name: Verify lint config has not rotted
-        uses: golangci/golangci-lint-action@v9
-        with:
-          version: ${{ env.GOLANGCI_VERSION }}
-          args: config verify
-          working-directory: ${{ matrix.module }}
+      # Installed directly rather than through golangci-lint-action, because the
+      # action always invokes `golangci-lint run` and appends `args` to it --
+      # so `args: config verify` becomes `run ... config verify`, and the
+      # subcommand names get parsed as directories to lint. Installing the
+      # binary also makes CI run the same commands `make lint` runs, which is
+      # the contract stated at the top of the Makefile.
+      - name: Install golangci-lint
+        run: |
+          curl -sSfL "https://raw.githubusercontent.com/golangci/golangci-lint/${GOLANGCI_VERSION}/install.sh" \
+            | sh -s -- -b "$(go env GOPATH)/bin" "${GOLANGCI_VERSION}"
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
 
-      - uses: golangci/golangci-lint-action@v9
-        with:
-          version: ${{ env.GOLANGCI_VERSION }}
-          working-directory: ${{ matrix.module }}
+      - name: Verify lint config has not rotted
+        run: golangci-lint config verify
+
+      - name: Lint
+        working-directory: ${{ matrix.module }}
+        run: golangci-lint run
 
       - name: Check formatting
-        uses: golangci/golangci-lint-action@v9
-        with:
-          version: ${{ env.GOLANGCI_VERSION }}
-          args: fmt --diff
-          working-directory: ${{ matrix.module }}
+        working-directory: ${{ matrix.module }}
+        run: golangci-lint fmt --diff
 
   test:
     name: Test (${{ matrix.module }}, go${{ matrix.go }}, ${{ matrix.os }})
@@ -109,8 +113,13 @@ jobs:
           go-version: ${{ matrix.go }}
           cache-dependency-path: ${{ matrix.module }}/go.sum
 
+      # `shell: bash` on every step below is required, not stylistic. Windows
+      # runners default to PowerShell, which splits `-coverprofile=coverage.txt`
+      # at the `=` and hands `.txt` to the go tool as a package path. Pinning
+      # the shell keeps one command working identically on all three OSes.
       - name: Verify go.mod is tidy
         working-directory: ${{ matrix.module }}
+        shell: bash
         run: |
           go mod tidy
           git diff --exit-code -- go.mod go.sum || {
@@ -120,12 +129,14 @@ jobs:
 
       - name: Build
         working-directory: ${{ matrix.module }}
+        shell: bash
         run: go build ./...
 
       # -shuffle=on catches tests that depend on execution order, which is the
       # failure that only ever reproduces in CI.
       - name: Unit tests
         working-directory: ${{ matrix.module }}
+        shell: bash
         run: go test -race -shuffle=on -covermode=atomic -coverprofile=coverage.txt ./...
 
       - uses: actions/upload-artifact@v4

@@ -37,6 +37,11 @@ linters:
       # Named returns are how a deferred function amends an error on the way
       # out, which the lifecycle and unit-of-work code does deliberately.
 
+    # --- Deprecated upstream ---
+    - gomodguard
+      # Deprecated in golangci-lint v2.12.0, superseded by gomodguard_v2, which
+      # `default: all` already enables.
+
     # --- Redundant with a formatter or another linter ---
     - lll
       # golines enforces line length as a formatter, so it fixes rather than reports.
