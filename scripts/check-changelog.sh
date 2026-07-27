@@ -35,8 +35,11 @@ while IFS= read -r subject; do
   fi
 done <<< "$SUBJECTS"
 
-# Fragments added on this branch.
-ADDED="$(git diff --name-only --diff-filter=A "$MERGE_BASE"..HEAD -- "$FRAGMENT_DIR" | grep -c . || true)"
+# Fragments added on this branch. Only .yaml/.yml count: the directory also
+# holds a .gitkeep, since git cannot track an empty directory, and counting it
+# as a fragment makes every branch look like it has one.
+ADDED="$(git diff --name-only --diff-filter=A "$MERGE_BASE"..HEAD -- "$FRAGMENT_DIR" \
+  | grep -Ec '\.ya?ml$' || true)"
 
 if [[ "$NEEDS_FRAGMENT" -eq 1 && "$ADDED" -eq 0 ]]; then
   cat >&2 <<EOF
