@@ -1,0 +1,22 @@
+# Normalise line endings so golden-file tests are stable across platforms.
+* text=auto eol=lf
+
+*.go     text eol=lf diff=golang
+*.mod    text eol=lf
+*.sum    text eol=lf -diff
+*.md     text eol=lf
+*.yml    text eol=lf
+*.yaml   text eol=lf
+*.proto  text eol=lf
+
+# Golden files are byte-exact fixtures. Never let a filter or CRLF
+# conversion touch them, or generator tests fail on Windows only.
+testdata/**       -text -diff
+*.golden          -text -diff
+
+# Generated protobuf output is reviewed as a blob, not line by line.
+*.pb.go           linguist-generated=true -diff
+*_grpc.pb.go      linguist-generated=true -diff
+
+# Vendored or embedded template assets count as data, not source.
+**/templates/**   linguist-vendored=true
