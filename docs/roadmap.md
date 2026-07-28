@@ -25,7 +25,8 @@ Build order. Each item depends only on what precedes it; `errors` is first
 because every other package returns its types and retrofitting an error model is
 a rewrite of every signature that touches one.
 
-- [ ] **`errors`** — one type, semantic codes, `Wrapping`/`Field`/`Op` builders
+- [x] **`errors`** — one type, semantic codes, `Wrapping`/`Field`/`Op`/`Fix`
+      builders · [spec](../errors/SPEC.md)
 - [ ] **`log`** — context plumbing over `log/slog`, no wrapper type
 - [ ] **`di`** — `Provide[T]` · `Resolve[T]` · `Group[T]` · `Scope` · `Build` · `Graph`
 - [ ] **`lifecycle`** — ordered start, reverse stop, drain, grace period

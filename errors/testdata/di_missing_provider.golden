@@ -1,0 +1,6 @@
+warren.Run: di.Resolve: no provider for *sql.DB
+
+  requested by  internal/modules/orders/module.go:14
+  chain         *OrdersHandler → *OrderRepository → *sql.DB
+
+  fix: add warren.Provide(NewDB) to internal/platform/module.go

@@ -117,6 +117,19 @@ linters:
       settings:
         shadow:
           strict: true
+        # warren/errors constructors take a printf-style message, so vet must
+        # know they are printf wrappers. Without this, NotFound("id %s") with no
+        # argument ships a message containing "%!s(MISSING)", and
+        # NotFound("...: %w", err) silently produces "%!w" instead of wrapping —
+        # the one mistake AGENT.md § Errors names explicitly.
+        printf:
+          funcs:
+            - github.com/MerseniBilel/warren/errors.NotFound
+            - github.com/MerseniBilel/warren/errors.Conflict
+            - github.com/MerseniBilel/warren/errors.Invalid
+            - github.com/MerseniBilel/warren/errors.PermissionDenied
+            - github.com/MerseniBilel/warren/errors.Internal
+            - (*github.com/MerseniBilel/warren/errors.Error).Fix
 
     revive:
       rules:
@@ -191,6 +204,10 @@ linters:
           - cyclop
           - maintidx
           - containedctx
+          - forbidigo
+            # A Go Example is verified by comparing what it prints to stdout
+            # against its // Output: comment. Printing is the mechanism, so the
+            # library-wide ban on fmt.Print cannot apply in tests.
 
       # Test helpers legitimately take *testing.T and panic-adjacent paths.
       - path: (^|/)testing/
