@@ -9,6 +9,7 @@
 | [testing.md](testing.md) | The test tiers and what belongs in each |
 | [agent-integration.md](agent-integration.md) | Skills and the MCP server |
 | [adr/](adr/) | Decisions, with the reasoning and the rejected alternatives |
+| [../plan/](../plan/) | What is being built next, and the spec for each feature |
 | [../CONTRIBUTING.md](../CONTRIBUTING.md) | Setup, commits, changelog, review |
 | [../AGENT.md](../AGENT.md) | Instructions for AI agents |
 

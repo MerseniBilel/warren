@@ -28,6 +28,13 @@ The five invariants that fail CI, in short — full versions in AGENT.md:
 
 ## Working here
 
+**Write the spec before the feature.** Warren is spec-driven: every feature has
+a `plan/<milestone>/<nn>-<feature>/spec.md` that is written and approved before
+any code is written, and corrected in the same pull request whenever the
+implementation diverges. See [AGENT.md § Spec-driven development](AGENT.md) for
+the process and [plan/README.md](plan/README.md) for the index. If you are asked
+to build something that has no spec, write the spec first and say so.
+
 **Use the make targets, not raw `go` commands.** This is a multi-module repo, so
 `go test ./...` silently tests one module and reports success. `make test`
 iterates all of them. Same for `go vet` (`make vet`) and lint (`make lint`).
@@ -92,6 +99,7 @@ Skill authoring format and the required sections are in
 | Question | File |
 |---|---|
 | What are the rules? | [AGENT.md](AGENT.md) |
+| What are we building next? | [plan/](plan/) |
 | Why is it built this way? | [docs/architecture.md](docs/architecture.md) |
 | Why this dependency? | [docs/dependencies.md](docs/dependencies.md) |
 | Why was this decided? | [docs/adr/](docs/adr/) |

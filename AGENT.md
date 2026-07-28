@@ -77,10 +77,55 @@ No `toolchain` directive in any module.
 
 ---
 
+## Spec-driven development — write the spec first
+
+**Warren is built spec-first. No feature is implemented before its `spec.md`
+exists and is approved.** This is a hard process rule, not a suggestion, and it
+applies to you exactly as it applies to a human contributor.
+
+Specs live in [plan/](plan/), one directory per feature:
+
+```
+plan/<milestone>/<nn>-<feature>/spec.md
+```
+
+The order is always:
+
+1. **Write the spec** from [plan/TEMPLATE.spec.md](plan/TEMPLATE.spec.md). Every
+   section is filled in; a section with nothing to say is written as "None."
+   rather than deleted, so that the claim is visible.
+2. **Write an ADR first if the spec is structural** — a new dependency in a
+   public API, a change to a port's shape, a module boundary, or overturning an
+   existing decision ([docs/adr/README.md](docs/adr/README.md)).
+3. **Get the spec approved.** Status moves `Draft` → `Approved`. Code starts
+   here, not before.
+4. **Implement to the spec's Definition of Done**, which includes tests, docs,
+   the skill if it is a CLI command, and a changelog fragment.
+5. **Mark it `Shipped`.**
+
+Two rules that matter more than the ceremony:
+
+- **The spec's §4 Public API is the contract under review.** Reviewing prose and
+  then discovering the actual signatures at merge time is how a spec becomes
+  theatre. Write the Go.
+- **When the implementation diverges from the spec, correct the spec in the same
+  pull request.** A spec that no longer describes the code is worse than no
+  spec — it is a confident lie, and the next agent will believe it.
+
+If you are asked to build something with no spec, **write the spec first and
+say so**. If a spec exists but is `Draft`, say that too rather than
+implementing against an unapproved contract.
+
+[plan/README.md](plan/README.md) holds the index, the status vocabulary, and the
+current milestone.
+
+---
+
 ## Before you write code
 
 | If you are about to… | First… |
 |---|---|
+| Build any feature | Find or write its `spec.md` in [plan/](plan/). See §"Spec-driven development" above. |
 | Add a dependency | Read §"Adding a dependency" below. This has a hard process. |
 | Change a port's shape, a module boundary, or a layering rule | Write an ADR ([docs/adr/README.md](docs/adr/README.md)) |
 | Add a CLI command | Read [ADR-0008](docs/adr/0008-agent-integration.md) — a command needs a skill |
@@ -225,6 +270,11 @@ Named specifically, because generic advice does not prevent them:
 7. **Naming a type `SomethingWithSomething`.** See Naming above.
 8. **Marking work complete with an unverified claim.** Run the command and paste
    what it printed. "Should work" is not a result.
+9. **Writing code for a feature that has no approved spec.** Warren is
+   spec-driven; the spec is where a feature is made small enough to finish. Write
+   `plan/<milestone>/<nn>-<feature>/spec.md` first.
+10. **Letting the spec and the code drift apart.** If the implementation had to
+    differ, the spec is corrected in the same pull request — not later.
 
 ---
 

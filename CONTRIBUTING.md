@@ -34,6 +34,26 @@ Two consequences bite immediately:
 
 ## Before you write code
 
+**Find or write the spec.** Warren is built spec-first: every feature has a
+`spec.md` under [plan/](plan/), and it is written and approved *before* the
+code. The spec is where a feature is made small enough to finish, and where the
+public API is agreed while changing it is still free.
+
+```
+plan/<milestone>/<nn>-<feature>/spec.md     # from plan/TEMPLATE.spec.md
+```
+
+Two rules carry the weight:
+
+- **The spec's §4 Public API is the contract under review.** Write the Go.
+  Reviewing prose and discovering the signatures at merge time is how a spec
+  becomes theatre.
+- **If the implementation diverges, correct the spec in the same pull request.**
+  A spec that no longer describes the code is worse than no spec.
+
+[plan/README.md](plan/README.md) has the index, the status vocabulary, and what
+is being built now.
+
 **Read [docs/architecture.md](docs/architecture.md).** Warren has a dependency
 rule, and violating it fails the build rather than producing a review comment.
 
