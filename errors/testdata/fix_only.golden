@@ -1,0 +1,3 @@
+order abc is already dispatched
+
+  fix: cancel the dispatch first: POST /orders/abc/cancel

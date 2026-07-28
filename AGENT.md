@@ -43,13 +43,14 @@ Checked by `make lint-modules`.
 
 ### 2. No driver type in a public signature
 
-`*dig.Container`, `*chi.Mux`, `*pgx.Conn`, `*kgo.Client` — none of these may
-appear in any Warren exported function, method, struct field, or error type.
-This is what makes every driver swappable.
+`*chi.Mux`, `*pgx.Conn`, `*kgo.Client` — none of these may appear in any Warren
+exported function, method, struct field, or error type. This is what makes every
+driver swappable.
 
-Only `warren/di` may import `go.uber.org/dig`
-([ADR-0001](docs/adr/0001-dependency-injection.md)). Enforced by `depguard` and
-by `make lint-modules`.
+**Warren writes its own DI container**, so no third-party DI library
+(`go.uber.org/dig`, `go.uber.org/fx`, `samber/do`) may be imported anywhere. See
+[docs/architecture.md §3](docs/architecture.md). Enforced by `depguard` and by
+`make lint-modules`.
 
 ### 3. The dependency rule
 
@@ -72,52 +73,47 @@ It breaks `go get` for users, silently. Use `make work` (generates a git-ignored
 
 ### 6. Go 1.26
 
-Warren tracks the current Go major ([ADR-0007](docs/adr/0007-go-version-policy.md)).
-No `toolchain` directive in any module.
+Warren tracks the current Go major release. No `toolchain` directive in any
+module, and no compatibility path to older releases.
 
 ---
 
 ## Spec-driven development — write the spec first
 
-**Warren is built spec-first. No feature is implemented before its `spec.md`
-exists and is approved.** This is a hard process rule, not a suggestion, and it
-applies to you exactly as it applies to a human contributor.
-
-Specs live in [plan/](plan/), one directory per feature:
-
-```
-plan/<milestone>/<nn>-<feature>/spec.md
-```
+**No feature is implemented before its spec exists and is approved.** This is a
+hard process rule, not a suggestion, and it applies to you exactly as it applies
+to a human contributor.
 
 The order is always:
 
-1. **Write the spec** from [plan/TEMPLATE.spec.md](plan/TEMPLATE.spec.md). Every
-   section is filled in; a section with nothing to say is written as "None."
-   rather than deleted, so that the claim is visible.
-2. **Write an ADR first if the spec is structural** — a new dependency in a
-   public API, a change to a port's shape, a module boundary, or overturning an
-   existing decision ([docs/adr/README.md](docs/adr/README.md)).
-3. **Get the spec approved.** Status moves `Draft` → `Approved`. Code starts
-   here, not before.
-4. **Implement to the spec's Definition of Done**, which includes tests, docs,
-   the skill if it is a CLI command, and a changelog fragment.
-5. **Mark it `Shipped`.**
+```
+docs/architecture.md → docs/roadmap.md → specs/<nn>-<feature>.md → code
+```
 
-Two rules that matter more than the ceremony:
+1. **Write the spec** for the feature you are about to build, in
+   `specs/<nn>-<feature>.md`. It states: the problem, goals, non-goals, the
+   **public API as Go**, behaviour, every error message, testing, and a
+   definition of done.
+2. **Get it approved.** Code starts here, not before.
+3. **Implement to the definition of done** — tests, doc comments, the skill if
+   it is a CLI command.
+4. **When the implementation diverges from the spec, correct the spec in the
+   same pull request.** A spec that no longer describes the code is worse than
+   no spec — it is a confident lie, and the next agent will believe it.
 
-- **The spec's §4 Public API is the contract under review.** Reviewing prose and
-  then discovering the actual signatures at merge time is how a spec becomes
-  theatre. Write the Go.
-- **When the implementation diverges from the spec, correct the spec in the same
-  pull request.** A spec that no longer describes the code is worse than no
-  spec — it is a confident lie, and the next agent will believe it.
+Two rules carry the weight:
 
-If you are asked to build something with no spec, **write the spec first and
-say so**. If a spec exists but is `Draft`, say that too rather than
-implementing against an unapproved contract.
+- **The spec's public API section is the contract under review.** Reviewing
+  prose and then discovering the actual signatures at merge time is how a spec
+  becomes theatre. Write the Go.
+- **Decisions are made by research and argument, not by building throwaway
+  code.** No spikes, no prototypes, no "let's try it and see". Read the
+  evidence, bring the options and a recommendation to the human, agree it, then
+  spec it and build it once.
 
-[plan/README.md](plan/README.md) holds the index, the status vocabulary, and the
-current milestone.
+If you are asked to build something with no spec, **write the spec first and say
+so**. If a spec exists but is not approved, say that too rather than
+implementing against an unagreed contract.
 
 ---
 
@@ -125,12 +121,11 @@ current milestone.
 
 | If you are about to… | First… |
 |---|---|
-| Build any feature | Find or write its `spec.md` in [plan/](plan/). See §"Spec-driven development" above. |
+| Build any feature | Write or find its spec. See §"Spec-driven development" above. |
 | Add a dependency | Read §"Adding a dependency" below. This has a hard process. |
-| Change a port's shape, a module boundary, or a layering rule | Write an ADR ([docs/adr/README.md](docs/adr/README.md)) |
-| Add a CLI command | Read [ADR-0008](docs/adr/0008-agent-integration.md) — a command needs a skill |
+| Change a port's shape, a module boundary, or a layering rule | Update [docs/architecture.md](docs/architecture.md) and get it agreed |
 | Touch anything structural | Read [docs/architecture.md](docs/architecture.md) |
-| Write a test | Read [docs/testing.md](docs/testing.md) |
+| Ask "what are we building next" | Read [docs/roadmap.md](docs/roadmap.md) |
 
 **Do not create a new module unless its first real code lands in the same
 change.** An empty module is a release obligation with no user.
@@ -144,15 +139,17 @@ and it is not optional:
 
 1. **Read the repository and the documentation.** Not the README summary — check
    whether it is archived, when it last shipped, what it pulls in transitively,
-   and whether its licence is Apache-2.0/MIT/BSD/ISC compatible.
-2. **Add a row to the audit table** in [docs/dependencies.md](docs/dependencies.md)
-   recording what you found, with the observation date.
-3. **Check placement.** Core: never. Driver module: only its own driver. Test-only:
-   test files only.
-4. **Wrap it** if it will be long-lived, so it can be swapped.
+   and whether its licence is Apache-2.0/MIT/BSD/ISC compatible. `gh api
+   repos/<owner>/<repo>` gives stars, `pushed_at`, `archived`, and open issues in
+   one call.
+2. **Record what you found** in the spec that adopts it, with the observation
+   date, and add it to the table in [docs/architecture.md §3](docs/architecture.md).
+3. **Check placement.** Core: never. Driver module: only its own driver.
+   Test-only: test files only.
+4. **Wrap it** so it can be swapped.
 
-**A package with no audit row does not go into a `go.mod`.** Star counts are not
-evidence. "It is popular" is not evidence.
+**A package with no written audit does not go into a `go.mod`.** Star counts are
+not evidence. "It is popular" is not evidence.
 
 Two live examples of why this matters, both found during the initial audit:
 `google/wire` is archived, and `git-chglog` is archived. Both are still widely
@@ -174,15 +171,15 @@ recommended in blog posts.
 - Interfaces are named for behaviour, not for `-er` reflexively: `Repository`,
   `Publisher`, `UnitOfWork`.
 - No stuttering: `broker.Publisher`, never `broker.BrokerPublisher`.
-- Exported identifiers read plainly. Per PRD §2.3, the project's metaphor is not
-  a tax on the API: `warren.Module`, not `den.NewBurrow()`.
+- Exported identifiers read plainly. The project's metaphor is not a tax on the
+  API: `warren.Module`, not `den.NewBurrow()`.
 
 ### Errors
 
 - Return `warren/errors` semantic errors (`NotFound`, `Conflict`, `Invalid`,
   `PermissionDenied`, `Internal`). Domain code knows nothing about HTTP 404.
 - Wrap with `%w` and add context, never with `%v`.
-- **Error messages tell the user how to fix it.** PRD §8 makes this a feature.
+- **Error messages tell the user how to fix it.** This is a feature, not polish.
   "provider not found" is a bug in the error message; it must name what was
   missing, who requested it, and a copy-pasteable fix.
 
@@ -200,8 +197,7 @@ recommended in blog posts.
 
 ## Commits
 
-Conventional Commits, **scope is the module path**
-([ADR-0005](docs/adr/0005-commits-and-changelog.md)):
+Conventional Commits, **scope is the module path**:
 
 ```
 feat(broker/kafka): drain in-flight messages before revoking partitions
@@ -210,14 +206,11 @@ docs(architecture): document the drain sequence
 ```
 
 - Imperative mood, no trailing period, ≤72 characters.
-- `feat`/`fix`/`perf` **require** a changelog fragment (`make changelog`).
-  Nothing else may have one. CI checks both directions.
 - Breaking: `!` after scope **and** a `BREAKING CHANGE:` footer stating the
   migration.
 - Every commit builds and passes its module's tests.
 
-**Do not commit unless the human asked you to.** Scope list and full rules are
-in [CONTRIBUTING.md](CONTRIBUTING.md).
+**Do not commit unless the human asked you to.**
 
 ---
 
@@ -243,7 +236,6 @@ make test             # unit tests, race, shuffled
 make lint             # golangci-lint across all modules
 make lint-modules     # the invariants above
 make fmt              # apply formatters
-make changelog        # add a changelog fragment
 make work             # go.work for cross-module edits (git-ignored)
 ```
 
@@ -263,28 +255,31 @@ Named specifically, because generic advice does not prevent them:
 3. **Writing a new file that duplicates what a generator already produces.** Run
    the generator, then read its output.
 4. **Hand-editing `module.go` after a generator already wired it.** Check first.
-5. **Adding a CLI command without its skill.** The command is not done
-   ([ADR-0008](docs/adr/0008-agent-integration.md)).
+5. **Adding a CLI command without its skill.** The command is not done until the
+   skill exists.
 6. **Assuming a package is healthy because it is well known.** Verify: `wire`
    and `git-chglog` are both archived.
 7. **Naming a type `SomethingWithSomething`.** See Naming above.
 8. **Marking work complete with an unverified claim.** Run the command and paste
    what it printed. "Should work" is not a result.
-9. **Writing code for a feature that has no approved spec.** Warren is
-   spec-driven; the spec is where a feature is made small enough to finish. Write
-   `plan/<milestone>/<nn>-<feature>/spec.md` first.
+9. **Writing code for a feature that has no approved spec.** The spec is where a
+   feature is made small enough to finish. Write it first.
 10. **Letting the spec and the code drift apart.** If the implementation had to
     differ, the spec is corrected in the same pull request — not later.
+11. **Proposing a spike or a prototype.** Research it, put the options to the
+    human, and agree the decision. Then build it once.
 
 ---
 
 ## When you are unsure
 
-- **The decision is probably recorded.** Check [docs/adr/](docs/adr/) before
-  re-deriving it, and before re-opening it.
-- **If an ADR is wrong, say so and propose superseding it.** Do not quietly work
-  around it — a worked-around rule is how the layering decayed in the first
-  place, which is the problem Warren exists to solve.
+- **The decision is probably recorded.** Check [docs/architecture.md](docs/architecture.md)
+  and the feature's spec before re-deriving it, and before re-opening it.
+- **If a recorded decision is wrong, say so and propose changing it.** Do not
+  quietly work around it — a worked-around rule is how the layering decayed in
+  the first place, which is the problem Warren exists to solve.
 - **If a rule here blocks a genuinely correct change**, raise it rather than
   disabling the check. `//nolint` without a reviewed reason is itself a lint
   failure.
+- **Ask rather than guess on anything structural.** Module boundaries, port
+  shapes, and public API are the human's call, not yours to discover.

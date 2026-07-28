@@ -1,0 +1,6 @@
+warren.Run: boot failed: postgres.Open: dial tcp 127.0.0.1:5432: refused
+
+  phase  start
+  dsn    postgres://localhost:5432/shop
+
+  fix: start the database: docker compose up -d postgres

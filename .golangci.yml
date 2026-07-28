@@ -1,9 +1,9 @@
-# Warren quality gate. See docs/adr/0006-lint-and-format.md.
+# Warren quality gate.
 #
 # This file is the single source of truth for formatting and static analysis.
 # `make lint` runs exactly what CI runs; there is no second tool and no second
 # config. It is placed at the repository root so that every module in the
-# multi-module workspace (ADR-0003) resolves the same rules.
+# multi-module workspace resolves the same rules.
 #
 # Principle: enable by default, disable with a stated reason. Every entry under
 # `disable` carries a comment explaining itself. A disable without a reason is a
@@ -28,8 +28,8 @@ linters:
       # Warren is a ports-and-adapters framework: returning an interface from a
       # constructor is the point, not an accident.
     - err113
-      # Mandates sentinel errors everywhere. Warren's error model (PRD §4.5) is
-      # semantic codes on a single error type; this linter fights it.
+      # Mandates sentinel errors everywhere. Warren's error model is semantic
+      # codes on a single error type; this linter fights it.
     - wrapcheck
       # Demands wrapping at every external boundary. warren/errors owns wrapping
       # policy, and this produces noise wherever it is correctly delegated.
@@ -79,26 +79,27 @@ linters:
             - pkg: math/rand$
               desc: "Use math/rand/v2."
             - pkg: github.com/spf13/viper
-              desc: "Rejected in docs/dependencies.md §3.5. warren/config uses koanf."
+              desc: "Rejected in docs/architecture.md §3. warren/config uses koanf."
 
-        # ADR-0001 rule 1: warren/di is the only package permitted to import dig.
-        # No dig type may reach a Warren public signature. This is an
-        # architecture rule that happens to be checkable today, so it runs today
-        # rather than waiting for `warren lint arch` (ADR-0004).
-        dig-containment:
-          files:
-            - "!**/di/**"
-          deny:
+            # warren/di is written in-house and lives in the core module, so
+            # no third-party DI container may be imported anywhere. See
+            # docs/architecture.md §3. This is an architecture rule that happens to be
+            # checkable today, so it runs today rather than waiting for
+            # `warren lint arch`.
             - pkg: go.uber.org/dig
-              desc: "Only warren/di may import dig. See docs/adr/0001-dependency-injection.md."
+              desc: "Warren writes its own container. See docs/architecture.md §3."
+            - pkg: go.uber.org/fx
+              desc: "Warren owns lifecycle. See docs/architecture.md §3."
+            - pkg: github.com/samber/do
+              desc: "Warren writes its own container. See docs/architecture.md §3."
 
-    # ADR-0003: replace directives are never committed. They break `go get` for
+    # Replace directives are never committed. They break `go get` for
     # users silently. Cross-module development uses go.work, which is ignored.
     gomoddirectives:
       replace-local: false
       retract-allow-no-explanation: false
 
-    # PRD §4.5: every transport must map every semantic error code. A new code
+    # Every transport must map every semantic error code. A new code
     # that an adapter forgets to handle has to fail the build, not fall through
     # to a 500.
     exhaustive:
@@ -116,6 +117,19 @@ linters:
       settings:
         shadow:
           strict: true
+        # warren/errors constructors take a printf-style message, so vet must
+        # know they are printf wrappers. Without this, NotFound("id %s") with no
+        # argument ships a message containing "%!s(MISSING)", and
+        # NotFound("...: %w", err) silently produces "%!w" instead of wrapping —
+        # the one mistake AGENT.md § Errors names explicitly.
+        printf:
+          funcs:
+            - github.com/MerseniBilel/warren/errors.NotFound
+            - github.com/MerseniBilel/warren/errors.Conflict
+            - github.com/MerseniBilel/warren/errors.Invalid
+            - github.com/MerseniBilel/warren/errors.PermissionDenied
+            - github.com/MerseniBilel/warren/errors.Internal
+            - (*github.com/MerseniBilel/warren/errors.Error).Fix
 
     revive:
       rules:
@@ -149,7 +163,7 @@ linters:
       threshold: 150
 
     nolintlint:
-      # ADR-0006: a bare //nolint is itself a failure.
+      # A bare //nolint is itself a failure.
       require-explanation: true
       require-specific: true
       allow-unused: false
@@ -179,7 +193,7 @@ linters:
       - common-false-positives
 
     rules:
-      # ADR-0006: table tests repeat themselves by nature, and enforcing DRY in
+      # Table tests repeat themselves by nature, and enforcing DRY in
       # tests makes them harder to read — the opposite of the point.
       - path: _test\.go
         linters:
@@ -190,6 +204,10 @@ linters:
           - cyclop
           - maintidx
           - containedctx
+          - forbidigo
+            # A Go Example is verified by comparing what it prints to stdout
+            # against its // Output: comment. Printing is the mechanism, so the
+            # library-wide ban on fmt.Print cannot apply in tests.
 
       # Test helpers legitimately take *testing.T and panic-adjacent paths.
       - path: (^|/)testing/

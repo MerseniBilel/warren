@@ -19,14 +19,14 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
-  # ADR-0007: Warren tracks the current Go major release.
+  # Warren tracks the current Go major release.
   GO_VERSION: "1.26"
   GOLANGCI_VERSION: "v2.12.2"
   GOTOOLCHAIN: local # Fail loudly on a version mismatch instead of downloading one.
 
 jobs:
   # Enumerate modules once so every downstream job fans out over the real set
-  # rather than a hand-maintained list that drifts (ADR-0003).
+  # rather than a hand-maintained list that drifts.
   discover:
     name: Discover modules
     runs-on: ubuntu-latest
@@ -42,7 +42,7 @@ jobs:
           echo "Discovered: $modules"
 
   module-rules:
-    name: Module rules (ADR-0001/0003/0007)
+    name: Module rules
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -147,7 +147,7 @@ jobs:
           if-no-files-found: ignore
 
   # Go's next release is tested but never blocks a merge. This is what makes
-  # ADR-0007's "raise the floor within one minor release" achievable rather than
+  # "raise the floor within one minor release" achievable rather than
   # aspirational -- breakage shows up before the release, not after.
   test-next-go:
     name: Test on next Go (advisory)
@@ -196,21 +196,6 @@ jobs:
             (cd "$m" && govulncheck ./...)
           done
 
-  commits:
-    name: Commit and changelog conventions
-    if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-        with:
-          fetch-depth: 0
-      - name: Conventional Commits (ADR-0005)
-        run: ./scripts/check-commits.sh "origin/${{ github.base_ref }}"
-      - name: Changelog fragment present (ADR-0005)
-        run: ./scripts/check-changelog.sh "origin/${{ github.base_ref }}"
-
-  # A single required status check, so branch protection does not need updating
-  # every time the module matrix changes.
   ci-ok:
     name: CI
     if: always()
