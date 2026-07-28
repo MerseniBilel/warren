@@ -3,7 +3,7 @@
 # `make ci` runs exactly what CI runs. If it passes here it passes there; if it
 # does not, that is a bug in this file, not a fact of life.
 #
-# This repository is multi-module (ADR-0003), so most targets iterate over every
+# This repository is multi-module, so most targets iterate over every
 # go.mod rather than relying on `./...`, which does not cross module boundaries.
 
 SHELL := /usr/bin/env bash
@@ -22,7 +22,7 @@ GOBIN      := $(shell $(GO) env GOPATH)/bin
 COVERPROF  := coverage.txt
 
 # Integration tests are behind a build tag so that `make test` stays fast and
-# needs no Docker. See docs/testing.md.
+# needs no Docker.
 INTEGRATION_TAG := integration
 
 .PHONY: help
@@ -48,7 +48,7 @@ tools: ## Install pinned developer tools
 work: ## Generate go.work for cross-module development (git-ignored)
 	@rm -f go.work go.work.sum
 	$(GO) work init $(MODULES)
-	@echo "go.work created for $(words $(MODULES)) module(s). It is git-ignored (ADR-0003)."
+	@echo "go.work created for $(words $(MODULES)) module(s). It is git-ignored."
 
 # ---------------------------------------------------------------------------
 # Quality gates
@@ -71,7 +71,7 @@ lint-config: ## Verify .golangci.yml is valid and has not rotted
 	     python3 scripts/validate-golangci-config.py; fi
 
 .PHONY: lint-modules
-lint-modules: ## Enforce the module invariants from ADR-0001/0003/0007
+lint-modules: ## Enforce the module invariants from docs/architecture.md
 	@./scripts/check-module-rules.sh
 
 .PHONY: vet
@@ -96,7 +96,7 @@ tidy-check: ## Fail if any go.mod or go.sum is not tidy
 	fi
 
 # ---------------------------------------------------------------------------
-# Tests — see docs/testing.md for what belongs in each tier
+# Tests
 # ---------------------------------------------------------------------------
 
 .PHONY: test
@@ -133,48 +133,6 @@ bench: ## Run benchmarks
 golden-update: ## Regenerate golden files, then review the diff before committing
 	@for m in $(MODULES); do (cd $$m && $(GO) test ./... -update); done
 	@echo "Golden files regenerated. Read the diff — an unexpected change is a bug, not noise."
-
-# ---------------------------------------------------------------------------
-# Agent integration — see ADR-0008
-# ---------------------------------------------------------------------------
-
-.PHONY: skills-gen
-skills-gen: ## Regenerate the mechanical sections of every skill from Cobra metadata
-	@if [ ! -d cli ]; then \
-		echo "cli/ does not exist yet — nothing to generate. This target becomes"; \
-		echo "live with the first CLI command (see docs/agent-integration.md)."; \
-	else \
-		$(GO) run ./cli/internal/skillgen -out skills; \
-	fi
-
-.PHONY: skills-check
-skills-check: ## Fail if any skill has drifted from its command definition
-	@if [ ! -d cli ]; then \
-		echo "cli/ does not exist yet — skipping skill drift check."; \
-	else \
-		$(MAKE) --no-print-directory skills-gen; \
-		if ! git diff --quiet -- skills/; then \
-			echo "Skills are out of date with their commands (ADR-0008)."; \
-			echo "A flag was added or changed without updating its skill."; \
-			echo "Run 'make skills-gen' and commit the result."; \
-			git diff -- skills/; \
-			exit 1; \
-		fi; \
-		echo "ok: skills match their command definitions"; \
-	fi
-
-# ---------------------------------------------------------------------------
-# Changelog and release — see ADR-0005
-# ---------------------------------------------------------------------------
-
-.PHONY: changelog
-changelog: ## Add a changelog fragment for the current change
-	@command -v changie >/dev/null || { echo "changie missing; run 'make tools'"; exit 1; }
-	@changie new
-
-.PHONY: changelog-check
-changelog-check: ## Fail if a feat/fix/perf commit has no changelog fragment
-	@./scripts/check-changelog.sh
 
 # ---------------------------------------------------------------------------
 # Aggregates
