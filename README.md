@@ -105,8 +105,10 @@ Three rules, in order:
 1. **The architecture is agreed first.** [docs/architecture.md](docs/architecture.md) is
    the map, and it changes deliberately rather than by drift.
 2. **Every feature gets a spec before it gets code** — the problem, the public
-   API as Go, every error message, and a definition of done. If the code ends up
-   differing, the spec is corrected in the same pull request.
+   API as Go, every error message, and a definition of done. It lives as
+   `SPEC.md` in the package it describes, so that code and spec move in one
+   diff. If the code ends up differing, the spec is corrected in the same pull
+   request. [`errors/SPEC.md`](errors/SPEC.md) is the worked example.
 3. **Decisions are researched and agreed, not prototyped.** No spikes, no
    throwaway branches. Read the evidence, weigh the options, decide, build once.
 
@@ -117,6 +119,7 @@ Three rules, in order:
 | [docs/architecture.md](docs/architecture.md) | Module map, what we write vs. what we wrap, the dependency rule, lifecycle, errors |
 | [docs/assets/](docs/assets/) | `architecture.puml`, the source for both diagrams, and the generated [module map](docs/assets/architecture.png) and [lifecycle](docs/assets/lifecycle.png) |
 | [docs/roadmap.md](docs/roadmap.md) | v0.1 → v1.0, as checkboxes, with v0.1's exit criteria |
+| `<package>/SPEC.md` | One per package: the problem, the public API as Go, behaviour, and a definition of done — e.g. [errors/SPEC.md](errors/SPEC.md) |
 | [AGENT.md](AGENT.md) | The rules — invariants, conventions, process. Written for AI agents, accurate for humans |
 | [CLAUDE.md](CLAUDE.md) | Claude Code specifics; points at AGENT.md for everything else |
 | [Makefile](Makefile) | `make ci` runs every gate CI runs |

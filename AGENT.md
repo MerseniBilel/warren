@@ -87,13 +87,22 @@ to a human contributor.
 The order is always:
 
 ```
-docs/architecture.md → docs/roadmap.md → specs/<nn>-<feature>.md → code
+docs/architecture.md → docs/roadmap.md → <package>/SPEC.md → code
 ```
 
-1. **Write the spec** for the feature you are about to build, in
-   `specs/<nn>-<feature>.md`. It states: the problem, goals, non-goals, the
-   **public API as Go**, behaviour, every error message, testing, and a
-   definition of done.
+1. **Write the spec** for the feature you are about to build, in `SPEC.md`
+   **inside the package directory it describes** — `errors/SPEC.md`,
+   `di/SPEC.md`, `transport/http/SPEC.md`. It states: the problem, goals,
+   non-goals, the **public API as Go**, behaviour, every error message,
+   testing, and a definition of done.
+
+   The spec lives with its code, not in a central `specs/` tree, for one
+   reason: a change to the code and the correction to its spec then appear in
+   the same directory and the same diff. A spec a reviewer has to go looking for
+   is a spec that silently stops describing the code. Build order lives in
+   [docs/roadmap.md](docs/roadmap.md), so the filename carries no number.
+
+   [`errors/SPEC.md`](errors/SPEC.md) is the worked example.
 2. **Get it approved.** Code starts here, not before.
 3. **Implement to the definition of done** — tests, doc comments, the skill if
    it is a CLI command.
@@ -121,7 +130,7 @@ implementing against an unagreed contract.
 
 | If you are about to… | First… |
 |---|---|
-| Build any feature | Write or find its spec. See §"Spec-driven development" above. |
+| Build any feature | Write or find `<package>/SPEC.md`. See §"Spec-driven development" above. |
 | Add a dependency | Read §"Adding a dependency" below. This has a hard process. |
 | Change a port's shape, a module boundary, or a layering rule | Update [docs/architecture.md](docs/architecture.md) and get it agreed |
 | Touch anything structural | Read [docs/architecture.md](docs/architecture.md) |
@@ -263,7 +272,7 @@ Named specifically, because generic advice does not prevent them:
 8. **Marking work complete with an unverified claim.** Run the command and paste
    what it printed. "Should work" is not a result.
 9. **Writing code for a feature that has no approved spec.** The spec is where a
-   feature is made small enough to finish. Write it first.
+   feature is made small enough to finish. Write `<package>/SPEC.md` first.
 10. **Letting the spec and the code drift apart.** If the implementation had to
     differ, the spec is corrected in the same pull request — not later.
 11. **Proposing a spike or a prototype.** Research it, put the options to the

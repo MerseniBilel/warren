@@ -36,10 +36,14 @@ The five invariants that fail CI, in short — full versions in AGENT.md:
 
 ## Working here
 
-**Write the spec before the feature.** Every feature gets
-`specs/<nn>-<feature>.md`, written and approved *before* any code, and corrected
-in the same pull request whenever the implementation diverges. If you are asked
-to build something that has no spec, write the spec first and say so. See
+**Write the spec before the feature.** Every feature gets a `SPEC.md` **in the
+package directory it describes** — `errors/SPEC.md`, `di/SPEC.md` — written and
+approved *before* any code, and corrected in the same pull request whenever the
+implementation diverges. The spec sits with its code so that both move in one
+diff; there is no central `specs/` tree, and no number in the filename, because
+build order lives in [docs/roadmap.md](docs/roadmap.md). If you are asked to
+build something that has no spec, write the spec first and say so.
+[`errors/SPEC.md`](errors/SPEC.md) is the worked example. See
 [AGENT.md § Spec-driven development](AGENT.md).
 
 **Do not propose a spike or a prototype.** Decisions here are made by research
