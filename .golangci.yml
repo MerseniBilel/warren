@@ -70,8 +70,16 @@ linters:
         global:
           files: ["$all"]
           deny:
+            # Warren logs through log/slog and adds context plumbing over it,
+            # never a logging framework. See docs/architecture.md §3.
             - pkg: github.com/sirupsen/logrus
               desc: "Warren logs through log/slog. See warren/log."
+            - pkg: go.uber.org/zap
+              desc: "Warren logs through log/slog. See warren/log."
+            - pkg: github.com/rs/zerolog
+              desc: "Warren logs through log/slog. See warren/log."
+            - pkg: log$
+              desc: "The old standard logger has no levels and no structure. Use log/slog through warren/log."
             - pkg: github.com/pkg/errors
               desc: "Use warren/errors, which wraps stdlib errors with semantic codes."
             - pkg: io/ioutil
@@ -107,6 +115,12 @@ linters:
       check:
         - switch
         - map
+
+    # A record logged without the context loses the request-scoped attributes
+    # warren/log exists to carry, so the ...Context call form is required rather
+    # than merely recommended. See log/SPEC.md §8.
+    sloglint:
+      context: all
 
     errcheck:
       check-type-assertions: true
