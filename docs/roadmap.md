@@ -27,7 +27,8 @@ a rewrite of every signature that touches one.
 
 - [x] **`errors`** — one type, semantic codes, `Wrapping`/`Field`/`Op`/`Fix`
       builders · [spec](../errors/SPEC.md)
-- [ ] **`log`** — context plumbing over `log/slog`, no wrapper type
+- [x] **`log`** — context plumbing over `log/slog`, no wrapper type ·
+      [spec](../log/SPEC.md)
 - [ ] **`di`** — `Provide[T]` · `Resolve[T]` · `Group[T]` · `Scope` · `Build` · `Graph`
 - [ ] **`lifecycle`** — ordered start, reverse stop, drain, grace period
 - [ ] **`config`** — loader port in core, koanf implementation in a submodule

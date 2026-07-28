@@ -329,8 +329,8 @@ Unit tests only — no Docker, no network, no sleeps.
       `Fields`, `Wrapping`, and `Fix`
 - [x] `docs/roadmap.md` v0.1 item 1 ticked
 - [x] This spec corrected wherever the code diverged — §5.2, §7, and §9
-- [x] `make ci` green on macOS (exit 0, golangci-lint v2.12.2, 0 issues).
-      Linux and Windows are CI's to confirm
+- [x] `make ci` green on macOS (exit 0, golangci-lint v2.12.2, 0 issues), and
+      on ubuntu-latest, windows-latest and macos-latest in CI
 
 ## 11. Decisions taken
 
