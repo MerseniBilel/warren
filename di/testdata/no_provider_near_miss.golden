@@ -1,0 +1,7 @@
+di.Build: no provider for di_test.dsn
+
+  requested by  internal/modules/orders/module.go:14
+  chain         *di_test.byValue → di_test.dsn
+  provided      *di_test.dsn, at internal/platform/module.go:9
+
+  fix: depend on *di_test.dsn, or register di_test.dsn with di.Provide[di_test.dsn](c, Newdsn)

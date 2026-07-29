@@ -1,0 +1,5 @@
+di.Build: constructing *sql.DB failed: dial tcp 127.0.0.1:5432: connection refused
+
+  constructor  warren/di/error_test.go:NN
+
+  fix: read the cause above: it is the constructor's own failure, not a wiring mistake

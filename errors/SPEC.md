@@ -204,7 +204,7 @@ worse than having no golden test, because it teaches everyone to re-run CI.
 `Op` accumulates outward. A `di` failure surfacing through boot reads:
 
 ```
-warren.Run: di.Build: di.Resolve: no provider for *sql.DB
+warren.Run: di.Build: no provider for *sql.DB
 ```
 
 This is the navigational value a stack trace would give, at one string per
@@ -226,12 +226,12 @@ structured logging, so that a single-line log entry stays one line.
 `Detail` renders:
 
 ```
-warren.Run: di.Resolve: no provider for *sql.DB
+warren.Run: di.Build: no provider for *sql.DB
 
   requested by  internal/modules/orders/module.go:14
-  chain         *OrdersHandler → *OrderRepository → *sql.DB
+  chain         *orders.Handler → *orders.Repository → *sql.DB
 
-  fix: add warren.Provide(NewDB) to internal/platform/module.go
+  fix: add di.Provide[*sql.DB](c, NewDB) to internal/modules/orders/module.go
 ```
 
 Exact spacing is fixed by a golden file, because this is the text the v0.1 exit

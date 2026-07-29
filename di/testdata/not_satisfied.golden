@@ -1,0 +1,6 @@
+di.Validate: func(*sql.DB) *orders.Repository does not provide orders.Port
+
+  registered  internal/modules/orders/module.go:14
+  missing     Save(context.Context, string) error
+
+  fix: implement Save on *orders.Repository, or register the concrete type

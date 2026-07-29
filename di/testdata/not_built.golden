@@ -1,0 +1,3 @@
+di.Resolve: the container is not built
+
+  fix: call Build before resolving. warren.Run does this for you — a service should not need to

@@ -1,0 +1,3 @@
+di.Group: *sql.DB is provided singly, not contributed to a group
+
+  fix: use di.Resolve[*sql.DB](c, &target)

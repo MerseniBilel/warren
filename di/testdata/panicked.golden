@@ -1,0 +1,5 @@
+di.Build: the constructor for *sql.DB panicked: no dsn configured
+
+  constructor  warren/di/error_test.go:NN
+
+  fix: this is a bug in the constructor, not in the wiring

@@ -1,0 +1,6 @@
+di.Validate: string is both provided and contributed to a group
+
+  provided     internal/platform/module.go:9
+  contributed  internal/modules/orders/module.go:14
+
+  fix: a type is resolved by di.Resolve or by di.Group, never both — pick one

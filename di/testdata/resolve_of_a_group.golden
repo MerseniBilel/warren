@@ -1,0 +1,3 @@
+di.Resolve: string is contributed to a group, not provided singly
+
+  fix: use di.Group[string](c, &target)

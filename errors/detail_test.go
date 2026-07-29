@@ -29,12 +29,14 @@ func TestDetailGolden(t *testing.T) {
 	tests := map[string]error{
 		// The message docs/roadmap.md requires: the resolution chain, the
 		// requesting file, and a copy-pasteable fix.
-		"di_missing_provider": errors.NotFound("no provider for *sql.DB").
-			Op("di.Resolve").
+		// Kept identical to what warren/di actually emits, wrapped in the op
+		// warren.Run will add: see di/SPEC.md §6.1.
+		"di_missing_provider": errors.Invalid("no provider for *sql.DB").
+			Op("di.Build").
 			Op("warren.Run").
 			Field("requested by", "internal/modules/orders/module.go:14").
-			Field("chain", "*OrdersHandler → *OrderRepository → *sql.DB").
-			Fix("add warren.Provide(NewDB) to internal/platform/module.go"),
+			Field("chain", "*orders.Handler → *orders.Repository → *sql.DB").
+			Fix("add di.Provide[*sql.DB](c, NewDB) to internal/modules/orders/module.go"),
 
 		"message_only": errors.Internal("query failed"),
 

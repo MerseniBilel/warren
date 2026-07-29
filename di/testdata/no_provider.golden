@@ -1,4 +1,4 @@
-warren.Run: di.Build: no provider for *sql.DB
+di.Build: no provider for *sql.DB
 
   requested by  internal/modules/orders/module.go:14
   chain         *orders.Handler → *orders.Repository → *sql.DB

@@ -29,7 +29,11 @@ a rewrite of every signature that touches one.
       builders · [spec](../errors/SPEC.md)
 - [x] **`log`** — context plumbing over `log/slog`, no wrapper type ·
       [spec](../log/SPEC.md)
-- [ ] **`di`** — `Provide[T]` · `Resolve[T]` · `Group[T]` · `Scope` · `Build` · `Graph`
+- [x] **`di`** — `Provide[T]` · `Supply[T]` · `Contribute[T]` · `Resolve[T]` ·
+      `Group[T]` · `Validate` · `Build` · `Graph` · [spec](../di/SPEC.md).
+      `Scope` moved to v0.2 — see [di/SPEC.md §11.2](../di/SPEC.md): its only real
+      consumer is transaction propagation, and designing it before that is decided
+      is designing against a guess
 - [ ] **`lifecycle`** — ordered start, reverse stop, drain, grace period
 - [ ] **`config`** — loader port in core, koanf implementation in a submodule
 - [ ] **`app`** — `Handler[Req, Res]`, `Middleware`, `Chain`, logging/recovery/timeout
@@ -60,6 +64,8 @@ a rewrite of every signature that touches one.
 - [ ] Domain primitives — `Entity`, `ValueObject`, `AggregateRoot`, `Event`, `Specification[T]`
 - [ ] In-process event bus — the default a broker later replaces without the handler changing
 - [ ] `Repository[T, ID]` and `UnitOfWork` ports, with their contract suites
+- [ ] `di.Scope` — request-scoped resolution, decided **with** transaction
+      propagation rather than before it (deferred from v0.1; `di/SPEC.md §11.2`)
 - [ ] Postgres driver — `pgx`, transaction propagation, the outbox table
 - [ ] Migrations — `goose` as a library, `warren g migration`
 - [ ] Validation, called by transport adapters before the handler
