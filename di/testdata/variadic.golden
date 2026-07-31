@@ -1,6 +1,0 @@
-di.Validate: the constructor for *di_test.router must not be variadic
-
-  registered  internal/platform/module.go:9
-  signature   func(...string) *di_test.router
-
-  fix: take a slice and resolve it with di.Group, or contribute the members with di.Contribute

@@ -1,6 +1,0 @@
-di.Validate: the constructor for *orders.Repository must return (*orders.Repository) or (*orders.Repository, error)
-
-  registered  internal/modules/orders/module.go:14
-  signature   func(*sql.DB) (*orders.Repository, bool)
-
-  fix: return an error as the second value, or nothing as the second value

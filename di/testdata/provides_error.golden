@@ -1,5 +1,0 @@
-di.Validate: error cannot be provided
-
-  registered  internal/modules/orders/module.go:14
-
-  fix: a constructor's error is its second return value, not the type it provides

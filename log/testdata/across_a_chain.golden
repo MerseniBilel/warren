@@ -1,1 +1,0 @@
-{"level":"ERROR","msg":"request failed","error":{"message":"warren.Run: boot failed: postgres.Open: refused","code":"Internal","ops":["warren.Run","postgres.Open"],"fix":"start the database: docker compose up -d postgres","phase":"start","port":5432}}

@@ -1,6 +1,0 @@
-lifecycle.Stop: the grace period expired with 3 hooks unfinished
-
-  unfinished  http.server, kafka.consumer, postgres.pool
-  stopped     0 of 3 hooks
-
-  fix: raise the shutdown grace period, or find what is not draining — a hook that never returns is usually waiting on a connection nobody closed

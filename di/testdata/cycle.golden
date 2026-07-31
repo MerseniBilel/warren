@@ -1,7 +1,0 @@
-di.Validate: dependency cycle through *di_test.nodeA
-
-  *di_test.nodeA  di_test.newNodeA (warren/di/di_test.go:NN)
-  *di_test.nodeB  di_test.newNodeB (warren/di/di_test.go:NN)
-  *di_test.nodeA  di_test.newNodeA (warren/di/di_test.go:NN)
-
-  fix: depend on an interface declared in domain/ and provide it from infrastructure/, or split *di_test.nodeA

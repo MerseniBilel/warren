@@ -1,1 +1,0 @@
-{"level":"ERROR","msg":"request failed","error":{"message":"warren.Run: di.Resolve: no provider for *sql.DB","code":"NotFound","ops":["warren.Run","di.Resolve"],"fix":"add warren.Provide(NewDB) to internal/platform/module.go","requested_by":"internal/modules/orders/module.go:14","attempt":2}}

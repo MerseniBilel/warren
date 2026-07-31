@@ -1,7 +1,0 @@
-lifecycle.Stop: stopping kafka.consumer failed: pool is already closed
-
-  hook        kafka.consumer
-  registered  warren/lifecycle/error_test.go:NN
-  stopped     1 of 3 hooks, continuing
-
-  fix: read the cause above. Stop continues through a failure by design: one component refusing to close must not strand the rest open

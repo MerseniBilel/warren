@@ -1,5 +1,0 @@
-lifecycle.Start: already started
-
-  state  Ready
-
-  fix: warren.Run starts the lifecycle once; a service should not call Start itself

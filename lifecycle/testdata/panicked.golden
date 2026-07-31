@@ -1,7 +1,0 @@
-lifecycle.Start: the hook kafka.consumer panicked: runtime error: invalid memory address or nil pointer dereference
-
-  hook        kafka.consumer
-  registered  warren/lifecycle/error_test.go:NN
-  started     1 of 2 hooks, rolled back
-
-  fix: this is a bug in the hook, not in the lifecycle

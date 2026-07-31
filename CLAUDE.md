@@ -1,36 +1,47 @@
 # CLAUDE.md
 
 **Read [AGENT.md](AGENT.md) first — it is the canonical instruction file for
-this repository.** It holds the invariants, code conventions, commit rules, and
-the dependency-adoption process, and it applies in full here. This file adds
-only what is specific to Claude Code.
+this repository**, and it applies here in full: the invariants, the modes, the
+two orderings, the spec process, the code conventions, and the commit rules.
+This file adds only what is specific to Claude Code.
 
 ---
 
 ## Quick orientation
 
-Warren is a DDD-first framework and CLI for Go. Multi-module repository, Go 1.26,
-Apache-2.0, module path `github.com/MerseniBilel/warren`.
+Warren is a DDD-first framework and CLI for Go. Multi-module repository,
+Go 1.26, Apache-2.0, module path `github.com/MerseniBilel/warren`.
 
-Nothing is implemented yet. The repository holds the product definition, the
-architecture, the roadmap, and the quality gates.
+**The repository was reset in July 2026.** Everything except the licence and
+`warren.md` was deleted — the previous implementation had drifted from the
+design. What is on disk is `warren.md`, `AGENT.md`, this file, `LICENSE`, and
+`NOTICE`. There is **no `go.mod`, no Makefile, no CI, and no linter config**;
+they get rebuilt alongside the first packages.
 
-| Question | File |
+Practically, that means: do not run `make ci` and report a result, do not say
+"lint passes," and do not assume a check exists. Read the rule in AGENT.md,
+follow it by hand, and say which parts you could verify and which you could not.
+
+| Question | Where |
 |---|---|
-| What are we building, and how does it fit together? | [docs/architecture.md](docs/architecture.md) |
-| What does the module map look like? | [docs/assets/architecture.png](docs/assets/architecture.png) · source: [docs/assets/architecture.puml](docs/assets/architecture.puml) |
-| What happens at boot and at shutdown? | [docs/assets/lifecycle.png](docs/assets/lifecycle.png) |
-| What is being built next? | [docs/roadmap.md](docs/roadmap.md) |
+| What are we building, package by package? | [warren.md](warren.md) |
+| How do the four rings fit together? | [warren.md §1](warren.md) |
+| What does each kernel package expose? | [warren.md §2](warren.md) |
+| Which library did we pick, and in what mode? | [warren.md §9](warren.md) |
 | What are the rules? | [AGENT.md](AGENT.md) |
 
-The five invariants that fail CI, in short — full versions in AGENT.md:
+The invariants that fail CI, in short — full versions in AGENT.md:
 
-1. Core module: **standard library only**, permanently.
-2. No driver type (`chi`, `pgx`, `kgo`) in a public signature, and **no
-   third-party DI container anywhere** — Warren writes its own.
-3. `domain` imports nothing from the other layers.
-4. Handlers import no transport package.
-5. No committed `replace` directive.
+1. Core module: **standard library + `go.uber.org/dig`**, nothing else, ever.
+2. **`dig` is imported by `warren/di` alone**, and no dig type — nor any dig
+   error message — reaches a user.
+3. No driver type (`chi`, `pgx`, `kgo`, `grpc`) in a public signature.
+4. Adapters never import each other; contract packages hold zero
+   implementations.
+5. Handlers import no transport package.
+6. No reflection on the request path — the container is not consulted per
+   request.
+7. No committed `replace` directive.
 
 ---
 
@@ -39,12 +50,14 @@ The five invariants that fail CI, in short — full versions in AGENT.md:
 **Write the spec before the feature.** Every feature gets a `SPEC.md` **in the
 package directory it describes** — `errors/SPEC.md`, `di/SPEC.md` — written and
 approved *before* any code, and corrected in the same pull request whenever the
-implementation diverges. The spec sits with its code so that both move in one
-diff; there is no central `specs/` tree, and no number in the filename, because
-build order lives in [docs/roadmap.md](docs/roadmap.md). If you are asked to
-build something that has no spec, write the spec first and say so.
-[`errors/SPEC.md`](errors/SPEC.md) is the worked example. See
-[AGENT.md § Spec-driven development](AGENT.md).
+implementation diverges. The spec sits with its code so both move in one diff.
+If you are asked to build something that has no spec, write the spec first and
+say so. See [AGENT.md § Spec-driven development](AGENT.md).
+
+**`warren.md` already fixes the public API for most packages.** Start a spec
+from that surface rather than inventing one. If the spec needs to contradict the
+manifest, amend `warren.md` in the same change and flag it — that is an
+architecture decision, not an implementation detail.
 
 **Do not propose a spike or a prototype.** Decisions here are made by research
 and argument: read the evidence, put the options and a recommendation to the
@@ -55,32 +68,24 @@ decides things.
 public API are decisions to be taken together, not discovered by writing code
 and seeing what happens.
 
-**Use the make targets, not raw `go` commands.** This is a multi-module repo, so
-`go test ./...` silently tests one module and reports success. `make test`
-iterates all of them. Same for `go vet` (`make vet`) and lint (`make lint`).
+**Multi-module means `go test ./...` lies.** From the root it tests one module
+and exits zero. Until the Makefile exists, iterate the modules explicitly and
+state which ones you ran.
 
-**`make ci` is the gate.** If it passes locally it passes in CI. When it does
-not, that is a bug in the Makefile worth reporting.
-
-**Verify before claiming.** Run the command and quote what it printed. If
-`golangci-lint` is not installed, say so rather than asserting the code lints
-cleanly — `make lint-config` falls back to schema validation and tells you which
-path it took.
+**Verify before claiming.** Run the command and quote what it printed. "Should
+work" is not a result, and neither is a tool you did not actually invoke.
 
 ---
 
 ## Diagrams
 
-`docs/assets/architecture.puml` holds both diagrams and is the source of truth.
-Regenerate after any change to it, and commit the images:
+The architecture diagrams live as ASCII inside [warren.md](warren.md) — the four
+rings (§1.1), scoped containers (§1.2), the boot sequence (§1.3), the transport
+spine (§1.4), and the messaging runtime (§1.5). Edit them there.
 
-```bash
-java -jar ~/.local/bin/plantuml.jar -tpng -o . docs/assets/architecture.puml
-java -jar ~/.local/bin/plantuml.jar -tsvg -o . docs/assets/architecture.puml
-```
-
-The `plantuml` wrapper on this machine fails with an unbound-variable error when
-given no extra arguments; call the jar directly, as above.
+There is no PlantUML source or rendered image in the repo right now. If rendered
+diagrams come back, they get a source file committed next to them, and the
+source is what gets edited.
 
 ---
 
@@ -94,17 +99,25 @@ issue count in one call; `gh api repos/<owner>/<repo>/releases/latest` gives the
 real release date. The initial audit found two widely-recommended packages
 archived — `google/wire` and `git-chglog` — and neither README said so.
 
-Record what you found in the spec that adopts the package, and add it to the
-table in [docs/architecture.md §3](docs/architecture.md).
+Record what you found in the spec that adopts the package, assign it a mode
+(Build / Wrap / Vendor), and add it to the ledger in
+[warren.md §9](warren.md).
 
 ---
 
 ## Things to avoid here
 
 - **Do not commit or push unless asked.**
-- **Do not add a mocking framework**, a logging library, a DI library, or an
-  assertion library to the core. Core is stdlib-only.
+- **Do not add a dependency to the core module.** It is stdlib plus dig. A core
+  feature that seems to need a library becomes a port in core and an
+  implementation in a submodule — every time.
+- **Do not let `dig` leak.** Not into a signature, not into an error string.
+  Warren's diagnostics are the reason dig is wrapped rather than re-exported.
+- **Do not add a mocking framework, a logging library, or an assertion library
+  to the core.**
 - **Do not name a type `XWithY`** — see AGENT.md § Naming.
 - **Do not disable a linter to make a change pass.** `//nolint` needs a specific
-  linter and a stated reason, or `nolintlint` fails it.
+  linter and a stated reason.
 - **Do not create empty modules** ahead of the code that will fill them.
+- **Do not add a package `warren.md` does not describe** without agreeing the
+  manifest entry first.

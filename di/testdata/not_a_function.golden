@@ -1,6 +1,0 @@
-di.Validate: the constructor for *orders.Repository is not a function
-
-  registered  internal/modules/orders/module.go:14
-  got         *orders.Repository
-
-  fix: pass the constructor, not its result: di.Provide[*orders.Repository](c, NewRepository)

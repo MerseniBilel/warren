@@ -1,7 +1,0 @@
-lifecycle.Start: starting kafka.consumer failed: dial tcp 127.0.0.1:5432: connection refused
-
-  hook        kafka.consumer
-  registered  warren/lifecycle/error_test.go:NN
-  started     1 of 3 hooks, rolled back
-
-  fix: read the cause above: the hook reported it, not the lifecycle

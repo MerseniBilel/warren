@@ -1,5 +1,0 @@
-di.Build: the constructor for *sql.DB returned nil
-
-  constructor  warren/di/error_test.go:NN
-
-  fix: return an error describing why, so that boot fails with a cause

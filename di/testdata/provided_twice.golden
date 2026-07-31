@@ -1,6 +1,0 @@
-di.Validate: *sql.DB is provided twice
-
-  first   internal/platform/module.go:9
-  second  internal/modules/orders/module.go:14
-
-  fix: remove one of the two di.Provide[*sql.DB] calls, or give one its own type, as in: type ReplicaDB struct{ *sql.DB }

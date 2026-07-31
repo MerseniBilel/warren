@@ -1,6 +1,0 @@
-di.Validate: the constructor for *orders.Repository takes two parameters of type *sql.DB
-
-  registered  internal/modules/orders/module.go:14
-  signature   func(*sql.DB, *sql.DB) *orders.Repository
-
-  fix: one parameter is enough — the container resolves one instance per type

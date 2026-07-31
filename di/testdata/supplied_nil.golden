@@ -1,5 +1,0 @@
-di.Validate: the value supplied for *sql.DB is nil
-
-  registered  internal/platform/module.go:9
-
-  fix: supply a value, or provide a constructor that can report why there is none
