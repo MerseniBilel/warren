@@ -76,7 +76,7 @@ is a cost that has to be justified every time.
 | **`log`** | `log/slog` is the standard. Our layer is context plumbing and nothing else — no logging framework, ever. |
 | **`app`** | `Handler[Req, Res]` and `Middleware` are the one idea. Nothing to wrap. |
 | **`domain`** | `AggregateRoot`, `Event`, `Specification[T]` are the product. |
-| **`health`** | Two endpoints and a state machine. |
+| **`health`** | Two endpoints over `lifecycle.State()`. The state machine belongs to `lifecycle`, which is what performs the transitions — see [lifecycle/SPEC.md §11.4](../lifecycle/SPEC.md). |
 | **ports** (`transport/*`, `broker`, `persistence`, `config`) | A port that wraps a library is not a port. |
 | **`broker/memory`, `http/stdlib`** | Reference adapters that must have zero dependencies, so the contract suite can run with no Docker and no network. |
 | **`outbox` · `inbox` · `resilience` · `jobs` · `auth`** | Patterns, not integrations. Each is a few hundred lines and each has to compose with our lifecycle and our middleware chain. |

@@ -1,0 +1,6 @@
+lifecycle.Start: the start deadline expired with 3 hooks unstarted
+
+  unstarted  postgres.pool, kafka.consumer, http.server
+  started    0 of 3 hooks, rolled back
+
+  fix: raise the start deadline, or find what is slow to open — a pool that dials for two seconds at boot is the pool's problem to fix

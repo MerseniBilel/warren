@@ -1,0 +1,6 @@
+lifecycle.Stop: 1 hook was appended after the lifecycle started, and never ran
+
+  hook        orders.scheduler
+  registered  warren/lifecycle/error_test.go:NN
+
+  fix: append hooks from a constructor, which runs during di.Build — before Start

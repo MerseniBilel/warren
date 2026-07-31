@@ -1,0 +1,5 @@
+lifecycle.Start: this lifecycle has already stopped
+
+  state  Stopped
+
+  fix: restart is not supported — a process that wants to come back up is a new process, which is what an orchestrator is for

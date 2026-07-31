@@ -1,0 +1,2 @@
+lifecycle.Start: starting kafka.consumer failed: no brokers configured
+lifecycle.Stop: stopping postgres.pool failed: context deadline exceeded

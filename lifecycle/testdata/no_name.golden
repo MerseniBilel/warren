@@ -1,0 +1,5 @@
+lifecycle.Start: a hook was registered without a name
+
+  registered  warren/lifecycle/error_test.go:NN
+
+  fix: name the hook for the thing it starts, as in Name: "orders.scheduler" — every message in this package identifies a hook by its name

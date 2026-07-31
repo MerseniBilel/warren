@@ -1,0 +1,5 @@
+lifecycle.Start: the hook orders.scheduler has neither OnStart nor OnStop
+
+  registered  warren/lifecycle/error_test.go:NN
+
+  fix: give it a callback, or do not register it

@@ -34,7 +34,11 @@ a rewrite of every signature that touches one.
       `Scope` moved to v0.2 — see [di/SPEC.md §11.2](../di/SPEC.md): its only real
       consumer is transaction propagation, and designing it before that is decided
       is designing against a guess
-- [ ] **`lifecycle`** — ordered start, reverse stop, drain, grace period
+- [x] **`lifecycle`** — ordered start, reverse stop, drain, grace period ·
+      [spec](../lifecycle/SPEC.md). Readiness state moved here from `health` —
+      see [lifecycle/SPEC.md §11.4](../lifecycle/SPEC.md): two state machines over
+      one process's readiness disagree the first time a transition is added to
+      one of them. `health` still has no slot of its own
 - [ ] **`config`** — loader port in core, koanf implementation in a submodule
 - [ ] **`app`** — `Handler[Req, Res]`, `Middleware`, `Chain`, logging/recovery/timeout
 - [ ] **`warren`** — `New`, `Module`, `Run`; the boot sequence in one place
