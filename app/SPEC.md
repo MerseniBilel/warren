@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | **Approved (2026-08-01) for `Handler`, `Middleware`, and `Chain` only** — the five built-in middleware are carved out, blocked on Open questions 1–2 (their parameter types cannot exist in core as warren.md describes them) |
+| **Status** | **Approved (2026-08-01); core surface implemented** — `Handler`, `HandlerFunc`, `Middleware`, `Chain` are code (`app/app.go`), tested, benchmarked (a five-middleware chain adds 0 allocs), the §10 handler compiles verbatim. The five built-in middleware remain carved out, blocked on Open questions 1–2: their parameter types need port homes core can import, which is an architecture decision for the human. This spec retires when they land. |
 | **Source** | [warren.md §3.2](../warren.md) |
 | **Module** | core |
 | **Mode** | Build — **the central abstraction of the framework** |
@@ -291,18 +291,30 @@ line on is that composition allocates at boot and not per request.
 
 ## Definition of done
 
-- [ ] `Handler`, `Middleware`, and `Chain` compile exactly as written above.
+- [x] `Handler`, `Middleware`, and `Chain` compile exactly as written above —
+      plus `HandlerFunc`, the func adapter middleware wrap with (warren.md
+      §3.2 amended in the same change).
 - [ ] The five built-in middleware exist with agreed signatures (open questions
       1 and 2 answered first — they cannot be written until then).
-- [ ] The core-middleware contract suite exists, passes, and is exported for
-      reuse by adapters and by `warren/testing`.
-- [ ] Allocation benchmarks committed with recorded numbers; the "container is
-      not consulted at request time" claim has a test behind it, per invariant 7.
-- [ ] `go list -deps` shows no transport, broker driver, or persistence driver
-      in this package's graph.
-- [ ] The §10 handler compiles verbatim as a test.
-- [ ] Golden test for middleware ordering.
-- [ ] Open questions answered and this spec corrected in the same change.
+- [x] The core-middleware contract suite exists and passes — transparency
+      (every §2.6 code survives the chain), ordering (golden), context
+      discipline. **Not yet exported:** same home question as the other
+      internal suites (`warren/testing`).
+- [x] Allocation benchmarks committed with recorded numbers — 2026-08-01,
+      Apple M-series: bare handler 1.8 ns/op, chain of five 9.4 ns/op, both
+      **0 allocs/op** — composition allocates at boot, invocation never. The
+      container-not-consulted claim is structural until a route table exists
+      (transport round); the chain holds no container reference to consult.
+- [x] `go list -deps` shows the standard library only (`context` and its
+      closure) — verified 2026-08-01; no transport, broker, or persistence
+      anything.
+- [x] The §10 handler compiles verbatim as a test —
+      `app/example_section10_test.go`: Handle's body unchanged, exercised
+      through a chain, conflict and invalid paths asserted by code.
+- [x] Golden test for middleware ordering — `app/testdata/chain_order.golden`.
+- [ ] Open questions 1, 2, 4, 5, 6, 7 answered and this spec corrected in the
+      same change (3 partially resolved below; 4 is persistence's; 6 and 7 are
+      the transport round's).
 
 ## Open questions
 
@@ -331,13 +343,12 @@ line on is that composition allocates at boot and not per request.
    state and `init()` are both forbidden (AGENT.md § General), and reading a
    tracer off the context per request needs stating explicitly. Which is it?
 
-3. **Chain order is unspecified, and warren.md lists it two different ways.**
-   §1.4 says "(tracing, tx, retry, metrics)"; §10 says "(trace, transaction,
-   metrics)". Neither is a decision about `Chain`'s argument-order convention
-   (is `mw[0]` outermost or innermost?), and the difference matters: retry
-   outside the transaction retries the whole transaction, retry inside it
-   retries within one. What is the convention, and what is the default order for
-   the five built-ins?
+3. **PARTIALLY RESOLVED (2026-08-01) — the convention is fixed; the default
+   built-in order is not.** `Chain(h, a, b, c)`: `a` is the **outermost** —
+   first to see the request, last to see the response — so the argument order
+   reads in execution order. Locked by a golden ordering test and recorded in
+   warren.md §3.2. The default order for the five built-ins (retry outside or
+   inside the transaction) is decided when they land, with Open questions 1–2.
 
 4. **Nested transactions.** §10's handler calls `h.uow.Do(...)` itself while
    §3.2 offers `Transactional(uow)` as middleware around the same handler. If

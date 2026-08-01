@@ -767,8 +767,17 @@ type Handler[Req, Res any] interface {
 
 type Middleware[Req, Res any] func(Handler[Req, Res]) Handler[Req, Res]
 
+// HandlerFunc adapts a bare function to Handler — how middleware wrap
+// handlers without declaring a struct each time.
+type HandlerFunc[Req, Res any] func(ctx context.Context, req Req) (Res, error)
+
 func Chain[Req, Res any](h Handler[Req, Res], mw ...Middleware[Req, Res]) Handler[Req, Res]
 ```
+
+`Chain(h, a, b, c)`: `a` is the **outermost** — first to see the request,
+last to see the response — reading order matching execution order. Chain runs
+at boot; the composed handler is the route table's pre-built closure, and
+invoking it allocates nothing (benchmarked).
 
 **Built-in core middleware** — transport-independent, applies everywhere:
 
@@ -781,6 +790,15 @@ func Chain[Req, Res any](h Handler[Req, Res], mw ...Middleware[Req, Res]) Handle
 | `app.Authorized(policy)` | Policy check before invocation |
 
 These are the *core* ring of the two-ring middleware model in §1.4 — they wrap `Handler[Req,Res]` and therefore apply identically to HTTP, gRPC, and consumers. Transport-shaped concerns belong in the edge ring, owned by the adapter.
+
+The five built-ins are **not yet buildable**: `Retrying`'s and `Authorized`'s
+policy types live in adapter modules (§7.2, §7.3) that core cannot import,
+`Traced()`/`Metered()` need a telemetry seam core cannot name, and
+`Transactional`'s `persistence.UnitOfWork` is not yet specified. The standing
+move — ports in core, implementations in submodules — needs its port homes
+agreed (an architecture decision, tracked in app/SPEC.md open questions 1–2)
+before any of the five exist. `Handler`, `HandlerFunc`, `Middleware`, and
+`Chain` are implemented.
 
 ---
 

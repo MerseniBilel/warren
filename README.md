@@ -88,8 +88,11 @@ contract now.
 - [x] `warren` (root) — module system, boot sequence, run loop
       *(implemented with `config.Module[T]`; adversarially reviewed — 8
       findings fixed — spec retired)*
-- [ ] `app` — `Handler`/`Middleware`/`Chain` *(approved; built-in middleware
-      blocked on the core-port decision)*
+- [x] `app` core — `Handler`/`HandlerFunc`/`Middleware`/`Chain` *(implemented;
+      a five-middleware chain adds 0 allocs; §10 handler compiles verbatim)*
+- [ ] `app` built-in middleware — `Transactional`/`Retrying`/`Traced`/
+      `Metered`/`Authorized` *(blocked on the policy-port homes — an
+      architecture decision; spec retires when these land)*
 - [ ] `broker` (port) — `Message`/`Publisher`/`Subscriber` *(approved; chain
       home open)*
 
