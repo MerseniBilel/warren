@@ -267,19 +267,30 @@ allocate an event slice.
 
 ## Definition of done
 
-- [ ] Every identifier above compiles with the doc comments shown, in the core
-      module, importing only `fmt` and `time`.
-- [ ] `go list -deps` on this package shows standard library only — no `dig`, no
-      adapter, no sibling contract package other than what warren.md states.
-- [ ] The aggregate-semantics and event conformance suites exist and pass, and
-      are exported so `persistence` and `warren/testing` can reuse them.
-- [ ] Allocation benchmarks for `Raise` and `PullEvents` are committed with
-      their recorded numbers.
-- [ ] The §3.1 usage example compiles verbatim as a test. The amended §3.1
-      declares `ID()`, `Root[T]`, and `NewAggregateRoot`, so the example
-      compiles as written once this package is implemented.
-- [ ] Open questions below are answered by the human and this spec is corrected
-      in the same change.
+- [x] Every identifier above compiles with the doc comments shown, in the core
+      module, importing only `fmt` and `time` — `domain/domain.go`, 2026-08-01.
+- [x] `go list -deps` on this package shows standard library only — verified
+      2026-08-01: `fmt`, `time`, and their transitive closure; no `dig`, no
+      adapter, no sibling contract package.
+- [x] The aggregate-semantics and event conformance suites exist and pass —
+      `domain/domain_test.go`. **Not yet exported:** an exported suite needs a
+      package (`domain/domaintest` or `warren/testing`) that warren.md does not
+      yet describe, and adding one requires a manifest decision first. Same
+      question as errors/SPEC.md Open question 8; decide before `persistence`'s
+      unit-of-work suite is written, and export the suites then.
+- [x] Allocation benchmarks for `Raise` and `PullEvents` are committed with
+      their recorded numbers — 2026-08-01, Apple M-series (`-11`):
+      `BenchmarkRaiseAndPull` 43 ns/op, 64 B/op, 2 allocs/op;
+      `BenchmarkPullEventsEmpty` 2.7 ns/op, 0 allocs/op; a quiet aggregate
+      allocates no event slice (asserted by test).
+- [x] The §3.1 usage example compiles verbatim as a test —
+      `domain/example_section31_test.go`: `NewUser` and `Activate` are
+      warren.md's bodies unchanged, and the double-`Activate` path is asserted
+      to return a `CONFLICT` error.
+- [ ] Open questions 1, 3, 4, and 6 below are answered by the human and this
+      spec is corrected in the same change. None of them blocked this package:
+      1 and 4 gate the persistence/outbox seams, 3 gates the generated
+      repository template, 6 is a wording decision on warren.md §3.1.
 
 ## Open questions
 

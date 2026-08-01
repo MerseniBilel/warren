@@ -67,7 +67,8 @@ Progress is spec-first: ☑ means *done and verified*, not *started*.
 
 - [x] `errors` — the semantic vocabulary; load-bearing for everything
       *(spec approved; implemented, golden-file tested, `make ci` green)*
-- [ ] `domain` — `Entity`, `Root[K]`, `AggregateRoot`, `Event` *(spec approved)*
+- [x] `domain` — `Entity`, `Root[K]`, `AggregateRoot`, `Event` *(spec approved;
+      implemented, §3.1 example compiles as a test, `make ci` green)*
 - [ ] `log` — context-carried logger *(spec approved)*
 - [ ] `di` — the container wrap; the golden diagnostic is the product
       *(spec approved)*
