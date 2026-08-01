@@ -1,0 +1,5 @@
+✗ dependency cycle
+
+    *di_test.cycleA → *di_test.cycleB → *di_test.cycleA
+
+  Break the loop: one of these constructors must stop depending on the other.

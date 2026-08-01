@@ -455,7 +455,11 @@ recommended in blog posts, and neither README said so.
 - `context.Context` is the first parameter, always. Never stored in a struct.
 - Accept interfaces, return concrete types — **except** constructors that return
   a port, which is Warren's whole pattern.
-- No `init()`. No package-level mutable state. No `panic` in library code.
+- No `init()`. No package-level mutable state. No `panic` in library code —
+  with one named exception: `di.MustResolve`, whose `Must` prefix is Go's
+  documented panic convention, runs at boot where the alternative to failing
+  loudly is a zero value that explodes later. Nothing else panics, and no new
+  `Must*` is added without amending this line.
 - Reflection belongs at boot, not in the request path (invariant 7).
 - Exported identifiers have doc comments starting with the identifier's name.
 - Formatting is the formatter's job. Never hand-format; never argue about it.

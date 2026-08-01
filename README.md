@@ -71,8 +71,9 @@ Progress is spec-first: ☑ means *done and verified*, not *started*.
       implemented, §3.1 example compiles as a test, `make ci` green)*
 - [x] `log` — context-carried logger *(spec approved; implemented, Vendor mode
       settled, seeding surface added, `make ci` green)*
-- [ ] `di` — the container wrap; the golden diagnostic is the product
-      *(spec approved)*
+- [x] `di` — the container wrap; the golden diagnostic is the product
+      *(spec approved; implemented, golden diagnostic byte-for-byte, dig
+      v1.19.0 audited, `make ci` green)*
 - [ ] `lifecycle` — ordered start/stop, readiness gate *(spec approved)*
 - [ ] `config` + `config/yaml` — Source-split loading *(core spec approved;
       `config/yaml` spec still to write)*

@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | **Approved (2026-08-01)** — conditions: `Resolution` and `ProvideOption` shapes plus the `MustResolve`/no-panic conflict (Open questions 1–3) settled before those parts are implemented; the golden diagnostic is binding as written |
+| **Status** | **Approved (2026-08-01)** — implemented; the three conditions (Open questions 1–3) were settled the same day, the golden diagnostic reproduces byte for byte, and warren.md §2.2 was amended to carry the settled surface |
 | **Source** | [warren.md §2.2](../warren.md) |
 | **Module** | core |
 | **Mode** | Wrap |
@@ -95,8 +95,27 @@ func Resolve[T any](c Container) (T, error)
 func MustResolve[T any](c Container) T
 ```
 
+The settled additions (2026-08-01, warren.md §2.2 amended in the same change):
+`New() Container` constructs the root; `ProvideOption` is a functional option
+with two constructors — `Exported()` (marks the binding visible to importing
+modules; read by the bootstrapper's copy-in and by the diagnostics) and
+`DeclaredAt(file, line)` (the module declaration site, captured by the root
+package at `NewModule` time — the "declared in module.go:14" line);
+`Resolution` is a self-rendering tree — `Target`, `Found`, `Provider`,
+`Scope`, `Site`, `Inputs []Resolution` — whose `String()` is the output of
+`warren explain di`.
+
 **The wrap boundary.** `go.uber.org/dig` is imported by this package and by
 nothing else in the repository (invariant 2). Users never import dig.
+
+## Dependency audit
+
+**`go.uber.org/dig`, observed 2026-08-01** via `gh api repos/uber-go/dig`:
+not archived, MIT licence, 4,486 stars, 33 open issues, last push 2025-05-13;
+latest release v1.19.0 (2025-05-13). Matches the §9 ledger row (v1, strict
+SemVer, built to power frameworks). Transitive footprint: zero runtime
+dependencies — dig's `go.mod` requires only test libraries (`stretchr/testify`
+and friends), which land in `go.sum` but not in the build. Mode: Wrap.
 
 ## Behaviour
 
@@ -177,15 +196,19 @@ The constituent parts, each of which the implementation must be able to produce:
 | Suggestion — unexported | Names the constructor, the scope it is registered in, and the exact `warren.Exports[T]()` line to add, naming the module to add it to |
 | Suggestion — local | The exact `warren.Providers(...)` line to add |
 
-Other errors this package produces, whose text `warren.md` does **not** fix:
+Other errors this package produces, whose text `warren.md` does not fix —
+agreed 2026-08-01, all rendered in `di/diagnostic.go` and covered by tests:
 
 | Condition | Text |
 |---|---|
-| Ambiguous binding (step 3) | **Open.** Must name the type, every scope providing it, and how to disambiguate. |
-| Unused provider (step 3) | **Open.** Must name the constructor and its declaring module. Whether this fails boot or warns is an open question below. |
-| Constructor returned an error (step 4) | **Open.** Must name the constructor and its module, and wrap the cause with `%w`. |
-| `Provide` on a non-constructor | **Open.** |
-| `MustResolve` failure | **Open** — and see Open questions: `warren.md` gives no error return, AGENT.md forbids panic in library code. |
+| Ambiguous binding (Provide time for same-scope duplicates, step 3 across scopes) | `✗ ambiguous binding` — names the type, the count, the asking scope, and every provider with its scope and position; ends with "Keep one, or move the extra binding into the module that needs it." |
+| Unused provider (step 3) | **Deferred with Open question 4** — `Validate` does not yet check unused. |
+| Constructor returned an error (step 4) | `✗ constructor failed` — presents the constructor's own error verbatim and wraps it (`Unwrap`), so `errors.Is`/`As` reach the cause. The cause is recovered via `dig.RootCause`; dig's framing is discarded. |
+| Provider cycle (Provide time, pre-empting dig; re-checked at step 3) | `✗ dependency cycle` — the loop of types joined with `→`, then "Break the loop: one of these constructors must stop depending on the other." |
+| `Provide`/`Invoke` on a non-function or a func with no outputs | `✗ not a constructor` — says what a constructor is and what was got. |
+| Variadic constructor | `✗ variadic constructor` — names it and says each parameter must be a single concrete requirement. |
+| Unanticipated dig failure | `✗ container failure` — sanitized, names the constructor, asks for a bug report. Deliberately carries no third-party wording. |
+| `MustResolve` failure | Panics with the resolution diagnostic — the kernel's one sanctioned panic; see Open question 1. |
 
 ## Testing
 
@@ -212,51 +235,85 @@ Other errors this package produces, whose text `warren.md` does **not** fix:
 
 ## Definition of done
 
-- [ ] Spec approved.
-- [ ] `ProvideOption` and `Resolution` shapes agreed (Open questions).
-- [ ] `go.uber.org/dig` audited and recorded per AGENT.md § Adding a dependency,
-      with the observation date, and confirmed against the §9 ledger row
-      (`uber-go/dig` · Wrap · v1, strict SemVer, built to power frameworks).
-- [ ] Public API implemented exactly as in Public API above, with doc comments.
-- [ ] The golden diagnostic reproduces byte for byte.
-- [ ] No dig type in any exported signature, field or error.
-- [ ] `Validate()` runs to completion before step 4 instantiates anything.
-- [ ] Encapsulation contract suite passes on §1.2's graph.
-- [ ] `Explain` output is sufficient to implement `warren explain di`.
-- [ ] `warren.md` amended in the same change if any signature diverged.
+- [x] Spec approved.
+- [x] `ProvideOption` and `Resolution` shapes agreed — 2026-08-01, recorded
+      in Public API above and in warren.md §2.2.
+- [x] `go.uber.org/dig` audited and recorded per AGENT.md § Adding a
+      dependency — see Dependency audit above; §9 ledger row updated with the
+      observation date.
+- [x] Public API implemented exactly as in Public API above, with doc
+      comments — `di/di.go`, `di/container.go`, `di/diagnostic.go`.
+- [x] The golden diagnostic reproduces byte for byte —
+      `di/testdata/missing_provider.golden`, produced from the §1.2 fixture
+      graph (`di/internal/fixture/{domain,user,postgres}`, whose package
+      names are load-bearing for the diagnostic's text).
+- [x] No dig type in any exported signature, field or error; the leak test
+      drives every failure path and asserts no dig phrasing survives.
+- [x] `Validate()` runs to completion before step 4 instantiates anything —
+      it runs entirely off this package's own provider records and never
+      calls dig; proven by test (a constructor with a side effect stays
+      unrun on the failure path).
+- [x] Encapsulation contract suite passes on §1.2's graph: a sibling's
+      private binding is invisible, an exported one still needs the
+      bootstrapper's copy-in (simulated by a forwarding provider), and the
+      diagnostics tell the two cases apart.
+- [x] `Explain` output is sufficient to implement `warren explain di`: the
+      resolution tree carries provider, scope, and site per step and renders
+      itself.
+- [x] `warren.md` amended in the same change: §2.2 gained `New`, the two
+      `ProvideOption` constructors, the `Resolution` shape, the `MustResolve`
+      panic note, and the Validate/Scope semantics; AGENT.md § General now
+      names the `MustResolve` exception; the §9 DI ledger row carries the
+      audit date.
 
 ## Open questions
 
-1. **`MustResolve` has no error return.** §2.2 gives
-   `MustResolve[T any](c Container) T`, which implies a panic, but AGENT.md
-   § General says "no `panic` in library code". Which gives way — is
-   `MustResolve` an accepted exception, or should the signature change?
-2. **What is `Resolution`?** §2.2 names it as `Explain`'s return type and fixes
-   nothing about it. `warren explain di UserRepository` (§8) is its only stated
-   consumer. What does it carry, and does it render itself?
-3. **What is `ProvideOption`?** No option constructor is listed anywhere in
-   `warren.md`. Is there a first one (named bindings? groups?), or does the
-   parameter exist purely for future use?
-4. **Is "unused" a boot failure or a warning?** Step 3 lists "unused?" alongside
-   "resolvable?" and "ambiguous?" under "→ fail", but an unused provider is not
-   obviously fatal, and `warren doctor` separately reports "dead providers" (§8).
-5. **How is the declaration site (`internal/modules/user/module.go:14`) obtained
-   at runtime?** The golden diagnostic requires file and line for a module
-   declaration. Is this captured at `NewModule` time, recovered from the
-   constructor's function pointer, or supplied by the CLI analyzer?
-6. **How are "Did you mean" candidates found?** The suggestion requires knowing
-   that `postgres.NewUserRepository` exists in scope `billing` and is not
-   exported. Does the validator index every provider in every scope for this, and
-   is the search by exact type only?
-7. **Does `Explain` work before `Validate`, and on an unresolvable target?** The
-   diagnostic and `Explain` appear to need the same index; §2.2 does not say
-   whether one is built on the other.
-8. **Who owns boot step 1?** §1.2 says "the bootstrapper walks the whole graph
-   first, then materialises containers", which puts flattening and cycle
-   detection in the root package; §2.2 gives this package "the container,
-   scoping, graph validation, diagnostics". Does `di` receive an already-resolved
-   graph, or own step 1 itself? The cycle-detection error message belongs to
-   whichever side owns it.
-9. **Does `Scope` create or look up?** `Scope(name string) Container` is used at
-   boot step 2 to create one child per module; whether a repeat call with the
-   same name returns the same container is unstated.
+1. **RESOLVED (2026-08-01) — `MustResolve` panics, as the one named
+   exception.** The `Must` prefix is Go's documented panic convention
+   (`regexp.MustCompile`, `template.Must`), the call runs at boot, and the
+   panic value is the full resolution diagnostic. AGENT.md § General was
+   amended to name the exception and to forbid any further `Must*` without
+   amending that line. The signature stays as §2.2 fixed it.
+2. **RESOLVED (2026-08-01) — `Resolution` is a self-rendering tree.**
+   `Target`, `Found`, `Provider`, `Scope`, `Site`, and `Inputs []Resolution`;
+   `String()` renders the indented tree `warren explain di` prints. Recorded
+   in warren.md §2.2.
+3. **RESOLVED (2026-08-01) — `ProvideOption` has two constructors, both
+   needed by the golden diagnostic.** `Exported()` marks a binding visible to
+   importing modules — the bootstrapper's copy-in reads it, and the
+   diagnostic needs it to tell "registered but not exported" apart from
+   "exported but not imported". `DeclaredAt(file, line)` carries the module
+   declaration site. Named bindings and groups are deliberately absent until
+   something needs them.
+4. **Is "unused" a boot failure or a warning?** Step 3 lists "unused?" under
+   "→ fail", but `warren doctor` separately reports "dead providers" (§8).
+   **Deferred:** "unused" is not decidable inside `di` alone — a terminal
+   provider (a server) is consumed by nobody and used by everybody, which
+   only the root package's entry-point model can express. Decide when the
+   root `warren` package is specified; until then `Validate` checks
+   resolvable and ambiguous, and warren.md §2.2 says so.
+5. **RESOLVED (2026-08-01) — both, layered.** The constructor's own
+   `file:line` is recovered from its function pointer at `Provide` time
+   (`runtime.FuncForPC`); the module declaration site is passed in by the
+   root package via `DeclaredAt`, captured at `NewModule` time. The
+   diagnostic prefers the declaration site and falls back to the constructor
+   position.
+6. **RESOLVED (2026-08-01) — the validator indexes every provider in every
+   scope,** and the candidate search is by exact type. Every `Provide` call
+   records constructor name, position, inputs, outputs, exportedness, and
+   scope in this package's own records; the "Did you mean" search walks the
+   whole tree for providers of the missing type that are not visible from
+   the failing scope.
+7. **RESOLVED (2026-08-01) — `Explain` works before `Validate` and on an
+   unresolvable target.** Both run off the same provider records; an
+   unresolvable target renders as "no provider visible from this scope"
+   with `Found` false.
+8. **RESOLVED (2026-08-01) — split by graph.** The root package owns boot
+   step 1: module-graph flattening and module-import cycles, before any
+   scope exists. This package owns the *provider* graph, including provider
+   cycles — detected at `Provide` time (pre-empting dig, whose cycle message
+   must not leak) and again at `Validate`. Each side's cycle message belongs
+   to the side that detects it.
+9. **RESOLVED (2026-08-01) — `Scope` creates on first use and looks up after.**
+   A repeat call with the same name returns the same child; proven by test.
+   Recorded in warren.md §2.2.

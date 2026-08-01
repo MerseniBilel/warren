@@ -287,9 +287,25 @@ type Container interface {
     Explain(target any) Resolution       // powers `warren explain di`
 }
 
+func New() Container // the root container
+
+// ProvideOption configures one Provide call. Two options exist:
+func Exported() ProvideOption                    // visible to importing modules; read by the bootstrapper and the diagnostics
+func DeclaredAt(file string, line int) ProvideOption // the module declaration site — the "declared in module.go:14" line
+
+// Resolution is Explain's result: Target, Found, Provider, Scope, Site, and
+// Inputs ([]Resolution, recursive). It renders itself as an indented tree.
+
 func Resolve[T any](c Container) (T, error)
-func MustResolve[T any](c Container) T
+func MustResolve[T any](c Container) T // panics with the diagnostic — the kernel's one sanctioned panic (boot only)
 ```
+
+`Validate` runs entirely off Warren's own provider records — dig is asked to
+construct, never to explain — and constructs nothing: step 3 completes before
+step 4 instantiates a single singleton. `Scope(name)` is idempotent: a repeat
+call returns the same child. Whether an *unused* provider fails validation is
+still open — it needs the root package's entry-point model to be meaningful —
+so `Validate` currently checks resolvable and ambiguous.
 
 **Diagnostics are the product here.** Raw dig error:
 
@@ -1146,7 +1162,7 @@ All generators support `--dry-run` and `--force`.
 
 | Area | Library | Mode | Note |
 |---|---|---|---|
-| DI | `uber-go/dig` | Wrap | v1, strict SemVer, built to power frameworks |
+| DI | `uber-go/dig` | Wrap | v1, strict SemVer, built to power frameworks · audited 2026-08-01: v1.19.0 (2025-05-13), MIT, not archived, 4.5k stars, 33 open issues |
 | Config | — | Build | Viper rejected: weight + global state |
 | Lifecycle | — | Build | fx rejected: imposes its own lifecycle |
 | Logging | `log/slog` | Vendor | stdlib |

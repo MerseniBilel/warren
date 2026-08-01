@@ -1,0 +1,13 @@
+✗ cannot resolve dependency
+
+    domain.UserRepository
+      └─ required by *user.RegisterUserHandler
+           └─ required by *user.UserController
+                └─ declared in internal/modules/user/module.go:14
+
+  No provider found in scope "user" or its imports.
+
+  Did you mean:
+    • postgres.NewUserRepository is registered in scope "billing" but not exported.
+      Add to billing's module: warren.Exports[domain.UserRepository]()
+    • Or provide it locally:  warren.Providers(postgres.NewUserRepository)
