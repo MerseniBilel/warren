@@ -64,6 +64,18 @@ func TestFromContext(t *testing.T) {
 		}
 	})
 
+	t.Run("a nil logger is not carried — the never-nil guarantee holds", func(t *testing.T) {
+		t.Parallel()
+		ctx := log.WithLogger(context.Background(), nil)
+		got := log.FromContext(ctx)
+		if got == nil {
+			t.Fatal("FromContext returned nil after WithLogger(ctx, nil)")
+		}
+		if got != slog.Default() {
+			t.Error("a nil-seeded context did not behave as unseeded")
+		}
+	})
+
 	t.Run("falls back to slog.Default on an unseeded context", func(t *testing.T) {
 		t.Parallel()
 		got := log.FromContext(context.Background())

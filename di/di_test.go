@@ -192,6 +192,92 @@ func TestAmbiguousBinding(t *testing.T) {
 	})
 }
 
+type tDep struct{}
+
+type rootThing struct{}
+
+type twoScopeHandler struct{}
+
+// TestScopeRelativeResolvabilityDoesNotLeakDig covers the review's F1: a
+// type resolvable from a child scope but not from root must fail the
+// pre-check with Warren's diagnostic — never reach dig and leak its wording.
+func TestScopeRelativeResolvabilityDoesNotLeakDig(t *testing.T) {
+	t.Parallel()
+
+	root := di.New()
+	userScope := root.Scope("user")
+	if err := userScope.Provide(func() *tDep { return &tDep{} }); err != nil {
+		t.Fatalf("providing dep: %v", err)
+	}
+	if err := root.Provide(func(*tDep) *rootThing { return &rootThing{} }); err != nil {
+		t.Fatalf("providing root thing: %v", err)
+	}
+	if err := userScope.Provide(func(*tDep, *rootThing) *twoScopeHandler { return &twoScopeHandler{} }); err != nil {
+		t.Fatalf("providing handler: %v", err)
+	}
+
+	// *tDep resolves from "user", but *rootThing's constructor lives in root,
+	// where *tDep is invisible. The memo must not carry the child-scope
+	// success into the root-scope check.
+	_, err := di.Resolve[*twoScopeHandler](userScope)
+	if err == nil {
+		t.Fatal("Resolve succeeded though rootThing's constructor cannot see *tDep")
+	}
+	if !strings.Contains(err.Error(), "✗ cannot resolve dependency") {
+		t.Errorf("not Warren's diagnostic:\n%s", err)
+	}
+	assertNoDigLeak(t, err)
+}
+
+// TestChainDoesNotRouteThroughInvisibleSibling covers the review's F2: the
+// requirement chain must follow a consumer that can actually see the
+// provider, not a type-name coincidence in an unrelated sibling scope.
+func TestChainDoesNotRouteThroughInvisibleSibling(t *testing.T) {
+	t.Parallel()
+
+	root := di.New()
+	userScope := root.Scope("user")
+	billing := root.Scope("billing") // alphabetically before "user"
+
+	if err := userScope.Provide(user.NewRegisterUserHandler, di.DeclaredAt("internal/modules/user/module.go", 12)); err != nil {
+		t.Fatalf("providing handler: %v", err)
+	}
+	if err := userScope.Provide(user.NewUserController, di.DeclaredAt("internal/modules/user/module.go", 14)); err != nil {
+		t.Fatalf("providing controller: %v", err)
+	}
+	// billing declares a consumer of the same handler type — but it cannot
+	// see user's provider, so the chain must not route through it.
+	if err := billing.Provide(func(*user.RegisterUserHandler) *tDep { return &tDep{} }, di.DeclaredAt("internal/modules/billing/module.go", 99)); err != nil {
+		t.Fatalf("providing billing consumer: %v", err)
+	}
+
+	err := userScope.Validate()
+	if err == nil {
+		t.Fatal("Validate() = nil with the repository missing")
+	}
+	if strings.Contains(err.Error(), "billing/module.go") {
+		t.Errorf("the chain routed through an invisible sibling's module:\n%s", err)
+	}
+	if !strings.Contains(err.Error(), "internal/modules/user/module.go:14") {
+		t.Errorf("the chain does not end at the real consumer's declaration:\n%s", err)
+	}
+}
+
+// TestInvokeVariadic covers the review's F4: dig invokes variadic functions
+// without supplying the trailing parameter, so the pre-check must not demand
+// a provider for it.
+func TestInvokeVariadic(t *testing.T) {
+	t.Parallel()
+
+	called := false
+	if err := di.New().Invoke(func(xs ...string) { called = true }); err != nil {
+		t.Fatalf("Invoke of a variadic function: %v", err)
+	}
+	if !called {
+		t.Fatal("the variadic function was not called")
+	}
+}
+
 type cycleA struct{}
 
 type cycleB struct{}
@@ -322,6 +408,25 @@ func TestScopeIsIdempotent(t *testing.T) {
 
 func TestExplain(t *testing.T) {
 	t.Parallel()
+
+	t.Run("a diamond renders both occurrences as found", func(t *testing.T) {
+		t.Parallel()
+		root := di.New()
+		if err := root.Provide(func() *tDep { return &tDep{} }); err != nil {
+			t.Fatalf("providing: %v", err)
+		}
+		if err := root.Provide(func(*tDep) *rootThing { return &rootThing{} }); err != nil {
+			t.Fatalf("providing: %v", err)
+		}
+		if err := root.Provide(func(*tDep, *rootThing) *twoScopeHandler { return &twoScopeHandler{} }); err != nil {
+			t.Fatalf("providing: %v", err)
+		}
+
+		out := root.Explain((*twoScopeHandler)(nil)).String()
+		if strings.Contains(out, "no provider visible") {
+			t.Errorf("a healthy diamond rendered as broken:\n%s", out)
+		}
+	})
 
 	t.Run("renders the resolution tree", func(t *testing.T) {
 		t.Parallel()

@@ -108,6 +108,24 @@ package at `NewModule` time — the "declared in module.go:14" line);
 **The wrap boundary.** `go.uber.org/dig` is imported by this package and by
 nothing else in the repository (invariant 2). Users never import dig.
 
+**Hardened by the 2026-08-01 adversarial review** (each reproduced before the
+fix): the resolvability memo is keyed by *(scope, type)* — resolvable is
+scope-relative, and a type-only memo let a graph pass the pre-check that dig
+could not build, leaking dig's wording through `Invoke` (the one reproduced
+invariant-2 violation); a dig-typed root cause is now detected positively
+(`errors.As` against `dig.Error`) and sanitized, instead of the fragile
+identity comparison; the requirement chain only follows consumers whose scope
+can actually see the provider, so a type-name coincidence in an unrelated
+sibling no longer points "declared in" at the wrong module; `Explain` guards
+cycles by recursion *path*, not everything visited, so a diamond renders both
+occurrences as found, and it resolves a provider's inputs from the provider's
+own scope; `Invoke` skips a trailing variadic parameter, which dig invokes
+without supplying. Also made explicit: **a container is not safe for
+concurrent use** — it belongs to the single-threaded bootstrapper (boot steps
+1–5) and is never consulted at request time; there is deliberately no lock to
+hide a concurrency bug behind. Known cosmetic limit: chain and cycle text
+names a multi-output provider by its first output.
+
 ## Dependency audit
 
 **`go.uber.org/dig`, observed 2026-08-01** via `gh api repos/uber-go/dig`:

@@ -45,7 +45,11 @@ type optionFunc func(*settings)
 
 // WithEnvPrefix enables the environment layer and sets its prefix: prefix
 // "WARREN" maps the field path postgres.dsn to WARREN_POSTGRES_DSN. Without
-// this option the environment is not consulted.
+// this option the environment is not consulted; an empty prefix is a boot
+// error, because bare names collide with PATH, HOME, and friends.
+//
+// A variable that is set but empty counts as set — emptiness is a value, and
+// required checks presence, not non-emptiness.
 func WithEnvPrefix(prefix string) Option {
 	return optionFunc(func(s *settings) { s.envPrefix = prefix; s.useEnv = true })
 }
@@ -81,14 +85,24 @@ func Load[T any](opts ...Option) (T, error) {
 	if s.flags != nil && !s.flags.Parsed() {
 		return out, errors.New("config: the flag set given to WithFlags has not been parsed — call its Parse method before Load")
 	}
+	if s.useEnv && s.envPrefix == "" {
+		return out, errors.New(`config: WithEnvPrefix("") would read bare variables like PATH — pass a real prefix`)
+	}
 
 	t := reflect.TypeOf(out)
 	if t == nil || t.Kind() != reflect.Struct {
 		return out, fmt.Errorf("config: T must be a struct, got %v", t)
 	}
-	fields, err := collectFields(t, nil, nil)
+	fields, err := collectFields(t, nil, nil, nil)
 	if err != nil {
 		return out, err
+	}
+	byKey := map[string]string{}
+	for _, f := range fields {
+		if other, ok := byKey[f.key()]; ok {
+			return out, fmt.Errorf("config: fields %s and %s both bind the key %q — config: tags must be unique", other, f.goPath, f.key())
+		}
+		byKey[f.key()] = f.goPath
 	}
 
 	// One entry per field path: the value and which layer supplied it.
@@ -155,9 +169,13 @@ func Load[T any](opts ...Option) (T, error) {
 		}
 		converted, err := convert(e.value, f.fieldType)
 		if err != nil {
-			if e.origin == "default" {
+			var h hint
+			switch {
+			case e.origin == "default":
 				errs = append(errs, fmt.Errorf("config: %s: default: tag %s is not a valid %s — fix the struct tag", f.key(), quote(e.value), f.fieldType))
-			} else {
+			case errors.As(err, &h):
+				errs = append(errs, fmt.Errorf("config: %s: cannot use %s (from %s) as %s — %s", f.key(), quote(e.value), e.origin, f.fieldType, h))
+			default:
 				errs = append(errs, fmt.Errorf("config: %s: cannot use %s (from %s) as %s", f.key(), quote(e.value), e.origin, f.fieldType))
 			}
 			continue
@@ -173,12 +191,19 @@ func Load[T any](opts ...Option) (T, error) {
 // field is one participating leaf of the config struct.
 type field struct {
 	path       []string // config: tag names, outermost first
+	goPath     string   // Go field names, "Postgres.DSN" — for tag errors
 	index      []int    // reflect field index path
 	fieldType  reflect.Type
 	required   bool
 	def        string
 	hasDefault bool
 }
+
+// hint is a conversion failure that knows how to be fixed; Load appends it
+// to the field/layer message.
+type hint string
+
+func (h hint) Error() string { return string(h) }
 
 func (f field) key() string { return strings.Join(f.path, ".") }
 
@@ -192,7 +217,7 @@ func (f field) envName(prefix string) string {
 
 var durationType = reflect.TypeFor[time.Duration]()
 
-func collectFields(t reflect.Type, path []string, index []int) ([]field, error) {
+func collectFields(t reflect.Type, path, goPath []string, index []int) ([]field, error) {
 	var out []field
 	for i := range t.NumField() {
 		sf := t.Field(i)
@@ -204,10 +229,17 @@ func collectFields(t reflect.Type, path []string, index []int) ([]field, error) 
 			continue
 		}
 		fpath := append(append([]string{}, path...), key)
+		gpath := append(append([]string{}, goPath...), sf.Name)
 		findex := append(append([]int{}, index...), i)
 
 		if sf.Type.Kind() == reflect.Struct && sf.Type != durationType {
-			nested, err := collectFields(sf.Type, fpath, findex)
+			// A required section is not enforceable as stated — silently
+			// dropping the tag is the failure mode this package exists to
+			// prevent, so reject the placement at boot.
+			if hasValidateToken(sf.Tag.Get("validate"), "required") {
+				return nil, fmt.Errorf("config: %s: validate:%q on a struct section does nothing — mark its leaf fields required instead", strings.Join(fpath, "."), "required")
+			}
+			nested, err := collectFields(sf.Type, fpath, gpath, findex)
 			if err != nil {
 				return nil, err
 			}
@@ -218,6 +250,7 @@ func collectFields(t reflect.Type, path []string, index []int) ([]field, error) 
 		def, hasDefault := sf.Tag.Lookup("default")
 		out = append(out, field{
 			path:       fpath,
+			goPath:     strings.Join(gpath, "."),
 			index:      findex,
 			fieldType:  sf.Type,
 			required:   hasValidateToken(sf.Tag.Get("validate"), "required"),
@@ -318,6 +351,9 @@ func convert(value any, t reflect.Type) (reflect.Value, error) {
 				}
 				return reflect.ValueOf(d), nil
 			}
+			// A bare number would silently mean nanoseconds — a 30-second
+			// intent becoming a 30ns timeout. Refuse.
+			return reflect.Value{}, hint(`a duration needs a unit — write it as a string like "30s"`)
 		}
 		switch v := value.(type) {
 		case string:
@@ -328,10 +364,10 @@ func convert(value any, t reflect.Type) (reflect.Value, error) {
 			return reflect.ValueOf(n).Convert(t), nil
 		default:
 			if rv.IsValid() && rv.CanInt() {
-				return rv.Convert(t), nil
+				return intInRange(rv.Int(), t)
 			}
 			if rv.IsValid() && rv.CanFloat() && rv.Float() == float64(int64(rv.Float())) {
-				return reflect.ValueOf(int64(rv.Float())).Convert(t), nil
+				return intInRange(int64(rv.Float()), t)
 			}
 		}
 	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
@@ -344,7 +380,11 @@ func convert(value any, t reflect.Type) (reflect.Value, error) {
 			return reflect.ValueOf(n).Convert(t), nil
 		default:
 			if rv.IsValid() && rv.CanInt() && rv.Int() >= 0 {
-				return reflect.ValueOf(uint64(rv.Int())).Convert(t), nil
+				n := uint64(rv.Int())
+				if reflect.New(t).Elem().OverflowUint(n) {
+					return reflect.Value{}, hint(fmt.Sprintf("%d overflows %s", n, t))
+				}
+				return reflect.ValueOf(n).Convert(t), nil
 			}
 		}
 	case reflect.Float32, reflect.Float64:
@@ -384,8 +424,19 @@ func convert(value any, t reflect.Type) (reflect.Value, error) {
 				return rv.Convert(t), nil
 			}
 		}
+	case reflect.Pointer, reflect.Map:
+		return reflect.Value{}, hint("pointer and map fields are not supported — use a value struct or a supported leaf type")
 	}
 	return reflect.Value{}, fmt.Errorf("unsupported conversion from %T", value)
+}
+
+// intInRange converts n to the signed integer type t, refusing a value the
+// type cannot hold — silent wrap-around is a garbage config that boots.
+func intInRange(n int64, t reflect.Type) (reflect.Value, error) {
+	if reflect.New(t).Elem().OverflowInt(n) {
+		return reflect.Value{}, hint(fmt.Sprintf("%d overflows %s", n, t))
+	}
+	return reflect.ValueOf(n).Convert(t), nil
 }
 
 // quote renders a layer's value for an error message: strings quoted, other

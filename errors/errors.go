@@ -12,7 +12,6 @@
 package errors
 
 import (
-	stderrors "errors"
 	"fmt"
 	"maps"
 )
@@ -115,22 +114,44 @@ func Internal(err error) *Error {
 	return &Error{code: CodeInternal, msg: "unexpected failure", cause: err}
 }
 
-// Code returns the semantic classification.
-func (e *Error) Code() Code { return e.code }
+// Code returns the semantic classification. On a nil receiver it returns the
+// zero Code, which every adapter treats as unknown and maps to INTERNAL.
+func (e *Error) Code() Code {
+	if e == nil {
+		return ""
+	}
+	return e.code
+}
 
 // Message returns the human-readable message, without the code prefix and
-// without the cause.
-func (e *Error) Message() string { return e.msg }
+// without the cause. It returns "" on a nil receiver.
+func (e *Error) Message() string {
+	if e == nil {
+		return ""
+	}
+	return e.msg
+}
 
 // Details returns a copy of the details attached with WithDetail; mutating
-// the returned map does not touch e. It returns nil when no detail was
-// attached.
-func (e *Error) Details() map[string]any { return maps.Clone(e.details) }
+// the returned map does not touch e. The copy is shallow: the map is copied,
+// the values are shared, so a mutable value (a slice, a map) attached as a
+// detail is still reachable through it. It returns nil when no detail was
+// attached, and on a nil receiver.
+func (e *Error) Details() map[string]any {
+	if e == nil {
+		return nil
+	}
+	return maps.Clone(e.details)
+}
 
 // Error renders "CODE: message", with ": cause" appended when a cause is
 // wrapped. Details are not rendered — they are structured payload for
-// adapters, not log text.
+// adapters, not log text. On a nil receiver — the classic typed-nil slip —
+// it returns "<nil>" rather than panicking.
 func (e *Error) Error() string {
+	if e == nil {
+		return "<nil>"
+	}
 	if e.cause != nil {
 		return string(e.code) + ": " + e.msg + ": " + e.cause.Error()
 	}
@@ -138,13 +159,23 @@ func (e *Error) Error() string {
 }
 
 // Unwrap returns the wrapped cause, or nil — so the standard library's
-// errors.Is and errors.As see through a Warren error.
-func (e *Error) Unwrap() error { return e.cause }
+// errors.Is and errors.As see through a Warren error. It is nil-receiver
+// safe.
+func (e *Error) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.cause
+}
 
 // WithDetail attaches the key/value pair to e and returns e, so adapters have
 // structured context to put in a response body. It mutates e — errors are
-// constructed, decorated, and returned on one failure path, never shared.
+// constructed, decorated, and returned on one failure path, never shared. On
+// a nil receiver it is a no-op returning nil.
 func (e *Error) WithDetail(k string, v any) *Error {
+	if e == nil {
+		return nil
+	}
 	if e.details == nil {
 		e.details = make(map[string]any)
 	}
@@ -152,11 +183,33 @@ func (e *Error) WithDetail(k string, v any) *Error {
 	return e
 }
 
-// Is reports whether err, or any error it wraps, carries code. It is how
-// callers ask about meaning without a type assertion.
+// Is reports whether err, or any error it wraps, carries code — the whole
+// chain is searched, so a Warren error wrapped inside another Warren error
+// is still found. It is how callers ask about meaning without a type
+// assertion, and it never panics, a typed-nil *Error included.
+//
+// Note the asymmetry with an adapter's status mapping: an adapter translates
+// the OUTERMOST code (the standard library's errors.AsType finds it, Code()
+// reads it), because wrapping is recategorization; Is answers whether the
+// meaning appears anywhere in the chain.
 func Is(err error, code Code) bool {
-	if e, ok := stderrors.AsType[*Error](err); ok {
-		return e.code == code
+	for err != nil {
+		if e, ok := err.(*Error); ok && e != nil && e.code == code {
+			return true
+		}
+		switch x := err.(type) {
+		case interface{ Unwrap() error }:
+			err = x.Unwrap()
+		case interface{ Unwrap() []error }:
+			for _, u := range x.Unwrap() {
+				if Is(u, code) {
+					return true
+				}
+			}
+			return false
+		default:
+			return false
+		}
 	}
 	return false
 }

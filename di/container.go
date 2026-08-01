@@ -1,6 +1,7 @@
 package di
 
 import (
+	stderrors "errors"
 	"reflect"
 	"runtime"
 	"slices"
@@ -50,6 +51,11 @@ type container struct {
 }
 
 // New returns the root container.
+//
+// A container is not safe for concurrent use: Provide, Scope, Invoke, and
+// Validate run from the single-threaded bootstrapper during boot steps 1–5,
+// and the container is never consulted at request time (invariant 7). There
+// is deliberately no lock to hide a concurrency bug behind.
 func New() Container {
 	return &container{dig: dig.New(), name: "root", children: map[string]*container{}}
 }
@@ -129,15 +135,25 @@ func (c *container) Invoke(fn any) error {
 
 	// Pre-check the whole subgraph this call needs, so any resolution failure
 	// is Warren's diagnostic and anything left for dig to report is a
-	// constructor's own error.
-	for in := range v.Type().Ins() {
-		if err := c.checkResolvable(in, nil, map[reflect.Type]bool{}); err != nil {
+	// constructor's own error. The trailing variadic parameter, if any, is
+	// skipped — dig invokes variadic functions without supplying it.
+	t := v.Type()
+	n := t.NumIn()
+	if t.IsVariadic() {
+		n--
+	}
+	for i := range n {
+		if err := c.checkResolvable(t.In(i), nil, map[scopedType]bool{}); err != nil {
 			return err
 		}
 	}
 
 	if err := c.dig.Invoke(fn); err != nil {
-		if cause := dig.RootCause(err); cause != nil && cause != err { //nolint:errorlint // dig.RootCause returns the exact constructor error; identity is the contract here
+		// Only a constructor's own error may surface. A dig-typed cause —
+		// anything the pre-check failed to anticipate — is sanitized
+		// (invariant 2: no dig wording reaches a caller).
+		var digErr dig.Error
+		if cause := dig.RootCause(err); cause != nil && !stderrors.As(cause, &digErr) {
 			return errConstructorFailed(c.name, cause)
 		}
 		return errInternal(funcName(v))
@@ -168,31 +184,49 @@ func (c *container) Explain(target any) Resolution {
 	return c.explain(targetType(target), map[reflect.Type]bool{})
 }
 
-func (c *container) explain(t reflect.Type, seen map[reflect.Type]bool) Resolution {
+// explain resolves t from scope c. path guards cycles only — it tracks the
+// current recursion path, not everything visited, so a diamond (two inputs
+// sharing a dependency) renders both occurrences as found.
+func (c *container) explain(t reflect.Type, path map[reflect.Type]bool) Resolution {
 	r := Resolution{Target: typeName(t)}
 	visible := c.visibleProviders(t)
-	if len(visible) == 0 || seen[t] {
+	if len(visible) == 0 {
 		return r
 	}
-	seen[t] = true
 	p := visible[0]
 	r.Found = true
 	r.Provider = p.name
 	r.Scope = p.scope.name
 	r.Site = p.site
-	for _, in := range p.inputs {
-		r.Inputs = append(r.Inputs, c.explain(in, seen))
+	if path[t] {
+		return r
 	}
+	path[t] = true
+	for _, in := range p.inputs {
+		// The provider's own inputs resolve from ITS scope — the same rule
+		// checkResolvable applies.
+		r.Inputs = append(r.Inputs, p.scope.explain(in, path))
+	}
+	delete(path, t)
 	return r
+}
+
+// scopedType keys resolvability checks: whether t resolves is relative to
+// the asking scope, so the memo must be too — a type resolvable from a child
+// scope may be missing from the root.
+type scopedType struct {
+	scope *container
+	t     reflect.Type
 }
 
 // checkResolvable walks the requirement closure of t from scope c, returning
 // Warren's diagnostic for the first missing or ambiguous dependency.
-func (c *container) checkResolvable(t reflect.Type, requirer *provider, seen map[reflect.Type]bool) error {
-	if seen[t] {
+func (c *container) checkResolvable(t reflect.Type, requirer *provider, seen map[scopedType]bool) error {
+	key := scopedType{scope: c, t: t}
+	if seen[key] {
 		return nil
 	}
-	seen[t] = true
+	seen[key] = true
 	visible := c.visibleProviders(t)
 	switch len(visible) {
 	case 0:
@@ -238,20 +272,38 @@ func (c *container) missing(t reflect.Type, requirer *provider) error {
 	return errMissing(typeName(t), chain, declared, scope, candidates)
 }
 
-// consumerOf returns the first registered provider that consumes one of p's
-// outputs, or nil — the next link of a requirement chain.
+// consumerOf returns a provider that consumes one of p's outputs AND can
+// actually see p — the next link of a requirement chain. Same-scope
+// consumers win; a type-name coincidence in an unrelated sibling scope must
+// not route the chain (and its "declared in" line) to the wrong module.
 func (c *container) consumerOf(p *provider) *provider {
+	var fallback *provider
 	for _, q := range c.subtreeProviders() {
-		if q == p {
+		if q == p || !q.canSee(p) {
 			continue
 		}
-		for _, in := range q.inputs {
-			if p.provides(in) {
-				return q
-			}
+		if !slices.ContainsFunc(q.inputs, p.provides) {
+			continue
+		}
+		if q.scope == p.scope {
+			return q
+		}
+		if fallback == nil {
+			fallback = q
 		}
 	}
-	return nil
+	return fallback
+}
+
+// canSee reports whether q's scope chain reaches p's scope — i.e. whether a
+// resolution from q's scope could use p.
+func (q *provider) canSee(p *provider) bool {
+	for s := q.scope; s != nil; s = s.parent {
+		if s == p.scope {
+			return true
+		}
+	}
+	return false
 }
 
 // findCycle looks for a provider cycle among the registered providers, plus

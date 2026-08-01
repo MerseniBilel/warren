@@ -128,6 +128,11 @@ nil, a unit-tested handler logs without any adapter in scope, and an
 application that configured its root logger with `slog.SetDefault` sees that
 configuration respected even on a detached context.
 
+The 2026-08-01 adversarial review closed the one hole in that guarantee:
+`WithLogger(ctx, nil)` no longer carries the nil — the context behaves as
+unseeded, so an adapter seeding an uninitialized logger field cannot make
+`FromContext` return nil and panic the first `.Info` downstream.
+
 ## Testing
 
 - **Golden-file tests for error messages** — none apply: this package produces

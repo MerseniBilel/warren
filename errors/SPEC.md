@@ -170,7 +170,8 @@ func (e *Error) Code() Code
 func (e *Error) Message() string
 
 // Details returns a copy of the details attached with WithDetail; mutating the
-// returned map does not touch e. It returns nil when no detail was attached.
+// returned map does not touch e. The copy is shallow — the map is copied, the
+// values are shared. It returns nil when no detail was attached.
 func (e *Error) Details() map[string]any
 
 // Error renders "CODE: message", with ": cause" appended when a cause is
@@ -187,11 +188,25 @@ func (e *Error) Unwrap() error
 // is a method, not a type name, and so is permitted by AGENT.md § Naming.
 func (e *Error) WithDetail(k string, v any) *Error
 
-// Is reports whether err, or any error it wraps, carries code. It is how
-// callers ask about meaning without a type assertion. It is implemented with
-// the standard library's errors.As, so it sees through %w wrapping.
+// Is reports whether err, or any error it wraps, carries code — the whole
+// chain is searched, joined errors included, so a Warren error wrapped inside
+// another Warren error is still found. It never panics, a typed-nil *Error
+// included.
 func Is(err error, code Code) bool
 ```
+
+Two behaviours hardened by the 2026-08-01 review:
+
+- **`Is` searches the whole chain.** `Is(Internal(NotFound(...)), CodeNotFound)`
+  is true — "or any error it wraps" means what it says. The asymmetry with
+  adapters is deliberate: an adapter's status mapping translates the
+  *outermost* code (wrapping is recategorization); `Is` answers whether the
+  meaning appears anywhere.
+- **Every method is nil-receiver safe.** The classic slip
+  `var e *errors.Error; ...; return e` produces a non-nil `error` interface
+  holding a nil pointer; `Error()` renders `<nil>`, `Code()` returns the zero
+  `Code` (which adapters map to `INTERNAL`), and `Is` neither panics nor
+  matches. AGENT.md's no-panic rule holds on this path too.
 
 `*Error` satisfies the `error` interface — warren.md §10 returns
 `errors.Invalid("email", err)` directly as a function's `error` result.

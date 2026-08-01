@@ -223,6 +223,18 @@ a golden file in `config/testdata/`, and every resolution failure in one
 | A `default:` tag cannot be parsed into its field type | `config: port: default: tag "not-a-number" is not a valid int — fix the struct tag` |
 | The flag set was not parsed | `config: the flag set given to WithFlags has not been parsed — call its Parse method before Load` |
 | A non-option is passed | `config: string is not an option — pass a Source, WithEnvPrefix, or WithFlags` — the price of `Option` admitting `Source` values directly (see Open question 6's resolution). |
+| A source number overflows the field's integer type | `config: postgres.max_conns: cannot use 5000000000 (from source 1 (...)) as int32 — 5000000000 overflows int32` — silent wrap-around is a garbage config that boots. |
+| A bare number lands in a `time.Duration` field | `... as time.Duration — a duration needs a unit — write it as a string like "30s"` — silently meaning nanoseconds would turn a 30-second intent into a 30ns timeout. |
+| `validate:"required"` on a struct section | `config: postgres: validate:"required" on a struct section does nothing — mark its leaf fields required instead` — silently dropping the tag is the failure mode this package exists to prevent. |
+| Two fields bind one key | `config: fields A and B both bind the key "x" — config: tags must be unique` |
+| `WithEnvPrefix("")` | `config: WithEnvPrefix("") would read bare variables like PATH — pass a real prefix` |
+| A pointer or map field | `... — pointer and map fields are not supported — use a value struct or a supported leaf type` |
+
+All of the above rows below the first seven were added by the 2026-08-01
+adversarial review, each reproduced before the fix. One documented line from
+the same review: **an environment variable that is set but empty counts as
+set** — emptiness is a value, and `required` checks presence, not
+non-emptiness.
 
 ## Testing
 

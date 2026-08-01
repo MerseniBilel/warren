@@ -371,6 +371,13 @@ and stops the already-started hooks in reverse before returning. `Ready()`
 flips true when `Start` returns nil and false as `Stop`'s first action —
 before the first `OnStop` runs.
 
+A lifecycle runs once: `Start` a second time — or after `Stop` — is an error.
+`Stop` is idempotent, and `Stop` arriving while `Start` is mid-boot wins:
+readiness closes immediately, `Start` abandons after the in-flight hook and
+returns "boot abandoned", and `Stop` unwinds what had started — a stopped
+process never advertises ready. `Append` is safe from inside a running hook
+(the adapter pattern); the appended hook starts in its turn.
+
 **Shutdown order is the reason this is built, not borrowed:**
 
 ```
@@ -705,7 +712,7 @@ func (u *User) Activate() error {
         return errors.Conflict("user already active")
     }
     u.Status = StatusActive
-    u.Raise(UserActivated{UserID: u.ID()})
+    u.Raise(UserActivated{UserID: u.ID(), At: time.Now()})
     return nil
 }
 ```

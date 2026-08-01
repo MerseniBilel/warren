@@ -106,6 +106,10 @@ func TestIs(t *testing.T) {
 		{"wrapped twice with %w", fmt.Errorf("outer: %w", fmt.Errorf("inner: %w", notFound)), werrors.CodeNotFound, true},
 		{"non-Warren error", stderrors.New("plain"), werrors.CodeInternal, false},
 		{"nil error", nil, werrors.CodeNotFound, false},
+		{"a Warren error inside another Warren error is still found", werrors.Internal(notFound), werrors.CodeNotFound, true},
+		{"the outer code of a rewrapped error is found too", werrors.Internal(notFound), werrors.CodeInternal, true},
+		{"joined errors are searched", stderrors.Join(stderrors.New("plain"), notFound), werrors.CodeNotFound, true},
+		{"typed-nil *Error does not panic and does not match", (*werrors.Error)(nil), werrors.CodeNotFound, false},
 	}
 
 	for _, tc := range cases {
@@ -177,6 +181,37 @@ func TestWithDetail(t *testing.T) {
 			t.Errorf("Details() = %v, want nil", got)
 		}
 	})
+}
+
+// TestTypedNilIsSafe covers the classic slip: a nil *Error escaping through
+// a non-nil error interface. No method may panic on it.
+func TestTypedNilIsSafe(t *testing.T) {
+	t.Parallel()
+
+	var e *werrors.Error
+	if got := e.Error(); got != "<nil>" {
+		t.Errorf("nil Error() = %q, want %q", got, "<nil>")
+	}
+	if got := e.Code(); got != "" {
+		t.Errorf("nil Code() = %q, want the zero Code (adapters map it to INTERNAL)", got)
+	}
+	if e.Message() != "" || e.Details() != nil || e.Unwrap() != nil {
+		t.Error("nil accessors did not return zero values")
+	}
+	if e.WithDetail("k", "v") != nil {
+		t.Error("nil WithDetail did not return nil")
+	}
+}
+
+func TestDetailsCopyIsShallow(t *testing.T) {
+	t.Parallel()
+
+	// The documented contract: the map is copied, the values are shared.
+	err := werrors.Conflict("taken").WithDetail("fields", []string{"email"})
+	err.Details()["fields"].([]string)[0] = "mutated"
+	if got := err.Details()["fields"].([]string)[0]; got != "mutated" {
+		t.Errorf("value sharing changed: Details()[fields][0] = %q — update the doc if the copy became deep", got)
+	}
 }
 
 func TestSevenCodesAreDistinct(t *testing.T) {

@@ -23,7 +23,7 @@ type correlationKey struct{}
 // a unit test, a detached goroutine — it returns slog.Default(), so the
 // result is always usable and never nil.
 func FromContext(ctx context.Context) *slog.Logger {
-	if l, ok := ctx.Value(loggerKey{}).(*slog.Logger); ok {
+	if l, ok := ctx.Value(loggerKey{}).(*slog.Logger); ok && l != nil {
 		return l
 	}
 	return slog.Default()
@@ -31,8 +31,13 @@ func FromContext(ctx context.Context) *slog.Logger {
 
 // WithLogger returns a copy of ctx carrying l. It is the seeding side of
 // FromContext, called by transport adapters at the edge of a request; handler
-// code has no reason to call it.
+// code has no reason to call it. A nil l is not carried: the context behaves
+// as unseeded, so FromContext's never-nil guarantee holds even against an
+// adapter seeding an uninitialized logger field.
 func WithLogger(ctx context.Context, l *slog.Logger) context.Context {
+	if l == nil {
+		return ctx
+	}
 	return context.WithValue(ctx, loggerKey{}, l)
 }
 

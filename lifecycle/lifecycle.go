@@ -39,21 +39,28 @@ type Hook struct {
 }
 
 // Lifecycle collects hooks at boot and runs them in order on the way up and
-// in reverse on the way down.
+// in reverse on the way down. A lifecycle runs once: Start a second time —
+// or after Stop — is an error.
 type Lifecycle interface {
-	// Append registers a hook. Registration order is start order.
+	// Append registers a hook. Registration order is start order. It is safe
+	// to call from within a running hook — a hook whose OnStart appends
+	// another hook adds it to the end of the sequence, and it is started in
+	// its turn.
 	Append(Hook)
 
 	// Start runs every hook's OnStart in registration order. It is boot step
 	// 6. If a hook fails, the already-started hooks are stopped in reverse
 	// and the returned error carries the failure first, then any rollback
-	// failures. Readiness opens only when Start returns nil.
+	// failures. If Stop is called while Start is running, Start abandons the
+	// boot after the in-flight hook and Stop unwinds what had started.
+	// Readiness opens only when Start returns nil.
 	Start(context.Context) error
 
 	// Stop runs every started hook's OnStop in reverse registration order,
 	// bounded by the force-exit deadline. It is shutdown step 10. Its first
-	// action is closing readiness — before the first OnStop runs. A failing
-	// hook does not stop the sequence; every failure is returned joined.
+	// action is closing readiness — before the first OnStop runs, and even
+	// when Start is still mid-boot. A failing hook does not stop the
+	// sequence; every failure is returned joined. Stop is idempotent.
 	Stop(context.Context) error
 
 	// Ready reports the readiness state warren/health serves: false until
@@ -80,10 +87,26 @@ func New(opts ...Option) Lifecycle {
 	return l
 }
 
+const (
+	stateIdle = iota
+	stateStarting
+	stateStarted
+	stateStopping
+	stateStopped
+)
+
 type lifecycle struct {
-	mu        sync.Mutex
-	hooks     []Hook
-	started   int // hooks whose OnStart completed; the range Stop unwinds
+	// mu guards hooks, started, and state — data only, never held while a
+	// hook runs, so a hook's OnStart may Append without deadlocking.
+	mu      sync.Mutex
+	hooks   []Hook
+	started int // hooks whose OnStart completed; the range Stop unwinds
+	state   int
+
+	// runMu serializes hook execution: Start's loop and Stop's unwind never
+	// run hooks concurrently with each other.
+	runMu sync.Mutex
+
 	forceExit time.Duration
 	ready     atomic.Bool
 }
@@ -98,62 +121,117 @@ func (l *lifecycle) Ready() bool { return l.ready.Load() }
 
 func (l *lifecycle) Start(ctx context.Context) error {
 	l.mu.Lock()
-	defer l.mu.Unlock()
+	if l.state != stateIdle {
+		l.mu.Unlock()
+		return errStartAgain()
+	}
+	l.state = stateStarting
+	l.mu.Unlock()
 
-	for i, h := range l.hooks {
+	l.runMu.Lock()
+	for i := 0; ; i++ {
+		l.mu.Lock()
+		if l.state != stateStarting {
+			// Stop arrived mid-boot: abandon; Stop owns the unwind.
+			l.mu.Unlock()
+			l.runMu.Unlock()
+			return errStoppedDuringStart()
+		}
+		if i >= len(l.hooks) {
+			l.state = stateStarted
+			l.ready.Store(true)
+			l.mu.Unlock()
+			l.runMu.Unlock()
+			return nil
+		}
+		h := l.hooks[i]
+		l.mu.Unlock()
+
 		if h.OnStart != nil {
 			if err := runHook(ctx, h, h.OnStart, "OnStart"); err != nil {
-				rollback := l.stopLocked(ctx)
+				l.mu.Lock()
+				l.state = stateStopped
+				l.mu.Unlock()
+				rollback := l.unwind(ctx)
+				l.runMu.Unlock()
 				return errors.Join(err, rollback)
 			}
 		}
+		l.mu.Lock()
 		l.started = i + 1
+		l.mu.Unlock()
 	}
-	l.ready.Store(true)
-	return nil
 }
 
 func (l *lifecycle) Stop(ctx context.Context) error {
-	// Readiness closes before the first OnStop runs — shutdown step 9. The
-	// load balancer must drain before anything stops.
-	l.ready.Store(false)
-
 	l.mu.Lock()
-	defer l.mu.Unlock()
-	return l.stopLocked(ctx)
+	// Readiness closes first — before the first OnStop, and even mid-boot:
+	// a Start still running will notice the state change, abandon, and never
+	// re-open it.
+	l.ready.Store(false)
+	if l.state != stateStopped {
+		l.state = stateStopping
+	}
+	l.mu.Unlock()
+
+	l.runMu.Lock()
+	defer l.runMu.Unlock()
+	err := l.unwind(ctx)
+	l.mu.Lock()
+	l.state = stateStopped
+	l.mu.Unlock()
+	return err
 }
 
-// stopLocked unwinds the started hooks in reverse under the force-exit
-// deadline. It is shared by Stop and by Start's failure rollback.
-func (l *lifecycle) stopLocked(ctx context.Context) error {
+// unwind stops the started hooks in reverse under the force-exit deadline.
+// Callers hold runMu. It is idempotent: started drains to zero.
+func (l *lifecycle) unwind(ctx context.Context) error {
 	deadline, cancel := context.WithTimeout(ctx, l.forceExit)
 	defer cancel()
 
 	var errs []error
-	for i := l.started - 1; i >= 0; i-- {
-		if deadline.Err() != nil {
-			errs = append(errs, errForceExit(l.forceExit, l.unfinishedLocked(i)))
+	for {
+		l.mu.Lock()
+		i := l.started - 1
+		if i < 0 {
+			l.mu.Unlock()
 			break
 		}
 		h := l.hooks[i]
 		l.started = i
+		l.mu.Unlock()
+
+		if deadline.Err() != nil {
+			// The deadline expired before this hook ran: it and everything
+			// below it are unfinished.
+			errs = append(errs, errForceExit(l.forceExit, l.namesFrom(i)))
+			break
+		}
 		if h.OnStop == nil {
 			continue
 		}
 		if err := runHook(deadline, h, h.OnStop, "OnStop"); err != nil {
-			if deadline.Err() != nil && !isTimeout(err) {
-				errs = append(errs, errForceExit(l.forceExit, l.unfinishedLocked(i)))
+			var abandoned *hookAbandonedError
+			if errors.As(err, &abandoned) && deadline.Err() != nil {
+				// The force-exit deadline fired while this hook was still
+				// running: it is genuinely unfinished, as is everything
+				// below it.
+				errs = append(errs, errForceExit(l.forceExit, l.namesFrom(i)))
 				break
 			}
+			// The hook returned — its own failure or its own timeout. Keep
+			// its real error; it is not "still stopping".
 			errs = append(errs, err)
 		}
 	}
 	return errors.Join(errs...)
 }
 
-// unfinishedLocked names the hooks from index i down — the ones that had not
-// finished when the force-exit deadline expired.
-func (l *lifecycle) unfinishedLocked(i int) []string {
+// namesFrom names the hooks from index i down to 0 — the ones that had not
+// finished when the force-exit deadline expired, current first.
+func (l *lifecycle) namesFrom(i int) []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
 	var names []string
 	for ; i >= 0; i-- {
 		names = append(names, l.hooks[i].Name)
@@ -163,8 +241,10 @@ func (l *lifecycle) unfinishedLocked(i int) []string {
 
 // runHook runs fn under the hook's own timeout, in a goroutine so that a
 // hook that ignores its context cannot wedge the sequence past its bounds.
-// A hook abandoned at its deadline leaks its goroutine; the force-exit
-// deadline exists because the process is about to exit anyway.
+// A hook abandoned at a deadline leaks its goroutine: acceptable on the
+// force-exit path (the process is about to exit) and a documented cost on a
+// Start timeout, where the goroutine may complete its side effect
+// unobserved — which is why OnStart should respect its context.
 func runHook(ctx context.Context, h Hook, fn func(context.Context) error, phase string) error {
 	hctx := ctx
 	if h.Timeout > 0 {
@@ -176,8 +256,7 @@ func runHook(ctx context.Context, h Hook, fn func(context.Context) error, phase 
 	done := make(chan error, 1)
 	go func() { done <- fn(hctx) }()
 
-	select {
-	case err := <-done:
+	classify := func(err error) error {
 		switch {
 		case err == nil:
 			return nil
@@ -188,18 +267,37 @@ func runHook(ctx context.Context, h Hook, fn func(context.Context) error, phase 
 		default:
 			return errHookFailed(h.Name, phase, err)
 		}
+	}
+
+	select {
+	case err := <-done:
+		return classify(err)
 	case <-hctx.Done():
-		if h.Timeout > 0 && ctx.Err() == nil {
-			return errHookTimeout(h.Name, phase, h.Timeout)
+		// The deadline fired, but the hook may be mid-return — waking on
+		// ctx.Done and returning its own result is exactly the well-behaved
+		// pattern. One short grace window tells that apart from a hook that
+		// is genuinely wedged, so a hook that DID return is never reported
+		// as "still stopping" and its real error is never swallowed.
+		grace := time.NewTimer(returnGrace)
+		defer grace.Stop()
+		select {
+		case err := <-done:
+			return classify(err)
+		case <-grace.C:
+			// The hook goroutine is still running and is now abandoned.
+			if h.Timeout > 0 && ctx.Err() == nil {
+				return errHookTimeout(h.Name, phase, h.Timeout)
+			}
+			return errHookAbandoned(h.Name, phase, ctx.Err())
 		}
-		return errHookFailed(h.Name, phase, ctx.Err())
 	}
 }
 
-func isTimeout(err error) bool {
-	var t *hookTimeoutError
-	return errors.As(err, &t)
-}
+// returnGrace is how long a hook gets to deliver its result after its
+// deadline fires before it is declared abandoned. It exists only to
+// disambiguate "returned at the deadline" from "never returns"; it is not a
+// second timeout.
+const returnGrace = 100 * time.Millisecond
 
 type hookFailedError struct {
 	name  string
@@ -231,6 +329,24 @@ func errHookTimeout(name, phase string, timeout time.Duration) error {
 	return &hookTimeoutError{name: name, phase: phase, timeout: timeout}
 }
 
+// hookAbandonedError marks a hook whose goroutine was still running when its
+// context died — it never returned, unlike a failure or a per-hook timeout.
+type hookAbandonedError struct {
+	name  string
+	phase string
+	cause error
+}
+
+func (e *hookAbandonedError) Error() string {
+	return fmt.Sprintf("lifecycle: hook %q was abandoned during %s: %v", e.name, e.phase, e.cause)
+}
+
+func (e *hookAbandonedError) Unwrap() error { return e.cause }
+
+func errHookAbandoned(name, phase string, cause error) error {
+	return &hookAbandonedError{name: name, phase: phase, cause: cause}
+}
+
 type forceExitError struct {
 	deadline   time.Duration
 	unfinished []string
@@ -246,4 +362,12 @@ func (e *forceExitError) Error() string {
 
 func errForceExit(deadline time.Duration, unfinished []string) error {
 	return &forceExitError{deadline: deadline, unfinished: unfinished}
+}
+
+func errStartAgain() error {
+	return errors.New("lifecycle: Start called again — a lifecycle starts once; construct a new one")
+}
+
+func errStoppedDuringStart() error {
+	return errors.New("lifecycle: Stop arrived during Start — boot abandoned, readiness never opened")
 }

@@ -6,7 +6,9 @@ import (
 	"flag"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -258,6 +260,149 @@ func TestForceExitDeadline(t *testing.T) {
 	assertGolden(t, "force_exit", err.Error())
 	if slices.Contains(j.all(), "stop never-reached") {
 		t.Error("a hook ran after the force-exit deadline expired")
+	}
+}
+
+func TestStartTwiceIsAnError(t *testing.T) {
+	t.Parallel()
+
+	l := lifecycle.New()
+	if err := l.Start(context.Background()); err != nil {
+		t.Fatalf("first Start: %v", err)
+	}
+	err := l.Start(context.Background())
+	if err == nil {
+		t.Fatal("second Start returned nil — every OnStart would run twice")
+	}
+	assertGolden(t, "start_again", err.Error())
+}
+
+// TestStopDuringStart covers the review's readiness inversion: SIGTERM
+// arriving mid-boot must leave readiness closed forever — Start must not
+// re-open it after Stop has begun.
+func TestStopDuringStart(t *testing.T) {
+	t.Parallel()
+
+	j := &journal{}
+	l := lifecycle.New()
+	hookRunning := make(chan struct{})
+	release := make(chan struct{})
+	l.Append(lifecycle.Hook{
+		Name: "slow-boot",
+		OnStart: func(context.Context) error {
+			j.add("start slow-boot")
+			close(hookRunning)
+			<-release
+			return nil
+		},
+		OnStop: func(context.Context) error { j.add("stop slow-boot"); return nil },
+	})
+	l.Append(hook("never-started", j))
+
+	startErr := make(chan error, 1)
+	go func() { startErr <- l.Start(context.Background()) }()
+	<-hookRunning
+
+	stopErr := make(chan error, 1)
+	go func() { stopErr <- l.Stop(context.Background()) }()
+	// Stop's first section (readiness + state, under mu) has provably run
+	// once its goroutine is parked on runMu waiting for Start's loop — spin
+	// on the goroutine dump until it is, then release the boot hook. No
+	// sleeps: this waits on an observable state, not on wall time.
+	buf := make([]byte, 1<<20)
+	for {
+		stacks := string(buf[:runtime.Stack(buf, true)])
+		if strings.Contains(stacks, "lifecycle.(*lifecycle).Stop") && strings.Contains(stacks, "sync.(*Mutex).Lock") {
+			break
+		}
+		runtime.Gosched()
+	}
+	close(release)
+
+	if err := <-startErr; err == nil {
+		t.Error("Start returned nil though Stop arrived mid-boot")
+	} else {
+		assertGolden(t, "stopped_during_start", err.Error())
+	}
+	if err := <-stopErr; err != nil {
+		t.Errorf("Stop: %v", err)
+	}
+	if l.Ready() {
+		t.Error("Ready() = true after Stop — a stopped process advertises ready")
+	}
+	want := []string{"start slow-boot", "stop slow-boot"}
+	if got := j.all(); !slices.Equal(got, want) {
+		t.Errorf("activity = %v, want %v — Stop unwinds what started; never-started stays untouched", got, want)
+	}
+}
+
+// TestAppendFromInsideAHook covers the review's deadlock: a hook whose
+// OnStart appends another hook is the documented adapter pattern and must
+// neither deadlock nor lose the appended hook.
+func TestAppendFromInsideAHook(t *testing.T) {
+	t.Parallel()
+
+	j := &journal{}
+	l := lifecycle.New()
+	l.Append(lifecycle.Hook{
+		Name: "adapter",
+		OnStart: func(context.Context) error {
+			j.add("start adapter")
+			l.Append(hook("late", j))
+			return nil
+		},
+	})
+
+	if err := l.Start(context.Background()); err != nil {
+		t.Fatalf("Start deadlocked or failed: %v", err)
+	}
+	if err := l.Stop(context.Background()); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	want := []string{"start adapter", "start late", "stop late"}
+	if got := j.all(); !slices.Equal(got, want) {
+		t.Errorf("activity = %v, want %v — the appended hook starts in its turn", got, want)
+	}
+}
+
+// TestForceExitKeepsARealHookError covers the review's misreport: a hook
+// that respects its context and returns its own failure at the deadline is
+// not "still stopping" — its error must survive, and only genuinely
+// unfinished hooks are named.
+func TestForceExitKeepsARealHookError(t *testing.T) {
+	t.Parallel()
+
+	diskFull := stderrors.New("disk full: could not flush")
+	l := lifecycle.New(lifecycle.ForceExitDeadline(50 * time.Millisecond))
+	l.Append(lifecycle.Hook{Name: "pool", OnStop: func(context.Context) error { return nil }})
+	l.Append(lifecycle.Hook{
+		Name: "relay",
+		// Respects its context: wakes on the force-exit deadline and reports
+		// its own genuine failure.
+		OnStop: func(ctx context.Context) error {
+			<-ctx.Done()
+			return diskFull
+		},
+	})
+
+	if err := l.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	err := l.Stop(context.Background())
+	if err == nil {
+		t.Fatal("Stop returned nil")
+	}
+	if !stderrors.Is(err, diskFull) {
+		t.Errorf("the hook's real error was swallowed: %v", err)
+	}
+	if strings.Contains(err.Error(), `"relay"`) && strings.Contains(err.Error(), "still stopping") {
+		// relay finished (it returned); only pool below it may be named.
+		if strings.Contains(err.Error(), `still stopping: "relay"`) {
+			t.Errorf("a finished hook is reported as still stopping: %v", err)
+		}
+	}
+	if !strings.Contains(err.Error(), `still stopping: "pool"`) {
+		t.Errorf("the genuinely unfinished hook is not named: %v", err)
 	}
 }
 

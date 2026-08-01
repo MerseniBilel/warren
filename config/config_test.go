@@ -301,6 +301,107 @@ func TestAllFailuresReportedTogether(t *testing.T) {
 	}
 }
 
+func TestConversionRefusesGarbage(t *testing.T) {
+	t.Parallel()
+
+	t.Run("a bare number is not a duration", func(t *testing.T) {
+		t.Parallel()
+		_, err := config.Load[appConfig](stub{m: map[string]any{
+			"postgres": map[string]any{"dsn": "x"},
+			"kafka":    map[string]any{"flush": 30},
+		}})
+		if err == nil {
+			t.Fatal("a bare 30 for a duration field loaded — it would have meant 30 nanoseconds")
+		}
+		if !strings.Contains(err.Error(), `write it as a string like "30s"`) {
+			t.Errorf("error does not say how to fix it: %v", err)
+		}
+	})
+
+	t.Run("an overflowing int is refused, not wrapped", func(t *testing.T) {
+		t.Parallel()
+		_, err := config.Load[appConfig](stub{m: map[string]any{
+			"postgres": map[string]any{"dsn": "x", "max_conns": int64(5_000_000_000)},
+		}})
+		if err == nil {
+			t.Fatal("5_000_000_000 loaded into an int32 — it would have wrapped to garbage")
+		}
+		if !strings.Contains(err.Error(), "overflows int32") {
+			t.Errorf("error does not name the overflow: %v", err)
+		}
+	})
+
+	t.Run("pointer fields get a structural hint", func(t *testing.T) {
+		t.Parallel()
+		type withPtr struct {
+			P *struct{} `config:"p"`
+		}
+		_, err := config.Load[withPtr](stub{m: map[string]any{"p": "x"}})
+		if err == nil {
+			t.Fatal("a pointer field loaded")
+		}
+		if !strings.Contains(err.Error(), "pointer and map fields are not supported") {
+			t.Errorf("error does not explain the structural mistake: %v", err)
+		}
+	})
+}
+
+func TestTagMistakesFailBoot(t *testing.T) {
+	t.Parallel()
+
+	t.Run("required on a struct section is rejected, not ignored", func(t *testing.T) {
+		t.Parallel()
+		type sectioned struct {
+			PG struct {
+				DSN string `config:"dsn"`
+			} `config:"postgres" validate:"required"`
+		}
+		_, err := config.Load[sectioned]()
+		if err == nil {
+			t.Fatal("a required struct section was silently ignored")
+		}
+		if !strings.Contains(err.Error(), "mark its leaf fields required instead") {
+			t.Errorf("error does not say how to fix the tag: %v", err)
+		}
+	})
+
+	t.Run("duplicate keys are rejected", func(t *testing.T) {
+		t.Parallel()
+		type dup struct {
+			A string `config:"x" default:"alpha"`
+			B string `config:"x" default:"beta"`
+		}
+		_, err := config.Load[dup]()
+		if err == nil {
+			t.Fatal("two fields binding one key loaded — one default silently clobbered the other")
+		}
+		if !strings.Contains(err.Error(), `both bind the key "x"`) {
+			t.Errorf("error does not name the colliding fields: %v", err)
+		}
+	})
+
+	t.Run("an empty env prefix is rejected", func(t *testing.T) {
+		t.Parallel()
+		_, err := config.Load[appConfig](config.WithEnvPrefix(""))
+		if err == nil {
+			t.Fatal(`WithEnvPrefix("") loaded — it would read bare variables like PATH`)
+		}
+	})
+}
+
+// TestEmptyEnvValueCountsAsSet pins the documented line: emptiness is a
+// value; required checks presence, not non-emptiness.
+func TestEmptyEnvValueCountsAsSet(t *testing.T) {
+	t.Setenv("WARREN_POSTGRES_DSN", "")
+	cfg, err := config.Load[appConfig](config.WithEnvPrefix("WARREN"))
+	if err != nil {
+		t.Fatalf("Load with an empty-but-set required variable: %v", err)
+	}
+	if cfg.Postgres.DSN != "" {
+		t.Errorf("DSN = %q, want the explicitly empty value", cfg.Postgres.DSN)
+	}
+}
+
 // TestNoGlobalState is the Viper failure mode this package exists to avoid:
 // concurrent loads with different sources and prefixes must not interfere.
 func TestNoGlobalState(t *testing.T) {

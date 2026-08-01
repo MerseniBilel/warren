@@ -173,7 +173,18 @@ ready → ready at step 7 → not ready at step 9.
 | Start (step 6) | A hook's `OnStart` exceeds `Timeout` | `lifecycle: hook "cache" exceeded its 50ms timeout during OnStart — raise Hook.Timeout or make the hook respect its context` |
 | Stop (step 10) | A hook's `OnStop` returns an error | `lifecycle: hook "relay" failed during OnStop: <cause>` — the sequence continues; every failure is returned joined. |
 | Stop (step 10) | A hook's `OnStop` exceeds `Timeout` | Same shape as the OnStart timeout, with `OnStop`. |
-| Stop (step 10) | The force-exit deadline expires | `lifecycle: force-exit deadline (30s) expired with hooks still stopping: "wedged", "never-reached" — these hooks must respect their context's cancellation` — names every unfinished hook, current first. |
+| Stop (step 10) | The force-exit deadline expires | `lifecycle: force-exit deadline (30s) expired with hooks still stopping: "wedged", "never-reached" — these hooks must respect their context's cancellation` — names every unfinished hook, current first. A hook that *returned* at the deadline is never listed and its real error survives, joined alongside; a 100ms grace window after the deadline tells "returned at the deadline" apart from "wedged". |
+| Start | `Start` called a second time, or after `Stop` | `lifecycle: Start called again — a lifecycle starts once; construct a new one` |
+| Start | `Stop` arrived mid-boot | `lifecycle: Stop arrived during Start — boot abandoned, readiness never opened` — Stop owns the unwind of what had started. |
+| Either | A hook's goroutine never returned at an expired deadline | `lifecycle: hook "x" was abandoned during OnStart: context deadline exceeded` — usually subsumed by the force-exit row on the Stop path. |
+
+**Hardened by the 2026-08-01 adversarial review** (both reproduced before the
+fix): `Stop` racing a slow `Start` can no longer leave readiness open — state
+transitions and the readiness flip share one mutex, `Start` re-checks state
+before opening readiness, and a mid-boot `Stop` wins; and a hook's `OnStart`
+calling `Append` — the documented adapter pattern — no longer deadlocks: the
+data lock is never held while a hook runs (`runMu` serializes hook execution
+separately), and a hook appended mid-`Start` is started in its turn.
 
 ## Testing
 

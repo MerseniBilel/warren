@@ -38,6 +38,12 @@ type Root[T ID] interface {
 // only object a repository loads or saves. It accumulates the domain events
 // raised while its invariants were enforced; those events are not published
 // until the unit of work commits.
+//
+// An aggregate is used through a pointer and confined to one goroutine at a
+// time — it is a consistency boundary, not a shared structure. Copying an
+// aggregate value after events are raised aliases the pending-event array,
+// and two copies then corrupt each other's events; §3.1's pattern (*User
+// everywhere after construction) is the contract, not a style choice.
 type AggregateRoot[T ID] struct {
 	Entity[T]
 	events []Event
@@ -47,11 +53,18 @@ type AggregateRoot[T ID] struct {
 // construction. It is called by the aggregate's own constructor — the
 // aggregate mints its identifier before the first event is raised — and by
 // the reconstitution path a repository loads through.
+//
+// It is the only way identity is set: an aggregate assembled without it — the
+// zero value — silently carries the zero identifier, which a repository would
+// save under an empty key. Repositories reconstitute through this
+// constructor, never by filling in the struct.
 func NewAggregateRoot[T ID](id T) AggregateRoot[T] {
 	return AggregateRoot[T]{Entity: Entity[T]{id: id}}
 }
 
-// Raise records a domain event on the aggregate. It publishes nothing.
+// Raise records a domain event on the aggregate. It publishes nothing. Like
+// every aggregate method it assumes single-goroutine confinement; concurrent
+// Raise is a data race by design, not an oversight.
 func (a *AggregateRoot[T]) Raise(e Event) {
 	a.events = append(a.events, e)
 }

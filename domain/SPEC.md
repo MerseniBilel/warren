@@ -175,7 +175,7 @@ func (u *User) Activate() error {
 		return errors.Conflict("user already active")
 	}
 	u.Status = StatusActive
-	u.Raise(UserActivated{UserID: u.ID()})
+	u.Raise(UserActivated{UserID: u.ID(), At: time.Now()})
 	return nil
 }
 ```
@@ -195,6 +195,20 @@ identifiers work as map keys and as `Repository[T, ID]`'s key parameter
 knowing its concrete type. `Root[T]` exists because a struct cannot serve as a
 Go type constraint: it is the interface `Repository[T domain.Root[ID],
 ID domain.ID]` is generic over, and `AggregateRoot` satisfies it.
+
+**Aggregates are pointers, confined to one goroutine.** Two contracts the
+2026-08-01 review made explicit, stated in the doc comments where they are
+read: copying an aggregate *value* after events are raised aliases the
+pending-event array — two copies then clobber each other's `Raise`d events —
+so §3.1's `*User`-everywhere pattern is the contract, not a style choice; and
+an aggregate is a consistency boundary, not a shared structure — concurrent
+`Raise` is a data race by design. Mechanical enforcement (a `noCopy` field)
+was considered and rejected: `go vet` would then flag the legitimate
+`AggregateRoot: domain.NewAggregateRoot(...)` construction copy that §3.1
+itself prescribes. Likewise, identity exists only through `NewAggregateRoot`:
+the zero-value aggregate silently carries the zero identifier, so
+repositories must reconstitute through the constructor — the generated
+repository template (Open question 3) must respect this.
 
 **Event accumulation.** `Raise` appends to the aggregate's pending events.
 Nothing observes them until something drains them. `PullEvents` is
