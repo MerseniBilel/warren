@@ -1,5 +1,5 @@
 @startuml di-usage
-title warren/di — scoped containers, validation before instantiation\nsource: di/SPEC.md (approved 2026-08-01); warren.md §2.2, §1.2
+title warren/di — scoped containers, validation before instantiation\nsource: warren.md §2.2 (implemented; spec retired 2026-08-01); warren.md §2.2, §1.2
 
 participant "bootstrapper\n(warren root)" as boot
 participant "root Container\n(config, logger, tracer)" as root

@@ -1,5 +1,5 @@
 @startuml config-usage
-title warren/config — core parses no files; Sources are the seam\nsource: config/SPEC.md (approved 2026-08-01); warren.md §2.4, §1.6
+title warren/config — core parses no files; Sources are the seam\nsource: warren.md §2.4 (implemented; spec retired 2026-08-01); warren.md §2.4, §1.6
 
 participant "main.go" as main
 participant "warren/config\n(core: defaults·env·flags)" as config

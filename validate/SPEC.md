@@ -245,12 +245,9 @@ call and then becomes golden-file-tested contract.
    answer; if it does not, there are two validators in the kernel with one tag
    vocabulary.
 
-6. **Naming: `*warren.Error` or `*errors.Error`?** §2.7 says failures surface as
-   `*warren.Error`, and the §9 ledger says "errors normalised to
-   `warren.Error`". But §2.6 defines `*Error` in package `warren/errors`, whose
-   qualified name is `errors.Error`. §4.2 also says `warren.Error`. The same
-   question is raised in [`errors/SPEC.md`](../errors/SPEC.md) Open questions 3;
-   it needs one answer, applied in both places, with warren.md corrected.
+6. **RESOLVED (2026-08-01) — the type is `errors.Error`, everywhere.** Decided
+   with the errors package (now implemented); warren.md's stray `warren.Error`
+   references in §1.4, §2.7, §4.2, and the §9 ledger were corrected.
 
 7. **What is a detail key?** The Go field name, the `json:` name, or a dotted
    path for nested structs? §2.4's config structs are nested two deep, and §2.4

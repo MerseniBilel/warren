@@ -240,3 +240,14 @@ This package is a test harness and is itself tested:
    is already in AGENT.md § Testing. Does `warren/testing` ship the golden-file
    comparison helper the CLI uses, or does §8 own its own? A CLI helper here
    would put a test-only module in the tooling ring's dependency set.
+
+Carried forward from the retired kernel specs (2026-08-01):
+
+5. **Where does the cross-adapter conformance test live?** "Every adapter
+   maps every code of §2.6" is the property that keeps the error table
+   honest, but the core module cannot import the adapters and adapters never
+   import each other (invariant 4). This package is the natural home — decide
+   before the first transport adapter is built. *(was errors' open question
+   8)* The same decision owns the home of the exported aggregate-semantics
+   and lifecycle contract suites, which are implemented as internal tests in
+   `domain` and `lifecycle` until a reusable package exists.

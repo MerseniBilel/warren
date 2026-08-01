@@ -363,3 +363,13 @@ names none.
 12. **Is the relay's flush bounded?** §2.3 step 6 sets a 30s force-exit
     deadline; whether a flush with a large backlog is capped by a per-hook
     timeout (`lifecycle.Hook.Timeout`, §2.3) or by that deadline is unstated.
+
+Carried forward from the retired domain spec (2026-08-01):
+
+13. **Does an `Event` carry a payload, and how does it become
+    `broker.Message.Payload []byte`?** `domain.Event` exposes only name,
+    time, and aggregate ID; §3.3 step 4 inserts events into the outbox and
+    §5.5's relay drains them to the broker. The serialisation boundary —
+    a marshalling method on `Event`, JSON-encoding of the concrete type by
+    the outbox writer, or a codec registered at boot — is unspecified and is
+    the seam between §3.1 and §3.4. *(was domain's open question 4)*

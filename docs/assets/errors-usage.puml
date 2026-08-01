@@ -1,5 +1,5 @@
 @startuml errors-usage
-title warren/errors — one vocabulary, three columns\nsource: errors/SPEC.md (approved 2026-08-01); warren.md §1.4, §2.6
+title warren/errors — one vocabulary, three columns\nsource: warren.md §2.6 (implemented; spec retired 2026-08-01); warren.md §1.4, §2.6
 
 participant "domain / application\ncode" as domain
 participant "errors.Error\n(kernel)" as err

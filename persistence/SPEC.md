@@ -360,3 +360,18 @@ with no reflection.
    §1.6's repository layout lists only `persistence/postgres`,
    `persistence/mongo`, and `persistence/redis`. Peripheral to this port's
    shape, but the contract suite's driver list depends on it.
+
+Carried forward from the retired domain spec (2026-08-01):
+
+7. **`Specification.ToSQL()` puts a persistence concern in the domain
+   contract.** §3.1 defines it on a type in `warren/domain`, while an ORM is
+   the deliberate omission and Mongo/Redis have no SQL. Options left open:
+   keep it and accept SQL as a domain-visible detail; move translation to a
+   persistence-side `SpecificationTranslator`; or make `Specification` a
+   marker with translation entirely in the adapter. Port-shape decision,
+   settle before this port is implemented. *(was domain's open question 1)*
+8. **The generated repository must reconstitute, not scan into fields.**
+   `Entity[T].id` is unexported and set only through `NewAggregateRoot`, so
+   §6.1's `row.Scan(&u.ID, ...)` template cannot compile; the template needs
+   redesigning around the constructor path, and warren.md §6.1 needs amending
+   to match. *(was domain's open question 3)*

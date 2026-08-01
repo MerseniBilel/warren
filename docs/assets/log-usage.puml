@@ -1,5 +1,5 @@
 @startuml log-usage
-title warren/log — context-carried logger, correlation ID\nsource: log/SPEC.md (approved 2026-08-01); warren.md §2.5
+title warren/log — context-carried logger, correlation ID\nsource: warren.md §2.5 (implemented; spec retired 2026-08-01); warren.md §2.5
 
 participant "transport adapter\n(edge ring)" as edge
 participant "context.Context" as ctx

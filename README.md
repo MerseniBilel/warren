@@ -4,7 +4,8 @@
 
 > ⚠️ **Pre-release.** Nothing is importable yet. The repository was reset in
 > July 2026 and is being rebuilt spec-first: every package gets an approved
-> `SPEC.md` before its first line of Go. [warren.md](warren.md) is the design;
+> `SPEC.md` before its first line of Go, retired once the package is
+> implemented and reviewed. [warren.md](warren.md) is the design;
 > [AGENT.md](AGENT.md) is the rules.
 
 ---
@@ -65,19 +66,23 @@ Progress is spec-first: ☑ means *done and verified*, not *started*.
 
 ### Phase 1 — kernel (buildable on Go 1.26, in dependency order)
 
+All six implemented packages were adversarially reviewed on 2026-08-01
+(23 reproduced findings, all fixed with regression tests) and their specs
+retired — the code, tests, golden files, and warren.md entries are the
+contract now.
+
 - [x] `errors` — the semantic vocabulary; load-bearing for everything
-      *(spec approved; implemented, golden-file tested, `make ci` green)*
-- [x] `domain` — `Entity`, `Root[K]`, `AggregateRoot`, `Event` *(spec approved;
-      implemented, §3.1 example compiles as a test, `make ci` green)*
-- [x] `log` — context-carried logger *(spec approved; implemented, Vendor mode
-      settled, seeding surface added, `make ci` green)*
-- [x] `di` — the container wrap; the golden diagnostic is the product
-      *(spec approved; implemented, golden diagnostic byte-for-byte, dig
-      v1.19.0 audited, `make ci` green)*
-- [x] `lifecycle` — ordered start/stop, readiness gate *(spec approved;
-      implemented, `Ready()` handle settled, `make ci` green)*
-- [x] `config` (core) — Source-split loading *(implemented: Load, Source,
-      env, flags; `Module[T]` lands with the root package)*
+      *(implemented; spec retired)*
+- [x] `domain` — `Entity`, `Root[K]`, `AggregateRoot`, `Event`; the §3.1
+      example compiles as a test *(implemented; spec retired)*
+- [x] `log` — context-carried logger, Vendor mode, exported seeding surface
+      *(implemented; spec retired)*
+- [x] `di` — the container wrap; the golden diagnostic reproduces byte for
+      byte; dig v1.19.0 audited *(implemented; spec retired)*
+- [x] `lifecycle` — ordered start/stop, `Ready()` readiness gate
+      *(implemented; spec retired)*
+- [x] `config` (core) — Source-split loading: Load, Source, env, flags
+      *(implemented; spec retired — `Module[T]` lands with the root package)*
 - [ ] `config/yaml` — the first file Source *(needs its own spec + YAML
       library audit before the module exists)*
 - [ ] `warren` (root) — module system and boot sequence *(spec approved)*
@@ -132,7 +137,7 @@ Progress is spec-first: ☑ means *done and verified*, not *started*.
 |---|---|
 | [warren.md](warren.md) | The package manifest — one entry per package, source of truth |
 | [AGENT.md](AGENT.md) | Invariants, conventions, and process — canonical for humans and agents |
-| `<package>/SPEC.md` | The package's contract; approved before any code |
+| `<package>/SPEC.md` | The contract of a package **not yet implemented**; approved before any code, retired once the package ships |
 | [docs/assets/](docs/assets/) | Usage-flow diagrams for the approved specs |
 
 ## Contributing

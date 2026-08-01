@@ -194,9 +194,9 @@ be produced; the wording is open and must be pinned before implementation.
 | Path | Condition | Text |
 |---|---|---|
 | Step 1 | Import cycle between modules | **Open.** Must name the modules on the cycle and where each was declared. Which package emits it depends on the step 1–2 boundary — see Open questions. |
-| Step 3 | Graph validation failure | Produced by `warren/di`; this package surfaces it unchanged. The golden target is in [di/SPEC.md](di/SPEC.md). |
+| Step 3 | Graph validation failure | Produced by `warren/di` (implemented); this package surfaces it unchanged. The golden target is `di/testdata/missing_provider.golden`, fixed by warren.md §2.2. |
 | Step 4 | A singleton constructor returns an error | **Open.** Must name the constructor and the module that declared it. |
-| Steps 6, 10 | Hook failure or timeout | Produced by `warren/lifecycle` — see [lifecycle/SPEC.md](lifecycle/SPEC.md). |
+| Steps 6, 10 | Hook failure or timeout | Produced by `warren/lifecycle` (implemented) — texts fixed by its golden files under `lifecycle/testdata/`, semantics by warren.md §2.3. |
 
 Per AGENT.md § Errors, every message must name what was missing, who requested
 it, where it was declared, and a copy-pasteable fix.
@@ -265,3 +265,25 @@ it, where it was declared, and a copy-pasteable fix.
 9. **What signal does `Run` treat as force-exit?** §2.3 gives a force-exit
    deadline (default 30s); §2.1 says `Run` handles SIGINT/SIGTERM. Whether a
    second signal short-circuits the deadline is unstated.
+
+Carried forward from the retired kernel specs (2026-08-01 — the packages are
+implemented; these questions belong to this package and outlive their specs):
+
+10. **Is `Lifecycle` resolvable from the container?** Adapters "register
+    hooks" (§2.3), which implies they inject a `Lifecycle`. The bootstrapper
+    constructs it and should provide it into the root container — decide and
+    state it here. *(was lifecycle's open question 8)*
+11. **Is "unused" a boot failure or a warning?** `di.Validate` checks
+    resolvable and ambiguous only: "unused" is not decidable inside `di` — a
+    terminal provider (a server) is consumed by nobody and used by everybody,
+    which only this package's entry-point model can express. warren.md §2.2
+    records the deferral; `warren doctor` reports "dead providers"
+    separately. *(was di's open question 4)*
+12. **§10's `main.go` reads `cfg.Postgres.DSN` inside the `warren.New(...)`
+    call**, while §2.4's pattern is that `Config` is injected into providers.
+    Where does that `cfg` come from at composition time? If the answer is "a
+    separate `config.Load` before `New`", config is resolved twice and §10
+    should say so. Relatedly, `config.Module[T]` is the one unimplemented
+    piece of the config surface — it returns `warren.Module` and becomes a
+    one-line provider over `Load` when this package lands. *(was config's
+    open question 8)*

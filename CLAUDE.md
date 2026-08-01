@@ -52,10 +52,13 @@ The invariants that fail CI, in short — full versions in AGENT.md:
 
 ## Working here
 
-**Write the spec before the feature.** Every feature gets a `SPEC.md` **in the
-package directory it describes** — `errors/SPEC.md`, `di/SPEC.md` — written and
-approved *before* any code, and corrected in the same pull request whenever the
-implementation diverges. The spec sits with its code so both move in one diff.
+**Write the spec before the feature — and retire it after.** Every feature
+gets a `SPEC.md` **in the package directory it describes**, written and
+approved *before* any code, corrected in the same pull request whenever the
+implementation diverges — and **deleted once the package is implemented and
+reviewed**, with its load-bearing leftovers rehomed first (open questions to
+the spec that will answer them, audits to the §9 ledger). An implemented
+package's contract is its code, tests, golden files, and `warren.md` entry.
 If you are asked to build something that has no spec, write the spec first and
 say so. See [AGENT.md § Spec-driven development](AGENT.md).
 
@@ -92,7 +95,9 @@ the source of truth for the architecture.
 Each **approved** spec also has a usage-flow diagram in `docs/assets/<pkg>-usage.puml`,
 rendered to a PNG of the same name; `docs/assets/approved-usage.puml` combines
 them into one overview. A spec's diagram is created when the spec is approved,
-not before. Regenerate after any change to a source, and commit the images:
+not before — and it **outlives the spec's retirement**: after a package is
+implemented its diagram cites the package's `warren.md` section instead.
+Regenerate after any change to a source, and commit the images:
 
 ```bash
 java -jar ~/.local/bin/plantuml.jar -tpng -o . docs/assets/*.puml

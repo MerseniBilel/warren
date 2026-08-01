@@ -27,13 +27,14 @@ CLAUDE.md         Claude Code's pointer to this file
 README.md         the public front door and the roadmap checkboxes
 LICENSE           Apache-2.0
 NOTICE
-<pkg>/SPEC.md     one spec per package, in the package's own directory
+<pkg>/SPEC.md     one spec per UNIMPLEMENTED package; specs retire on completion
 go.mod            the core module — stdlib only until warren/di lands
 Makefile          fmt · vet · lint · invariants · test, iterated per module
 .github/          CI: the same targets, plus golangci-lint v2
 .golangci.yml     linter config
 scripts/invariants.sh   the greppable invariants (1, 2, 8, naming), run in CI
-errors/           the first implemented package (approved spec, golden tests)
+errors/ domain/ log/ di/ lifecycle/ config/   implemented kernel packages
+                  (specs retired; code + golden tests + warren.md are the contract)
 docs/assets/      one usage diagram per approved spec, .puml + .png
 ```
 
@@ -356,6 +357,16 @@ to a human contributor.
 4. **When the implementation diverges from the spec, correct the spec in the
    same pull request.** A spec that no longer describes the code is worse than
    no spec — it is a confident lie, and the next agent will believe it.
+5. **When the package is implemented and has survived review, the spec is
+   retired — deleted, in the same change.** From that point the code, its doc
+   comments, its tests and golden files, and the package's `warren.md` entry
+   are the record; a parallel prose copy would only rot into the confident lie
+   rule 4 exists to prevent. Before deleting, rehome anything load-bearing the
+   spec still carries: open questions move to the spec of the package that
+   will answer them, dependency-audit results live in the §9 ledger, and any
+   behaviour the spec fixed that the code does not state gets written into doc
+   comments or `warren.md` first. The kernel specs retired on 2026-08-01
+   (errors, domain, log, di, lifecycle, config) followed exactly this path.
 
 Two rules carry the weight:
 
@@ -379,7 +390,7 @@ implementing against an unagreed contract.
 
 | If you are about to… | First… |
 |---|---|
-| Build any feature | Write or find `<package>/SPEC.md`. See above. |
+| Build any feature | Write or find `<package>/SPEC.md`. See above. An implemented package has no spec — its code, tests, and `warren.md` entry are the contract. |
 | Add a dependency | Read "Adding a dependency" below. This has a hard process. |
 | Change a port's shape, a module boundary, or a public API | Update [warren.md](warren.md) and get it agreed |
 | Touch anything structural | Read [warren.md](warren.md) |

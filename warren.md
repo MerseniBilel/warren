@@ -457,6 +457,11 @@ line override earlier layers. The environment layer runs only under a
 resolution completeness, not validation; the rest of the `validate:`
 vocabulary is `warren/validate`'s once its seam exists.
 
+Parked for `config/yaml`'s spec (carried from the retired core config spec):
+how the submodule selects an environment-specific file (`config.<env>.yaml`),
+and whether a missing file is an error or an empty map — in a container there
+is often no file at all. Core just sees a `Source` succeed or fail.
+
 **Usage**
 
 ```go
@@ -675,8 +680,9 @@ func (a *AggregateRoot[T]) PullEvents() []Event   // drained by UnitOfWork
 type Event interface {
     EventName() string          // "user.registered"
     OccurredAt() time.Time
-    AggregateID() string
-}
+    AggregateID() string        // deliberately string, not T: the outbox and
+}                               // broker handle ONE shape — ID's fmt.Stringer
+                                // is load-bearing, not conventional
 
 type Specification[T any] interface {
     IsSatisfiedBy(T) bool

@@ -213,9 +213,9 @@ users."*
 
 Whether `lint arch` also checks the invariants that are not import-graph shaped —
 no driver type in a public signature (invariant 3), `dig` imported only by
-`warren/di` (invariant 2, which `di/SPEC.md` § Testing calls *"a candidate for
-`warren lint arch`"*), no reflection on the request path (invariant 7) — is an
-open question below.
+`warren/di` (invariant 2 — `scripts/invariants.sh` greps it today, and the di
+package proposed it as a candidate for `warren lint arch`), no reflection on
+the request path (invariant 7) — is an open question below.
 
 ## Command surface
 
@@ -328,8 +328,9 @@ counts as missing, and whether `doctor` exits non-zero are all open questions.
 Note the interaction with `di`: boot step 3 validates *"every dep resolvable?
 ambiguous? unused? → fail"* (§1.3). If an unused provider already fails boot,
 `doctor`'s "dead providers" is either a second definition or an earlier warning —
-`di/SPEC.md` Open question 4 raises the same tension from the other side. The two
-must be settled together.
+the unused-provider question parked in the root [SPEC.md](../SPEC.md) raises
+the same tension from the other side (di's Validate checks resolvable and
+ambiguous only until it is settled). The two must be settled together.
 
 ### `warren graph modules|di|events`
 
@@ -360,9 +361,9 @@ invariant 2 calls *"the deliverable"*:
     • Or provide it locally:  warren.Providers(postgres.NewUserRepository)
 ```
 
-The CLI's rendering and `di`'s error rendering are one product surface. Whatever
-`Resolution` turns out to be (`di/SPEC.md` Open question 2), this command's
-output must reach that bar: the chain, the declaration site as `file:line`, the
+The CLI's rendering and `di`'s error rendering are one product surface.
+`Resolution` is settled and implemented — a self-rendering tree (warren.md
+§2.2) — and this command's output must reach that bar: the chain, the declaration site as `file:line`, the
 verdict, and copy-pasteable fixes.
 
 There is a mechanism question here that neither document settles: `Explain` is a
@@ -536,7 +537,7 @@ and not `go/ast`.
    dead providers, missing wiring."* Drift between what and what — generated code
    versus template, code versus `warren.md`, `module.go` versus the files on
    disk? What makes a provider dead, and is it the same condition as boot step
-   3's "unused?" (§1.3, `di/SPEC.md` Open question 4)? What is missing wiring?
+   3's "unused?" (§1.3 — parked in the root SPEC.md)? What is missing wiring?
    Does `doctor` exit non-zero like `lint arch`, or is it advisory?
 
 4. **What do the three `graph` commands output?** `warren graph
@@ -571,10 +572,10 @@ and not `go/ast`.
 9. **Does `warren lint arch` check anything that is not import-shaped?** The layer
    rule and the ring rule are both import-graph questions. Invariants 2, 3 and 7
    are not — no `dig` type in a public signature, no driver type in a public
-   signature, no reflection on the request path — and `di/SPEC.md` § Testing
-   already proposes the dig-boundary check as *"a candidate for `warren lint
-   arch`"*. Is `lint arch` one check or a suite, and is there a `warren lint`
-   family with other members?
+   signature, no reflection on the request path — and the dig-boundary check
+   (today a grep in `scripts/invariants.sh`) was proposed as a candidate for
+   `warren lint arch`. Is `lint arch` one check or a suite, and is there a
+   `warren lint` family with other members?
 
 10. **How does `lint arch` learn a project's layer layout?** The rule is
     `interfaces → application → domain ← infrastructure`, but a real project's
