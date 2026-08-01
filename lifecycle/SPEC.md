@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | **Approved (2026-08-01)** — `Hook`/`Lifecycle` and both orderings are binding; conditions: the readiness-gate handle and the force-exit owner (Open questions 1–2) settled before the health and root seams are built |
+| **Status** | **Approved (2026-08-01)** — implemented; the readiness-gate handle (`Ready()`) and the force-exit owner (`New(ForceExitDeadline(d))`) were settled the same day and warren.md §2.3 amended to carry them |
 | **Source** | [warren.md §2.3](../warren.md) |
 | **Module** | core |
 | **Mode** | Build |
@@ -82,8 +82,24 @@ type Lifecycle interface {
     // Stop runs every hook's OnStop in reverse registration order, bounded by
     // the force-exit deadline. It is shutdown step 10.
     Stop(context.Context) error
+
+    // Ready reports the readiness state warren/health serves: false until
+    // Start returns nil, true until Stop begins.
+    Ready() bool
 }
+
+func New(opts ...Option) Lifecycle
+func ForceExitDeadline(d time.Duration) Option // bounds the whole shutdown; default 30s
 ```
+
+The additions over the original §2.3 surface — `Ready()`, `New`, and the
+`ForceExitDeadline` option — were agreed on 2026-08-01 and warren.md §2.3 was
+amended in the same change, together with the semantics the surface left
+open: a nil `OnStart`/`OnStop` is a start-only or stop-only hook (skipped,
+not an error); `Hook.Timeout` bounds each side individually and zero means no
+per-hook timeout; `Stop` continues past failures and returns them all joined;
+a failing `OnStart` stops the already-started hooks in reverse before
+returning.
 
 Users reach this through the root package's module options (§2.3):
 
@@ -132,10 +148,11 @@ Closing readiness before stopping servers is the ordering most hand-rolled Go
 services get backwards, and it may not be rearranged (AGENT.md § Two orderings
 you may not rearrange).
 
-The force-exit deadline defaults to 30s. §2.3 lists it as the last item of a
-six-item sequence whose first item is readiness closing, so it bounds the whole
-shutdown rather than step 10 alone — but warren.md gives it no field, option, or
-owner. See Open question 2.
+The force-exit deadline defaults to 30s and is owned by this package:
+`New(ForceExitDeadline(d))`. §2.3 lists it as the last item of a six-item
+sequence whose first item is readiness closing, so it bounds the whole
+shutdown rather than step 10 alone — implemented as a deadline on the entire
+`Stop` run (Open question 2, resolved).
 `Hook.Timeout` bounds an individual hook (§1.3 step 10: "reverse order, per-hook
 timeout, force-kill deadline").
 
@@ -146,20 +163,17 @@ ready → ready at step 7 → not ready at step 9.
 
 ## Errors
 
-`warren.md` does not fix any error text for this package. Recorded here is what
-must be produced; **all wording is open** and must be pinned before
-implementation.
+`warren.md` fixes no error text for this package; the wording was agreed on
+2026-08-01 and every row is covered by a golden file in
+`lifecycle/testdata/`:
 
 | Path | Condition | Text |
 |---|---|---|
-| Start (step 6) | A hook's `OnStart` returns an error | **Open.** Must name the hook and wrap the cause with `%w`. |
-| Start (step 6) | A hook's `OnStart` exceeds `Timeout` | **Open.** Must name the hook and the timeout that was exceeded. |
-| Stop (step 10) | A hook's `OnStop` returns an error | **Open.** Must name the hook. Whether one failure aborts the rest of the sequence is an open question below. |
-| Stop (step 10) | A hook's `OnStop` exceeds `Timeout` | **Open.** Must name the hook and the timeout. |
-| Stop (step 10) | The force-exit deadline expires | **Open.** Must name which hooks had not finished. |
-
-Per AGENT.md § Errors, each message must tell the user how to fix the problem,
-naming the hook and what it was doing.
+| Start (step 6) | A hook's `OnStart` returns an error | `lifecycle: hook "cache" failed during OnStart: <cause>` — the cause is wrapped, `errors.Is` reaches it. |
+| Start (step 6) | A hook's `OnStart` exceeds `Timeout` | `lifecycle: hook "cache" exceeded its 50ms timeout during OnStart — raise Hook.Timeout or make the hook respect its context` |
+| Stop (step 10) | A hook's `OnStop` returns an error | `lifecycle: hook "relay" failed during OnStop: <cause>` — the sequence continues; every failure is returned joined. |
+| Stop (step 10) | A hook's `OnStop` exceeds `Timeout` | Same shape as the OnStart timeout, with `OnStop`. |
+| Stop (step 10) | The force-exit deadline expires | `lifecycle: force-exit deadline (30s) expired with hooks still stopping: "wedged", "never-reached" — these hooks must respect their context's cancellation` — names every unfinished hook, current first. |
 
 ## Testing
 
@@ -181,38 +195,64 @@ naming the hook and what it was doing.
 
 ## Definition of done
 
-- [ ] Spec approved.
-- [ ] Error text agreed for every row in Errors, with golden-file tests.
-- [ ] Public API implemented exactly as in Public API above, with doc comments.
-- [ ] Start order and reverse stop order proven by test.
-- [ ] Readiness closes before the first `OnStop` — proven by test.
-- [ ] Per-hook timeout and the 30s force-exit deadline implemented and tested
-      without sleeps.
-- [ ] Contract suite green.
-- [ ] Core module `go.mod` still lists stdlib + `go.uber.org/dig` only.
-- [ ] `warren.md` amended in the same change if any signature diverged.
+- [x] Spec approved.
+- [x] Error text agreed for every row in Errors, with golden-file tests —
+      `lifecycle/testdata/*.golden`, 2026-08-01.
+- [x] Public API implemented exactly as in Public API above, with doc
+      comments — `lifecycle/lifecycle.go`.
+- [x] Start order and reverse stop order proven by test (A, B, C → C, B, A).
+- [x] Readiness closes before the first `OnStop` — proven by test: an
+      observing hook reads `Ready()` inside its own `OnStop`; readiness also
+      opens only after the last `OnStart` and never opens on a failed boot.
+- [x] Per-hook timeout and the force-exit deadline implemented and tested
+      with no sleeps: timeouts are context deadlines, test hooks block on
+      `ctx.Done()` rather than sleeping, and each hook runs in a goroutine so
+      one that ignores its context cannot wedge the sequence past its bounds.
+- [x] Contract suite green — the behaviours above, run against `New()`; kept
+      internal pending the exported-suite home decision (errors/SPEC.md Open
+      question 8).
+- [x] Core module `go.mod` still lists stdlib + `go.uber.org/dig` only —
+      enforced by `scripts/invariants.sh` in `make ci`.
+- [x] `warren.md` amended in the same change: §2.3 gained `Ready()`, `New`,
+      `ForceExitDeadline`, and the settled hook semantics.
 
 ## Open questions
 
-1. **Where does readiness live?** §2.3 says this package owns readiness gating;
-   §2.8 says `/readyz` is "gated by lifecycle state" and is served by
-   `warren/health`. No API connects the two. What is the exported handle —
-   a method on `Lifecycle`, a state value, or something `health` reads?
-2. **Who owns the force-exit deadline?** It is stated as "default 30s" but there
-   is no field for it on `Hook` and no option on `Lifecycle`. Is it a parameter
-   of the root `App`, and is it configurable?
-3. **Does `Hook.Timeout` apply to `OnStart` as well as `OnStop`?** Step 10 says
-   "per-hook timeout" for shutdown only; the field is on the shared struct.
-4. **What is the default `Hook.Timeout` when a hook leaves it zero?** Unstated.
-   Is zero "no timeout" or "inherit a default"?
-5. **Does `Stop` abort on the first failing hook, or continue and aggregate?**
-   Continuing is the usual choice for shutdown, but §2.3 gives
-   `Stop(context.Context) error` — a single error — and no aggregation rule.
-6. **How is time injected so tests avoid sleeps?** AGENT.md forbids sleeps in
-   unit tests; `warren.md` fixes no clock abstraction, and adding one would be a
-   public API addition.
-7. **If `Start` fails partway, are the already-started hooks stopped?** The
-   symmetric behaviour is the obvious one but `warren.md` does not state it.
-8. **Is `Lifecycle` resolvable from the container?** Adapters "register hooks"
-   (§2.3), which implies they inject a `Lifecycle`, but no provider or accessor
-   is specified.
+1. **RESOLVED (2026-08-01) — `Ready() bool` on `Lifecycle` is the handle.**
+   `warren/health` reads it per probe (an atomic load, 0 allocs — benchmark
+   committed). `Start` flips it true on success; `Stop` flips it false as its
+   first action, which is what makes "readiness closes before the first
+   OnStop" a property of this package rather than a convention the caller
+   must remember. warren.md §2.3 amended.
+2. **RESOLVED (2026-08-01) — this package owns it.**
+   `New(ForceExitDeadline(d))`, default 30s, bounding the whole of `Stop` —
+   every `OnStop` together, matching §2.3's list where it is the last item of
+   a sequence that starts at readiness. The root `App` passes its configured
+   value through when it constructs the lifecycle; whether that is
+   user-configurable is the root package's decision.
+3. **RESOLVED (2026-08-01) — yes, both.** The field is on the shared struct;
+   a bound that protects shutdown protects boot the same way. Each of
+   `OnStart` and `OnStop` gets the full `Timeout` individually.
+4. **RESOLVED (2026-08-01) — zero means no per-hook timeout.** `Stop` is
+   still bounded by the force-exit deadline, so a zero-timeout hook cannot
+   hang shutdown forever; `Start` is bounded by the caller's context.
+   Inheriting an invented default would surprise more than it protects.
+5. **RESOLVED (2026-08-01) — continue and aggregate.** A failed relay flush
+   must not leave the pool open. Every failure is returned in one error via
+   `errors.Join`, so the single-`error` signature stands and `errors.Is`
+   reaches each cause.
+6. **RESOLVED (2026-08-01) — time is injected through context deadlines; no
+   clock abstraction.** Per-hook timeouts and the force-exit deadline are
+   `context.WithTimeout`; test hooks block on `ctx.Done()` instead of
+   sleeping, so tests are driven by deadline delivery, not wall-clock
+   synchronization. Adding a clock type would be a public API addition with
+   one consumer — not worth it.
+7. **RESOLVED (2026-08-01) — yes.** A failing `OnStart` stops the
+   already-started hooks in reverse before `Start` returns; the returned
+   error carries the boot failure first, then any rollback failures, joined.
+   Readiness never opens on that path. Proven by test.
+8. **Is `Lifecycle` resolvable from the container?** Adapters "register
+   hooks" (§2.3), which implies they inject a `Lifecycle`, but no provider or
+   accessor is specified. **Deferred to the root package's spec:** the
+   bootstrapper constructs the lifecycle and provides it into the root
+   container; nothing in this package changes either way.

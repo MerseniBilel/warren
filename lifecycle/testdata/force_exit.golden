@@ -1,0 +1,1 @@
+lifecycle: force-exit deadline (50ms) expired with hooks still stopping: "wedged", "never-reached" — these hooks must respect their context's cancellation

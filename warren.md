@@ -354,8 +354,22 @@ type Lifecycle interface {
     Append(Hook)
     Start(context.Context) error
     Stop(context.Context) error
+    Ready() bool // the readiness state warren/health serves — true between steps 7 and 9
 }
+
+func New(opts ...Option) Lifecycle
+func ForceExitDeadline(d time.Duration) Option // bounds the whole shutdown; default 30s
 ```
+
+Semantics, fixed with the implementation: a nil `OnStart` or `OnStop` is a
+start-only or stop-only hook and is skipped; `Hook.Timeout` bounds each of
+`OnStart` and `OnStop` individually, and zero means no per-hook timeout (the
+force-exit deadline still bounds the whole of `Stop`); `Stop` continues past a
+failing hook and returns every failure joined — shutdown never abandons the
+remaining hooks because one flush failed; a failing `OnStart` stops the boot
+and stops the already-started hooks in reverse before returning. `Ready()`
+flips true when `Start` returns nil and false as `Stop`'s first action —
+before the first `OnStop` runs.
 
 **Shutdown order is the reason this is built, not borrowed:**
 
