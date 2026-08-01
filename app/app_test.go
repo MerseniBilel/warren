@@ -223,7 +223,18 @@ func TestChainRefusesNilAtComposition(t *testing.T) {
 func TestTransportIndependence(t *testing.T) {
 	t.Parallel()
 
-	allowed := map[string]bool{"context": true, "fmt": true}
+	// The standard library, plus the KERNEL packages a CONTRACTS package may
+	// see (§1.1: dependencies point downward). Nothing transport-, broker-,
+	// or persistence-shaped may ever join this list.
+	allowed := map[string]bool{
+		"context":                               true,
+		"errors":                                true,
+		"fmt":                                   true,
+		"reflect":                               true, // one constant-time typed-nil probe in WithTelemetry
+		"time":                                  true,
+		"github.com/MerseniBilel/warren/errors": true,
+		"github.com/MerseniBilel/warren/log":    true,
+	}
 	entries, err := os.ReadDir(".")
 	if err != nil {
 		t.Fatalf("reading package dir: %v", err)

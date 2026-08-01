@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | **Approved (2026-08-01); core surface implemented** — `Handler`, `HandlerFunc`, `Middleware`, `Chain` are code (`app/app.go`), tested, benchmarked (a five-middleware chain adds 0 allocs), the §10 handler compiles verbatim. The five built-in middleware remain carved out, blocked on Open questions 1–2: their parameter types need port homes core can import, which is an architecture decision for the human. This spec retires when they land. |
+| **Status** | **Approved (2026-08-01); implemented except `Transactional`** — `Handler`, `HandlerFunc`, `Middleware`, `Chain`, and four of the five built-ins are code, tested, benchmarked. The port homes were decided by the human on 2026-08-01: `RetryPolicy`, `AuthorizationPolicy`, and the `Telemetry` seam live in `app` itself, telemetry rides the context. `Transactional` waits for `persistence.UnitOfWork`'s spec; this spec retires when it lands. |
 | **Source** | [warren.md §3.2](../warren.md) |
 | **Module** | core |
 | **Mode** | Build — **the central abstraction of the framework** |
@@ -109,10 +109,9 @@ func Chain[Req, Res any](h Handler[Req, Res], mw ...Middleware[Req, Res]) Handle
 The authoritative doc-comment prose lives in `app/app.go`, not here — this
 block records signatures and intent.
 
-**Built-in core middleware** (§3.2). warren.md gives these as a table of call
-forms and effects, not as signatures. The call forms are reproduced exactly; the
-parameter types marked **`?`** are *not stated anywhere in warren.md* and are
-open questions 1 and 2, not decisions made by this spec.
+**Built-in core middleware** (§3.2). The call forms are reproduced exactly;
+the parameter types were decided on 2026-08-01 (Open questions 1–2, resolved
+below) and warren.md §3.2 amended: the ports live in this package.
 
 | Call form (verbatim from §3.2) | Effect (verbatim from §3.2) |
 |---|---|
@@ -128,11 +127,15 @@ open questions 1 and 2, not decisions made by this spec.
 // transaction. See warren.md §3.3 for the six-step Do sequence it delegates to.
 func Transactional[Req, Res any](uow persistence.UnitOfWork) Middleware[Req, Res]
 
-// Retrying re-invokes the handler on errors carrying CodeUnavailable, under the
-// given policy. No other code is retried.
-func Retrying[Req, Res any](policy ?) Middleware[Req, Res]
+// Retrying re-invokes the handler on errors carrying CodeUnavailable, under
+// the given policy — RetryPolicy is app's own port, implemented by
+// warren/resilience. Exhaustion and cancellation return the handler's last
+// error, code intact.
+func Retrying[Req, Res any](policy RetryPolicy) Middleware[Req, Res]
 
-// Traced opens one span per handler invocation, named "<module>.<handler>".
+// Traced opens one span per handler invocation, named "<module>.<handler>"
+// via the context-carried Telemetry and HandlerName seams (see warren.md
+// §3.2); a pass-through when the context carries no Telemetry.
 func Traced[Req, Res any]() Middleware[Req, Res]
 
 // Metered records a duration histogram per handler and an error counter keyed
@@ -140,9 +143,11 @@ func Traced[Req, Res any]() Middleware[Req, Res]
 func Metered[Req, Res any]() Middleware[Req, Res]
 
 // Authorized runs a policy check against the identity on the context before
-// invoking the handler. Because it is core-ring, authorization applies to gRPC
-// and consumers too, not only to HTTP (warren.md §7.2).
-func Authorized[Req, Res any](policy ?) Middleware[Req, Res]
+// invoking the handler — AuthorizationPolicy is app's own port, implemented
+// by warren/auth. A denial short-circuits and returns the policy's error
+// unchanged. Because it is core-ring, authorization applies to gRPC and
+// consumers too, not only to HTTP (warren.md §7.2).
+func Authorized[Req, Res any](policy AuthorizationPolicy) Middleware[Req, Res]
 ```
 
 Usage — a handler, from §10, unchanged:
@@ -208,9 +213,16 @@ lists are not in the same order as each other. See open question 3.
 **Retrying.** "Retries on `CodeUnavailable`" (§3.2), which is the only code
 §2.6's constant block annotates `// retryable`. (The §2.6 *table* also retries
 `INTERNAL` in its consumer column — that is the broker chain's retry, not this
-middleware's.) `errors.Is(err, errors.CodeUnavailable)` is the
-predicate. Every other code is returned to the caller unretried — notably
-`CodeInvalid`, which §2.6 marks "never retry".
+middleware's.) **The OUTERMOST Warren code is the predicate** (2026-08-01
+review): the chain-walking `errors.Is` would find an `Unavailable` buried
+under a recategorizing `Internal` wrap and retry a failure the handler
+declared final — contradicting the errors package's "wrapping is
+recategorization" doctrine and the adapter's own status mapping. A plain
+`%w` wrap leaves the outermost Warren error untouched and stays retryable.
+Every other code is returned to the caller unretried — notably `CodeInvalid`,
+which §2.6 marks "never retry". Termination is the policy's contract — the
+middleware imposes no attempt ceiling; a policy that never stops retries a
+persistent failure forever.
 
 **Transactional and the outbox.** The middleware does not implement
 transactions; it delegates to `persistence.UnitOfWork.Do`, whose six-step
@@ -293,8 +305,9 @@ must cover:
   database — no Docker, no network.
 - **`Retrying`.** Retries on `CodeUnavailable` and on nothing else — a table
   over all seven codes in §2.6. Retry count is honoured; exhaustion returns an
-  error; context cancellation aborts the retry loop. **No sleeps**: the clock is
-  injected in tests (AGENT.md § Testing).
+  error; context cancellation aborts the retry loop. **No sleeps**: the suite stays
+  sleep-free with zero-delay policies and pre-cancelled contexts against
+  hour-long delays — no clock abstraction exists or is needed.
 - **`Traced` / `Metered`.** Span name is `<module>.<handler>`; the error counter
   is keyed by code; the histogram records once per invocation including on the
   error path.
@@ -344,30 +357,24 @@ line on is that composition allocates at boot and not per request.
 
 ## Open questions
 
-1. **`Retrying(policy)` and `Authorized(policy)` need types from packages `app`
-   cannot import.** §7.3 puts the retry/circuit-breaker `Policy` in
-   `warren/resilience`, which wraps `gobreaker` and `backoff` and is an ADAPTER
-   module. §7.2 puts the authorization policy behind `warren/auth`, which wraps
-   `golang-jwt` and `go-oidc` — also an adapter module. Dependencies point
-   downward only (§1.1), and invariant 1 forbids the core module any dependency
-   beyond stdlib and dig. So `app` cannot name either type as warren.md
-   describes it. The standing move is invariant 1's — "define the port in core,
-   implement it in a submodule" — which would mean `app` (or another core
-   package) declares minimal `RetryPolicy` and `AuthorizationPolicy` interfaces
-   that `resilience` and `auth` implement. **warren.md does not say this
-   anywhere**, and adding a port is a public-API decision. Where do these two
-   interfaces live, and what are their methods?
+1. **RESOLVED (2026-08-01, human decision) — the ports live in `app`
+   itself.** `RetryPolicy { Next(attempt int) (delay time.Duration, retry
+   bool) }` (implemented by `warren/resilience`) and `AuthorizationPolicy
+   { Authorize(ctx) error }` (implemented by `warren/auth`; nil allows, a
+   denial returns a §2.6-vocabulary error the middleware passes through
+   unchanged). They exist for these middleware; a one-interface package per
+   port would be ring bureaucracy. warren.md §3.2 amended with both shapes.
+   `Transactional(uow)` still waits on `persistence.UnitOfWork`.
 
-   Note the contrast: `Transactional(uow)` has no such problem —
-   `persistence.UnitOfWork` is a contract in the same ring and the same module.
-
-2. **`Traced()` and `Metered()` take no arguments, yet need a tracer and a
-   meter.** OpenTelemetry lives in `warren/observability`, an adapter module
-   (§7.1), and the core module is stdlib + dig only. A no-argument constructor
-   implies the tracer arrives some other way — resolved from the container at
-   boot, read off the context, or a package-level global. Package-level mutable
-   state and `init()` are both forbidden (AGENT.md § General), and reading a
-   tracer off the context per request needs stating explicitly. Which is it?
+2. **RESOLVED (2026-08-01, human decision) — the telemetry rides the
+   context, §2.5's logger pattern.** `app` declares `Telemetry { Span(ctx,
+   name) (ctx, func(err)); Record(name, d, err) }` with `WithTelemetry` /
+   `TelemetryFromContext`; observability's edge integration seeds it. The
+   `"<module>.<handler>"` name is seeded by the transport adapter via
+   `WithHandlerName` in the route table's pre-built closure — the one party
+   that knows both names. On a context carrying neither, `Traced()` and
+   `Metered()` are exact pass-throughs (0 allocs, benchmarked). No globals,
+   no init(), no per-request container.
 
 3. **PARTIALLY RESOLVED (2026-08-01) — the convention is fixed; the default
    built-in order is not.** `Chain(h, a, b, c)`: `a` is the **outermost** —
@@ -382,13 +389,16 @@ line on is that composition allocates at boot and not per request.
    savepoint, or fail? warren.md shows both patterns and reconciles neither.
    This is really a `persistence` question, recorded there too.
 
-5. **Error codes produced by the middleware themselves.** What code does a
-   commit failure in `Transactional` carry — `CodeUnavailable` (retryable) or
-   `CodeInternal`? What does a denied `Authorized` return —
-   `CodePermissionDenied`, presumably, but §2.6 lists the constant without
-   saying who raises it. And does `Retrying` return only the last error, or join
-   the attempts? Each of these has a visible consequence in the §2.6 table, so
-   they are contract, not detail.
+5. **RESOLVED for the four implemented (2026-08-01):** `Authorized` raises
+   nothing of its own — the policy speaks the §2.6 vocabulary
+   (`PermissionDenied` for a known caller, `Unauthenticated` for absent
+   identity) and its error passes through unchanged; anything outside the
+   vocabulary maps downstream to `INTERNAL`, the safe default. `Retrying`
+   returns the handler's **last** error on exhaustion and on cancellation —
+   the freshest, still carrying `UNAVAILABLE`, which is what a consumer
+   adapter needs to nack correctly; attempts are not joined. `Traced` and
+   `Metered` never touch the error. `Transactional`'s commit-failure code is
+   decided with the persistence round.
 
 6. **Who calls `Chain`, and with what?** Boot step 5 builds the route tables,
    and §3.5's `Controller.Register` shows a handler being registered with no

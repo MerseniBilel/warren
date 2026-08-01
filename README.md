@@ -90,9 +90,11 @@ contract now.
       findings fixed — spec retired)*
 - [x] `app` core — `Handler`/`HandlerFunc`/`Middleware`/`Chain` *(implemented;
       a five-middleware chain adds 0 allocs; §10 handler compiles verbatim)*
-- [ ] `app` built-in middleware — `Transactional`/`Retrying`/`Traced`/
-      `Metered`/`Authorized` *(blocked on the policy-port homes — an
-      architecture decision; spec retires when these land)*
+- [x] `app` built-in middleware — `Retrying`/`Traced`/`Metered`/`Authorized`
+      *(implemented over the app-owned ports: RetryPolicy,
+      AuthorizationPolicy, context-carried Telemetry)*
+- [ ] `app.Transactional` — waits on `persistence.UnitOfWork`'s spec
+      *(the app spec retires when it lands)*
 - [ ] `broker` (port) — `Message`/`Publisher`/`Subscriber` *(approved; chain
       home open)*
 
@@ -123,7 +125,8 @@ contract now.
 
 ### Phase 5 — cross-cutting
 
-- [ ] Core policy ports decided (`Retrying`/`Authorized`/`Traced` mechanism)
+- [x] Core policy ports decided: `RetryPolicy`/`AuthorizationPolicy`/
+      `Telemetry` live in `app`, telemetry rides the context
 - [ ] `observability` — OTel wiring *(spec approved)*
 - [ ] `validate` — port in core, implementation in a submodule
 - [ ] `health`, `auth`, `resilience`, `jobs`, `testing`, `openapi`

@@ -791,14 +791,44 @@ invoking it allocates nothing (benchmarked).
 
 These are the *core* ring of the two-ring middleware model in §1.4 — they wrap `Handler[Req,Res]` and therefore apply identically to HTTP, gRPC, and consumers. Transport-shaped concerns belong in the edge ring, owned by the adapter.
 
-The five built-ins are **not yet buildable**: `Retrying`'s and `Authorized`'s
-policy types live in adapter modules (§7.2, §7.3) that core cannot import,
-`Traced()`/`Metered()` need a telemetry seam core cannot name, and
-`Transactional`'s `persistence.UnitOfWork` is not yet specified. The standing
-move — ports in core, implementations in submodules — needs its port homes
-agreed (an architecture decision, tracked in app/SPEC.md open questions 1–2)
-before any of the five exist. `Handler`, `HandlerFunc`, `Middleware`, and
-`Chain` are implemented.
+**The port homes (settled 2026-08-01): the policies and the telemetry seam
+live in `app` itself.** They exist for these middleware, and a one-interface
+package would be ring bureaucracy. Four of the five are implemented:
+
+```go
+type RetryPolicy interface {           // warren/resilience implements it
+    Next(attempt int) (delay time.Duration, retry bool)
+}
+type AuthorizationPolicy interface {   // warren/auth implements it
+    Authorize(ctx context.Context) error // nil allows; deny with a §2.6 code
+}
+type Telemetry interface {             // warren/observability implements it
+    Span(ctx context.Context, name string) (context.Context, func(err error))
+    Record(name string, d time.Duration, err error) // counters keyed by errors.Code
+}
+func WithTelemetry(ctx context.Context, t Telemetry) context.Context
+func TelemetryFromContext(ctx context.Context) Telemetry
+func WithHandlerName(ctx context.Context, name string) context.Context
+func HandlerName(ctx context.Context) string
+```
+
+`Traced()` and `Metered()` keep their no-argument signatures because the
+telemetry **rides the context**, the same pattern as §2.5's logger:
+observability's edge integration seeds `Telemetry`, the transport adapter
+seeds the `"<module>.<handler>"` name in the route table's pre-built closure
+(it is the one party that knows both names), and on a context carrying
+neither the two middleware are exact pass-throughs — 0 allocs, benchmarked.
+`Retrying` retries `CodeUnavailable` only and returns the handler's **last**
+error on exhaustion or cancellation (freshest, code intact); `Authorized`
+short-circuits on denial and returns the policy's error **unchanged**, so
+policies speak the §2.6 vocabulary (`PermissionDenied` for a known caller,
+`Unauthenticated` for absent identity). A nil policy panics at composition —
+the same boot-time guard as `Chain`'s.
+
+`Transactional(uow)` is the one still pending: `persistence.UnitOfWork` has
+no approved spec yet; it lands with the persistence round. Until it does, the
+recommended composition order is trace → meter → authorize → retry, with the
+transaction's position (inside or outside the retry) decided when it exists.
 
 ---
 
