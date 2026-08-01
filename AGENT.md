@@ -33,8 +33,9 @@ Makefile          fmt · vet · lint · invariants · test, iterated per module
 .github/          CI: the same targets, plus golangci-lint v2
 .golangci.yml     linter config
 scripts/invariants.sh   the greppable invariants (1, 2, 8, naming), run in CI
-errors/ domain/ log/ di/ lifecycle/ config/   implemented kernel packages
-                  (specs retired; code + golden tests + warren.md are the contract)
+errors/ domain/ log/ di/ lifecycle/ config/ warren (root)
+                  implemented kernel packages — specs retired; code, golden
+                  tests, and warren.md are the contract
 docs/assets/      one usage diagram per approved spec, .puml + .png
 ```
 

@@ -66,9 +66,9 @@ Progress is spec-first: ☑ means *done and verified*, not *started*.
 
 ### Phase 1 — kernel (buildable on Go 1.26, in dependency order)
 
-All six implemented packages were adversarially reviewed on 2026-08-01
-(23 reproduced findings, all fixed with regression tests) and their specs
-retired — the code, tests, golden files, and warren.md entries are the
+All seven implemented packages were adversarially reviewed on 2026-08-01
+(31 reproduced findings across two review rounds, all fixed with regression
+tests) and their specs retired — the code, tests, golden files, and warren.md entries are the
 contract now.
 
 - [x] `errors` — the semantic vocabulary; load-bearing for everything
@@ -85,7 +85,9 @@ contract now.
       *(implemented; spec retired — `Module[T]` lands with the root package)*
 - [ ] `config/yaml` — the first file Source *(needs its own spec + YAML
       library audit before the module exists)*
-- [ ] `warren` (root) — module system and boot sequence *(spec approved)*
+- [x] `warren` (root) — module system, boot sequence, run loop
+      *(implemented with `config.Module[T]`; adversarially reviewed — 8
+      findings fixed — spec retired)*
 - [ ] `app` — `Handler`/`Middleware`/`Chain` *(approved; built-in middleware
       blocked on the core-port decision)*
 - [ ] `broker` (port) — `Message`/`Publisher`/`Subscriber` *(approved; chain

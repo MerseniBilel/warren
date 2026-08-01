@@ -53,6 +53,7 @@ type ProvideOption func(*provideOptions)
 type provideOptions struct {
 	exported bool
 	declared string
+	name     string
 }
 
 // Exported marks the binding as exported from its module: visible to the
@@ -70,6 +71,15 @@ func Exported() ProvideOption {
 // position.
 func DeclaredAt(file string, line int) ProvideOption {
 	return func(o *provideOptions) { o.declared = fmt.Sprintf("%s:%d", file, line) }
+}
+
+// Named overrides the constructor name diagnostics print. Synthesized
+// constructors — reflect.MakeFunc values, whose runtime name is an assembly
+// stub — must pass it, so an ambiguous-binding or candidate line names the
+// real actor ("*pool (exported by module \"platform\")"), never
+// reflect.makeFuncStub.
+func Named(name string) ProvideOption {
+	return func(o *provideOptions) { o.name = name }
 }
 
 // Resolution is the result of Explain: how one target resolves from one

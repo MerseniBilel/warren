@@ -328,9 +328,10 @@ counts as missing, and whether `doctor` exits non-zero are all open questions.
 Note the interaction with `di`: boot step 3 validates *"every dep resolvable?
 ambiguous? unused? → fail"* (§1.3). If an unused provider already fails boot,
 `doctor`'s "dead providers" is either a second definition or an earlier warning —
-the unused-provider question parked in the root [SPEC.md](../SPEC.md) raises
-the same tension from the other side (di's Validate checks resolvable and
-ambiguous only until it is settled). The two must be settled together.
+the unused-provider question parked in warren.md §2.2 raises the same tension
+from the other side (di's Validate checks resolvable and ambiguous only until
+it is settled; the root package sharpened it — an unconsumed provider is
+simply never built). The two must be settled together.
 
 ### `warren graph modules|di|events`
 
@@ -537,7 +538,7 @@ and not `go/ast`.
    dead providers, missing wiring."* Drift between what and what — generated code
    versus template, code versus `warren.md`, `module.go` versus the files on
    disk? What makes a provider dead, and is it the same condition as boot step
-   3's "unused?" (§1.3 — parked in the root SPEC.md)? What is missing wiring?
+   3's "unused?" (§1.3 — parked in warren.md §2.2)? What is missing wiring?
    Does `doctor` exit non-zero like `lint arch`, or is it advisory?
 
 4. **What do the three `graph` commands output?** `warren graph

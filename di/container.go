@@ -84,8 +84,12 @@ func (c *container) Provide(constructor any, opts ...ProvideOption) error {
 		return errVariadic(funcName(v))
 	}
 
+	name := cfg.name
+	if name == "" {
+		name = funcName(v)
+	}
 	p := &provider{
-		name:     funcName(v),
+		name:     name,
 		site:     funcSite(v),
 		declared: cfg.declared,
 		exported: cfg.exported,
@@ -151,9 +155,16 @@ func (c *container) Invoke(fn any) error {
 	if err := c.dig.Invoke(fn); err != nil {
 		// Only a constructor's own error may surface. A dig-typed cause —
 		// anything the pre-check failed to anticipate — is sanitized
-		// (invariant 2: no dig wording reaches a caller).
+		// (invariant 2: no dig wording reaches a caller). A cause that is
+		// already a Warren diagnostic — a forwarding provider relaying a
+		// failure from another scope — passes through unchanged, so one
+		// failure renders one block however many import hops it crossed.
 		var digErr dig.Error
 		if cause := dig.RootCause(err); cause != nil && !stderrors.As(cause, &digErr) {
+			var d *diagnostic
+			if stderrors.As(cause, &d) {
+				return d
+			}
 			return errConstructorFailed(c.name, cause)
 		}
 		return errInternal(funcName(v))

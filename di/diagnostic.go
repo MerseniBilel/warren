@@ -67,7 +67,7 @@ func errAmbiguous(t fmt.Stringer, scope string, providers []*provider) error {
 	b.WriteString("✗ ambiguous binding\n\n")
 	fmt.Fprintf(&b, "    %s has %d providers visible from scope %q:\n", t, len(providers), scope)
 	for _, p := range providers {
-		fmt.Fprintf(&b, "      • %s — registered in scope %q at %s\n", p.name, p.scope.name, p.site)
+		fmt.Fprintf(&b, "      • %s — registered in scope %q at %s\n", p.name, p.scope.name, p.declarationSite())
 	}
 	b.WriteString("\n  Keep one, or move the extra binding into the module that needs it.")
 	return &diagnostic{text: b.String()}

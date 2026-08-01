@@ -18,6 +18,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/MerseniBilel/warren"
 )
 
 // Source is where config values come from. Defaults, env, and flags ship in
@@ -60,6 +62,20 @@ func WithEnvPrefix(prefix string) Option {
 // override earlier layers; flag defaults do not participate.
 func WithFlags(fs *flag.FlagSet) Option {
 	return optionFunc(func(s *settings) { s.flags = fs })
+}
+
+// Module returns a warren.Module that loads T at boot — one provider over
+// Load, resolved at instantiation in dependency order, so T is injectable by
+// any constructor and a bad config fails the boot, never request 1. The
+// module is named after T ("config[main.Config]"), so an application may
+// load several config structs without the modules colliding. When main
+// itself needs config values at composition time (adapter options), call
+// Load once and provide the value instead — see warren.md §10.
+func Module[T any](opts ...Option) warren.Module {
+	return warren.NewModule("config["+reflect.TypeFor[T]().String()+"]",
+		warren.Providers(func() (T, error) { return Load[T](opts...) }),
+		warren.Exports[T](),
+	)
 }
 
 // Load resolves configuration into T: struct defaults, then each Source in

@@ -246,6 +246,35 @@ func OnStop(fn func(context.Context) error) ModuleOption
 
 **Key property:** `NewModule` returns an inert value. Nothing registers on construction. The bootstrapper walks the entire graph before materialising containers — that ordering is what makes cycle detection and encapsulation checkable rather than emergent.
 
+Semantics fixed with the implementation: `Module` is an opaque struct value
+(`ModuleOption` a function over it), and `NewModule` records its call site —
+the "declared in module.go:14" line of §2.2's diagnostic. A module-import
+*cycle is unrepresentable*: `Imports` carries values, so closing a cycle would
+be infinite recursion in user code before `New` runs; provider cycles are
+`warren/di`'s. Module names must be unique (they are scope names); exporting a
+type no provider returns is a boot error; imported modules are flattened
+transitively and deduplicated. Entry points are the controllers and consumers:
+instantiating them (dependency order, per module topologically) is what
+materialises the singleton graph — an unconsumed private provider is simply
+never built. `lifecycle.Lifecycle` is provided in the root container, so any
+constructor can inject it and adapters can register hooks. An `App` boots
+once; `Run` returns the boot error or, after a signal, `Stop`'s joined errors,
+and a second signal during shutdown cancels the drain — the force-exit
+short-circuit. Step 5 (route registration) arrives with the transport
+adapters; until then controllers and consumers are constructed, not routed.
+
+Three rules the 2026-08-01 adversarial review of this package pinned down:
+**modules are deduplicated by identity, not call site** — copies of one
+`NewModule` value shared through several import paths are one module, while a
+module factory called twice creates two, and sharing a name is then the
+duplicate-name boot error (`config.Module[T]` names itself after `T` for the
+same reason, so several config structs coexist); **constructors wire, OnStart
+acquires** — a constructor that opens a connection owns a resource the boot
+sequence cannot release if a later module fails to build, so acquisition
+belongs in hooks, whose rollback the lifecycle guarantees; and a failure
+relayed across an import edge renders **one** diagnostic block, attributed to
+the module whose fix it is.
+
 **Usage**
 
 ```go
@@ -1265,8 +1294,18 @@ func (c *UserController) Register(r transport.Registrar) {
 
 // ── bootstrap ────────────────────────────────────────────────────────
 func main() {
+    // main reads config values at composition time (adapter options), so it
+    // loads once and provides the value — config.Module[T] is the form for
+    // services that don't (§2.4).
+    cfg, err := config.Load[Config](config.WithEnvPrefix("WARREN"))
+    if err != nil {
+        log.Fatal(err)
+    }
     warren.New(
-        config.Module[Config](config.WithEnvPrefix("WARREN")),
+        warren.NewModule("config",
+            warren.Providers(func() Config { return cfg }),
+            warren.Exports[Config](),
+        ),
         observability.Module(observability.ServiceName("user-service")),
         postgres.Module(postgres.DSN(cfg.Postgres.DSN)),
         kafka.Broker(kafka.Brokers(cfg.Kafka.Brokers...)),
