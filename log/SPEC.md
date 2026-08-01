@@ -2,11 +2,11 @@
 
 | | |
 |---|---|
-| **Status** | **Approved (2026-08-01)** — the three-function surface is binding; conditions: the mode label (the API is Vendor-shaped; §2.5 needs amending to match §9), the unseeded-context fallback, and the seeding surface (Open questions 1, 2, 6) settled before adapters consume it |
+| **Status** | **Approved (2026-08-01)** — implemented; the three conditions (mode label, unseeded fallback, seeding surface — Open questions 1, 2, 6) were settled the same day and warren.md §2.5 amended to match |
 | **Source** | [warren.md §2.5](../warren.md) |
 | **Module** | core |
-| **Mode** | Wrap (thin) |
-| **Wraps** | `log/slog` |
+| **Mode** | Vendor (context carrier) |
+| **Uses** | `log/slog`, directly — no port in front |
 
 ## Problem
 
@@ -80,12 +80,26 @@ func With(ctx context.Context, args ...any) context.Context
 
 // CorrelationID returns the correlation ID carried by ctx — the identifier
 // that ties together every record emitted while handling one request, across
-// the transports and consumers it passes through.
+// the transports and consumers it passes through. It returns "" when ctx
+// carries none.
 func CorrelationID(ctx context.Context) string
+
+// WithLogger returns a copy of ctx carrying l. It is the seeding side of
+// FromContext, called by transport adapters at the edge of a request; handler
+// code has no reason to call it.
+func WithLogger(ctx context.Context, l *slog.Logger) context.Context
+
+// WithCorrelationID returns a copy of ctx carrying id. The correlation ID is
+// minted at the edge: an adapter reuses the identifier arriving on the wire
+// or mints a fresh one, seeds it here, and attaches it to the logger.
+func WithCorrelationID(ctx context.Context, id string) context.Context
 ```
 
-`With` is a function, not a type, so it is the standard Go options idiom and is
-permitted by [AGENT.md § Naming](../AGENT.md).
+The seeding pair was added on 2026-08-01 (Open question 6): adapters are
+separate modules, so the seam they seed through must be exported, and
+warren.md §2.5 now lists all five functions. `With`, `WithLogger`, and
+`WithCorrelationID` are functions, not types, so they are the standard Go
+idiom and are permitted by [AGENT.md § Naming](../AGENT.md).
 
 ## Behaviour
 
@@ -108,10 +122,11 @@ permitted by [AGENT.md § Naming](../AGENT.md).
 `error`, and warren.md fixes no message text for it.
 
 The one behaviour that would normally produce an error — asking for a logger
-from a context that was never seeded — has no defined outcome in warren.md.
-`panic` in library code is forbidden by AGENT.md § General, so the choice is
-between a usable fallback logger and a no-op; warren.md does not say which. See
-Open questions.
+from a context that was never seeded — is defined (Open question 2, resolved):
+`FromContext` returns `slog.Default()`. The result is always usable and never
+nil, a unit-tested handler logs without any adapter in scope, and an
+application that configured its root logger with `slog.SetDefault` sees that
+configuration respected even on a detached context.
 
 ## Testing
 
@@ -133,44 +148,58 @@ Open questions.
 
 ## Definition of done
 
-- [ ] The three functions in Public API exist with those exact signatures, each
-      with a doc comment starting with the identifier's name.
-- [ ] Package compiles under the core module with no import outside the standard
-      library.
-- [ ] Round-trip and unseeded-context tests pass, `t.Parallel()`, table-driven.
-- [ ] Allocation benchmarks exist for `FromContext`, `With`, and
-      `CorrelationID`.
-- [ ] The Open questions below are answered by the human and folded into this
-      spec, in the same change that implements them.
-- [ ] `make ci` passes (once the Makefile exists — see AGENT.md § Repository
-      state).
+- [x] The five functions in Public API exist with those exact signatures, each
+      with a doc comment starting with the identifier's name — `log/log.go`,
+      2026-08-01.
+- [x] Package compiles under the core module with no import outside the
+      standard library (`context`, `log/slog`).
+- [x] Round-trip and unseeded-context tests pass, `t.Parallel()`, table-driven,
+      asserted against an in-memory `slog.Handler`.
+- [x] Allocation benchmarks exist — recorded 2026-08-01, Apple M-series:
+      `FromContext` on a seeded context 4.6 ns/op, **0 allocs**;
+      `CorrelationID` 4.2 ns/op, **0 allocs**; `With` adding two fields
+      175 ns/op, 6 allocs (per-request in adapters — it derives a logger and
+      a context, both allocations inherent to the design).
+- [x] The Open questions below are answered and folded into this spec in the
+      same change that implements them (question 5 deferred to `broker` /
+      `observability`, where the header key is owned).
+- [x] `make ci` passes — fmt, vet, lint, invariants, `go test -race`, green
+      2026-08-01.
 
 ## Open questions
 
-1. **warren.md contradicts itself on this package's mode.** §2.5 says
-   **Wrap (thin)**; the §9 ledger row for Logging says **Vendor**. The two modes
-   mean different things (AGENT.md § Modes): Wrap means users must not import
-   `log/slog` directly and a port sits in front; Vendor means it is imported and
-   used directly. The §2.5 surface returns `*slog.Logger`, which is a Vendor
-   shape — a Wrap would return a Warren port. Which is it? The API as written
-   only makes sense as Vendor.
-2. **What does `FromContext` return when the context was never seeded?** A
-   usable default logger writing to stderr, a no-op logger that discards, or
-   `slog.Default()`? warren.md is silent, and `nil` is not viable because the
-   §2.5 usage calls `.Info` on the result unconditionally.
-3. **Does `With` also work when no logger is on the context yet** — i.e. does it
-   create one — or does it require a seeded context?
-4. **Who mints the correlation ID, and what does `CorrelationID` return when
-   there is none?** Empty string, or is one always generated at the edge?
-   warren.md never says which component generates it.
+1. **RESOLVED (2026-08-01) — the mode is Vendor.** The §2.5 surface returns
+   `*slog.Logger`, which only makes sense as Vendor: users hold slog directly,
+   and this package is a context carrier in front of it, not a port. warren.md
+   §2.5 was amended from "Wrap (thin)" to "Vendor (context carrier)", removing
+   the contradiction with the §9 ledger.
+2. **RESOLVED (2026-08-01) — `FromContext` returns `slog.Default()` when
+   unseeded.** Never nil (the §2.5 usage calls `.Info` unconditionally), and
+   an application that configures its root logger via `slog.SetDefault` sees
+   that configuration respected on detached contexts too. A no-op logger was
+   rejected: silently discarding records is the worst failure mode a logging
+   seam can have.
+3. **RESOLVED (2026-08-01) — `With` works on an unseeded context** by deriving
+   from `FromContext`'s fallback. One rule, no special case. With no args it
+   returns ctx unchanged, allocating nothing.
+4. **RESOLVED (2026-08-01) — the edge mints; core returns what is carried.**
+   A transport adapter reuses the correlation ID arriving on the wire or mints
+   a fresh one, then seeds it with `WithCorrelationID`. `CorrelationID`
+   returns `""` when none is carried — core never generates identifiers.
+   Recorded in warren.md §2.5.
 5. **How does a correlation ID reach a consumer?** §3.4 reserves
    `Message.Headers` for trace context; is the correlation ID carried there
    under a fixed key, and is that key owned by this package or by `broker`?
-6. **Is there a way to seed the context at all in the public surface?** The
-   three functions read and derive; adapters have to put the first logger on the
-   context somehow. Is that a fourth exported function, or an internal one the
-   adapters reach through another route? Adapters are separate modules, so they
-   cannot use an unexported one.
-7. **Does anything need to configure the root logger** — format, level, output —
-   or is that entirely the application's business before `warren.New`? warren.md
-   §2.5 shows no configuration surface.
+   **Deferred:** the header key belongs to the messaging seam — decide in
+   `broker`'s (or `observability`'s) spec before the first consumer chain is
+   built. Nothing in this package blocks on it.
+6. **RESOLVED (2026-08-01) — the seeding surface is exported.**
+   `WithLogger(ctx, l)` and `WithCorrelationID(ctx, id)` were added to the
+   public API and to warren.md §2.5: adapters are separate modules and cannot
+   reach an unexported seam. This was the one surface addition; it was flagged
+   as a manifest amendment in the same change.
+7. **RESOLVED (2026-08-01) — root-logger configuration is the application's
+   business.** Format, level, and output are set by the user (typically
+   `slog.SetDefault`) before `warren.New`; this package adds no configuration
+   surface, and the `slog.Default()` fallback is what makes that arrangement
+   coherent.

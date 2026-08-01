@@ -69,7 +69,8 @@ Progress is spec-first: ☑ means *done and verified*, not *started*.
       *(spec approved; implemented, golden-file tested, `make ci` green)*
 - [x] `domain` — `Entity`, `Root[K]`, `AggregateRoot`, `Event` *(spec approved;
       implemented, §3.1 example compiles as a test, `make ci` green)*
-- [ ] `log` — context-carried logger *(spec approved)*
+- [x] `log` — context-carried logger *(spec approved; implemented, Vendor mode
+      settled, seeding surface added, `make ci` green)*
 - [ ] `di` — the container wrap; the golden diagnostic is the product
       *(spec approved)*
 - [ ] `lifecycle` — ordered start/stop, readiness gate *(spec approved)*

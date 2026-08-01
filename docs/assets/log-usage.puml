@@ -5,8 +5,9 @@ participant "transport adapter\n(edge ring)" as edge
 participant "context.Context" as ctx
 participant "handler /\nany downstream code" as handler
 
-edge -> ctx : seed logger + fields:\ntrace_id, span_id, correlation_id,\nmodule, handler
-note right : seeding surface is an open\nquestion — adapters need an\nexported way in (OQ 6)
+edge -> ctx : log.WithLogger(ctx, l) —\nl carries trace_id, span_id,\ncorrelation_id, module, handler
+edge -> ctx : log.WithCorrelationID(ctx, id)\nid reused from the wire,\nor minted here at the edge
+note right : the exported seeding pair —\nadapters are separate modules\nand cannot reach an unexported seam.\nunseeded ctx → slog.Default()
 
 edge -> handler : Handle(ctx, req)
 handler -> ctx : log.FromContext(ctx)

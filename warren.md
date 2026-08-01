@@ -453,16 +453,28 @@ Validation runs at boot. A missing `WARREN_POSTGRES_DSN` is a startup failure wi
 
 ### 2.5 `warren/log`
 
-- **Path** `warren/log` · **Module** core · **Wraps** `log/slog` · **Mode** Wrap (thin)
-- **Owns** — context-carried loggers and correlation-ID propagation.
+- **Path** `warren/log` · **Module** core · **Uses** `log/slog` · **Mode** Vendor (context carrier)
+- **Owns** — context-carried loggers and correlation-ID propagation. Not a
+  logging abstraction: the logger *is* `*slog.Logger`, used directly — this
+  package only carries it on the context, which is why the mode is Vendor
+  (matching the §9 ledger), not Wrap.
 
 **Surface**
 
 ```go
-func FromContext(ctx context.Context) *slog.Logger
+func FromContext(ctx context.Context) *slog.Logger // slog.Default() when unseeded
 func With(ctx context.Context, args ...any) context.Context
-func CorrelationID(ctx context.Context) string
+func CorrelationID(ctx context.Context) string     // "" when none is carried
+
+// The seeding side, called by transport adapters at the edge — adapters are
+// separate modules, so the seam must be exported:
+func WithLogger(ctx context.Context, l *slog.Logger) context.Context
+func WithCorrelationID(ctx context.Context, id string) context.Context
 ```
+
+The correlation ID is minted at the edge: an adapter reuses the one arriving on
+the wire or mints a fresh one, then seeds it here and attaches it to the
+logger. Core never generates identifiers.
 
 **Usage**
 
