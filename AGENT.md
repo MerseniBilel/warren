@@ -468,10 +468,15 @@ recommended in blog posts, and neither README said so.
 - Accept interfaces, return concrete types — **except** constructors that return
   a port, which is Warren's whole pattern.
 - No `init()`. No package-level mutable state. No `panic` in library code —
-  with one named exception: `di.MustResolve`, whose `Must` prefix is Go's
-  documented panic convention, runs at boot where the alternative to failing
-  loudly is a zero value that explodes later. Nothing else panics, and no new
-  `Must*` is added without amending this line.
+  with two named exceptions, both boot-time. `di.MustResolve`: the `Must`
+  prefix is Go's documented panic convention, and the alternative to failing
+  loudly at boot is a zero value that explodes later. `app.Chain`'s
+  composition guards: a nil handler, a nil middleware, or a middleware
+  returning nil panics at composition (boot step 5) with a message naming the
+  position — Chain cannot return an error (§3.2 fixes its signature), and
+  deferring the failure would be the request-time nil dereference the
+  boot-ordering rule exists to prevent. Nothing else panics, and nothing is
+  added to this list without amending this line.
 - Reflection belongs at boot, not in the request path (invariant 7).
 - Exported identifiers have doc comments starting with the identifier's name.
 - Formatting is the formatter's job. Never hand-format; never argue about it.

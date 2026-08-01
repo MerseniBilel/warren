@@ -4,6 +4,8 @@ import (
 	"context"
 	stderrors "errors"
 	"flag"
+	"go/parser"
+	"go/token"
 	"os"
 	"path/filepath"
 	"strings"
@@ -146,6 +148,100 @@ func TestContextDiscipline(t *testing.T) {
 	}
 	if sawCancel == nil {
 		t.Error("cancellation did not propagate through the chain")
+	}
+}
+
+// TestChainOrderingOnErrorPath pins that unwinding order holds when the
+// handler fails: middleware see the error on the way out in reverse order,
+// with the code intact.
+func TestChainOrderingOnErrorPath(t *testing.T) {
+	t.Parallel()
+
+	var trace []string
+	failing := app.HandlerFunc[string, string](func(context.Context, string) (string, error) {
+		trace = append(trace, "handle")
+		return "", werrors.Conflict("taken")
+	})
+	h := app.Chain(failing, tracing("a", &trace), tracing("b", &trace))
+	_, err := h.Handle(context.Background(), "x")
+	if !werrors.Is(err, werrors.CodeConflict) {
+		t.Fatalf("code did not survive: %v", err)
+	}
+	want := []string{"a-in", "b-in", "handle", "b-out", "a-out"}
+	if strings.Join(trace, ",") != strings.Join(want, ",") {
+		t.Errorf("error-path order = %v, want %v", trace, want)
+	}
+}
+
+// assertPanics runs fn and asserts it panics with a message containing want —
+// the composition-time guards are boot-time panics with named messages
+// (AGENT.md § General's second sanctioned exception).
+func assertPanics(t *testing.T, want string, fn func()) {
+	t.Helper()
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatalf("no panic; want one mentioning %q", want)
+		}
+		msg, ok := r.(string)
+		if !ok || !strings.Contains(msg, want) {
+			t.Errorf("panic = %v, want a named message containing %q", r, want)
+		}
+	}()
+	fn()
+}
+
+func TestChainRefusesNilAtComposition(t *testing.T) {
+	t.Parallel()
+
+	pass := func(next app.Handler[string, string]) app.Handler[string, string] { return next }
+	returnsNil := func(app.Handler[string, string]) app.Handler[string, string] { return nil }
+
+	t.Run("nil handler", func(t *testing.T) {
+		t.Parallel()
+		assertPanics(t, "nil handler", func() { app.Chain[string, string](nil) })
+	})
+
+	t.Run("nil middleware names its position", func(t *testing.T) {
+		t.Parallel()
+		assertPanics(t, "middleware 2 of 3 is nil", func() {
+			app.Chain(echo(), pass, nil, pass)
+		})
+	})
+
+	t.Run("middleware returning nil names its position", func(t *testing.T) {
+		t.Parallel()
+		assertPanics(t, "middleware 1 of 2 returned a nil handler", func() {
+			app.Chain(echo(), returnsNil, pass)
+		})
+	})
+}
+
+// TestTransportIndependence is the compile-time check the spec requires: the
+// package's own dependency graph is the standard library and nothing else,
+// guarded against regression rather than asserted once by hand.
+func TestTransportIndependence(t *testing.T) {
+	t.Parallel()
+
+	allowed := map[string]bool{"context": true, "fmt": true}
+	entries, err := os.ReadDir(".")
+	if err != nil {
+		t.Fatalf("reading package dir: %v", err)
+	}
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".go") || strings.HasSuffix(e.Name(), "_test.go") {
+			continue
+		}
+		f, err := parser.ParseFile(token.NewFileSet(), e.Name(), nil, parser.ImportsOnly)
+		if err != nil {
+			t.Fatalf("parsing %s: %v", e.Name(), err)
+		}
+		for _, imp := range f.Imports {
+			path := strings.Trim(imp.Path.Value, `"`)
+			if !allowed[path] {
+				t.Errorf("%s imports %q — the app package's graph must stay stdlib-only, no transport, broker, or persistence anything", e.Name(), path)
+			}
+		}
 	}
 }
 

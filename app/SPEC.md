@@ -87,6 +87,12 @@ type Handler[Req, Res any] interface {
 	Handle(ctx context.Context, req Req) (Res, error)
 }
 
+// HandlerFunc adapts a bare function to Handler — how middleware wrap
+// handlers without declaring a struct each time. Like net/http.HandlerFunc,
+// a nil HandlerFunc panics when called; Chain refuses nil handlers at
+// composition time. (Added with the implementation; warren.md §3.2 amended.)
+type HandlerFunc[Req, Res any] func(ctx context.Context, req Req) (Res, error)
+
 // Middleware decorates a Handler with a cross-cutting concern. Because it wraps
 // the handler rather than the protocol, one middleware applies identically to
 // HTTP, gRPC, and consumers — this is the core ring of the two-ring model in
@@ -96,9 +102,12 @@ type Middleware[Req, Res any] func(Handler[Req, Res]) Handler[Req, Res]
 
 // Chain composes middleware around a handler and returns the composed handler.
 // It runs at boot, not per request: the result is stored in the route table as
-// a pre-built closure.
+// a pre-built closure. mw[0] is the outermost.
 func Chain[Req, Res any](h Handler[Req, Res], mw ...Middleware[Req, Res]) Handler[Req, Res]
 ```
+
+The authoritative doc-comment prose lives in `app/app.go`, not here — this
+block records signatures and intent.
 
 **Built-in core middleware** (§3.2). warren.md gives these as a table of call
 forms and effects, not as signatures. The call forms are reproduced exactly; the
@@ -230,6 +239,19 @@ and `Authorized` are **not** in this position, and that is open question 1.
 
 ## Errors
 
+**The nil contract (2026-08-01 adversarial review, both cases reproduced
+before the fix).** A nil handler, a nil middleware in the slice, or a
+middleware returning nil is refused by `Chain` **at composition time** with a
+panic naming the position (`app: Chain middleware 2 of 3 is nil — append a
+conditional middleware only when it is enabled`). Before the fix, a
+middleware returning nil composed silently and detonated as a bare nil
+dereference on the first request — the exact production failure the
+boot-ordering rule exists to prevent. `Chain` cannot return an error (§3.2
+fixes its signature), so these are boot-time panics, sanctioned by name in
+AGENT.md § General alongside `di.MustResolve`. A nil `HandlerFunc` called
+directly panics like `net/http.HandlerFunc` — reachable only by bypassing
+`Chain`, and documented.
+
 This package defines no error values. It handles two kinds:
 
 - **Errors from the wrapped handler** — always the `warren/errors` vocabulary
@@ -291,15 +313,19 @@ line on is that composition allocates at boot and not per request.
 
 ## Definition of done
 
-- [x] `Handler`, `Middleware`, and `Chain` compile exactly as written above —
-      plus `HandlerFunc`, the func adapter middleware wrap with (warren.md
-      §3.2 amended in the same change).
+- [x] `Handler`, `HandlerFunc`, `Middleware`, and `Chain` compile exactly as
+      written above (warren.md §3.2 amended in the same change to carry
+      `HandlerFunc` and the chain-order convention).
 - [ ] The five built-in middleware exist with agreed signatures (open questions
       1 and 2 answered first — they cannot be written until then).
 - [x] The core-middleware contract suite exists and passes — transparency
-      (every §2.6 code survives the chain), ordering (golden), context
-      discipline. **Not yet exported:** same home question as the other
-      internal suites (`warren/testing`).
+      (every §2.6 code survives the chain), ordering (golden, plus the
+      error-path unwinding order pinned), context discipline, the nil
+      contract, and the transport-independence check as an automated test
+      (the package's imports are parsed and held to the standard library,
+      guarding regressions instead of a one-time manual `go list`). **Not
+      yet exported:** same home question as the other internal suites
+      (`warren/testing`).
 - [x] Allocation benchmarks committed with recorded numbers — 2026-08-01,
       Apple M-series: bare handler 1.8 ns/op, chain of five 9.4 ns/op, both
       **0 allocs/op** — composition allocates at boot, invocation never. The

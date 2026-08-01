@@ -9,7 +9,10 @@
 // ring, owned by each adapter.
 package app
 
-import "context"
+import (
+	"context"
+	"fmt"
+)
 
 // Handler is a use case: one request in, one response out, plus an error
 // drawn from the warren/errors vocabulary. It is the unit every transport
@@ -22,7 +25,9 @@ type Handler[Req, Res any] interface {
 }
 
 // HandlerFunc adapts a bare function to Handler — how middleware wrap
-// handlers without declaring a struct each time.
+// handlers without declaring a struct each time. Like net/http.HandlerFunc,
+// a nil HandlerFunc panics when called; Chain refuses nil handlers at
+// composition time, so a nil can only be called by bypassing Chain.
 type HandlerFunc[Req, Res any] func(ctx context.Context, req Req) (Res, error)
 
 // Handle calls f.
@@ -46,9 +51,28 @@ type Middleware[Req, Res any] func(Handler[Req, Res]) Handler[Req, Res]
 //
 // Chain runs at boot, not per request — the result is stored in the route
 // table as a pre-built closure, and invoking it allocates nothing.
+//
+// A nil handler, a nil middleware, or a middleware that returns nil panics
+// here, at composition time, with a message naming the position — a startup
+// crash instead of the request-time nil dereference each of them would
+// otherwise become. This is the boot-time panic AGENT.md § General names as
+// sanctioned alongside di.MustResolve: Chain cannot return an error (the
+// §3.2 signature is fixed), and deferring the failure to request 1 is the
+// exact outcome the boot-ordering rule exists to prevent. Note a conditional
+// middleware belongs in the slice only when enabled — append it, don't leave
+// a nil hole.
 func Chain[Req, Res any](h Handler[Req, Res], mw ...Middleware[Req, Res]) Handler[Req, Res] {
+	if h == nil {
+		panic("app: Chain composed around a nil handler — the handler must exist before boot step 5 builds the route table")
+	}
 	for i := len(mw) - 1; i >= 0; i-- {
+		if mw[i] == nil {
+			panic(fmt.Sprintf("app: Chain middleware %d of %d is nil — append a conditional middleware only when it is enabled", i+1, len(mw)))
+		}
 		h = mw[i](h)
+		if h == nil {
+			panic(fmt.Sprintf("app: middleware %d of %d returned a nil handler — a middleware must return a handler, usually by wrapping the one it was given", i+1, len(mw)))
+		}
 	}
 	return h
 }
