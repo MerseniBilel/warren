@@ -1,0 +1,27 @@
+@startuml config-usage
+title warren/config — core parses no files; Sources are the seam\nsource: config/SPEC.md (approved 2026-08-01); warren.md §2.4, §1.6
+
+participant "main.go" as main
+participant "warren/config\n(core: defaults·env·flags)" as config
+participant "config/yaml\n(submodule Source)" as yaml
+participant "warren.App\n(root)" as app
+participant "constructor\nNewServer(cfg Config)" as ctor
+
+== Declaration — a plain struct, three tags ==
+note over config : type Config struct {\n  HTTPPort int `config:"http_port" default:"8080"`\n  Postgres struct {\n    DSN string `config:"dsn" validate:"required"`\n  } `config:"postgres"`\n}\nconfig: names the key · default: first layer ·\nvalidate: enforced after resolution
+
+== Boot — resolution order, later wins ==
+main -> app : warren.New(\n  config.Module[Config](\n    yaml.File("config.yaml"),\n    config.WithEnvPrefix("WARREN")))
+app -> config : Load[Config] at boot (§1.3 step 4)
+config -> config : 1  struct defaults
+config -> yaml : 2  Source.Load()\n→ map[string]any
+note right of yaml : the ONLY place a YAML parser exists —\ncore adds zero parsing dependencies;\nsame seam later: toml, json, Vault
+config -> config : 3  env: WARREN_POSTGRES_DSN\n4  flags
+config -> config : validate — a bad value fails\nAT BOOT, not on request 1
+config --> app : Config provided to the graph
+app -> ctor : any constructor takes Config\nas a dependency
+
+== Without a file ==
+main -> config : config.Module[Config](\n  config.WithEnvPrefix("WARREN"))
+note right : core-only: defaults + env + flags,\nzero dependencies added
+@enduml

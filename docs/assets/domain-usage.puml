@@ -1,0 +1,27 @@
+@startuml domain-usage
+title warren/domain — identity, aggregates, events, specifications\nsource: domain/SPEC.md (approved 2026-08-01); warren.md §3.1
+
+participant "aggregate constructor\nNewUser(...)" as ctor
+participant "User\n{ AggregateRoot[UserID] }" as agg
+participant "Repository[*User, UserID]\n(port, T Root[K])" as repo
+participant "persistence.UnitOfWork\n[context — §3.3]" as uow
+
+== Construction — identity before the first event ==
+ctor -> agg : AggregateRoot:\ndomain.NewAggregateRoot(NewUserID())
+ctor -> agg : Raise(UserRegistered{...})
+note right of agg : Raise records, publishes NOTHING —\nevents wait for the unit of work
+note right of agg : Entity[T].ID() is the identity accessor;\nID constraint = comparable + fmt.Stringer
+
+== The generic seam ==
+note over agg, repo : Root[K] is the constraint repositories are generic over:\n  ID() K + PullEvents() []Event\nAggregateRoot satisfies it — a struct cannot be a Go type\nconstraint, so this interface makes Repository[T Root[K], K ID]\nexpressible (compiler-verified 2026-08-01)
+
+== Save — the only place events leave ==
+repo -> agg : load / save *User
+uow -> agg : PullEvents() — drains and clears,\ninside the business transaction
+uow -> uow : store aggregate + outbox\nin ONE transaction (§5.5)
+
+== Specification — one predicate, two uses ==
+ctor -> repo : FindBy(ActiveUsers())
+repo -> repo : spec.ToSQL() → clause + args\n(a repository MAY translate)
+ctor -> ctor : spec.IsSatisfiedBy(user)\n— same rule, in memory
+@enduml

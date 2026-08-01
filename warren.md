@@ -134,7 +134,7 @@ Kafka msg ────┘   (transport-specific)                   │
                                                          │
                               ┌──────────────────────────┤
                               ▼                          ▼
-                        encode success            warren.Error
+                        encode success            errors.Error
                               │                          │
               ┌───────────────┼──────────┐    NotFound → 404 / NotFound / ack
               ▼               ▼          ▼    Conflict → 409 / AlreadyExists / ack
@@ -497,14 +497,27 @@ const (
     CodeInternal         Code = "INTERNAL"
 )
 
-func Invalid(field string, err error) *Error
-func NotFound(resource string, id any) *Error
-func Conflict(msg string, args ...any) *Error
-// ...
+func Invalid(field string, err error) *Error          // "field <field> is invalid", wraps err
+func NotFound(resource string, id any) *Error         // "<resource> <id> not found"
+func Conflict(msg string, args ...any) *Error         // printf-style; args are fmt operands
+func Unauthenticated(reason string) *Error            // "<reason>" — about the CALLER's identity
+func PermissionDenied(action string) *Error           // "not allowed to <action>"
+func Unavailable(dependency string, err error) *Error // "<dependency> is unavailable", wraps err
+func Internal(err error) *Error                       // "unexpected failure", wraps err
 
+func (e *Error) Code() Code
+func (e *Error) Message() string
+func (e *Error) Details() map[string]any // a copy; mutating it does not touch e
+func (e *Error) Error() string           // "CODE: message", ": cause" appended when one is wrapped
+func (e *Error) Unwrap() error           // the wrapped cause, so stdlib errors.Is/As see through
 func (e *Error) WithDetail(k string, v any) *Error
 func Is(err error, code Code) bool
 ```
+
+The type's home is `warren/errors`, so its qualified name is `errors.Error` —
+everywhere. In generated code that also touches driver sentinels, the Warren
+package is imported under the alias `werrors` so the bare `errors` identifier
+stays the standard library (see §6.1).
 
 **Why it matters** — one table, three transports:
 
@@ -519,6 +532,9 @@ func Is(err error, code Code) bool
 | `INTERNAL` | 500 | `Internal` | nack + retry, then DLQ |
 
 This table is why domain code can return `errors.Conflict(...)` and never import `net/http`.
+
+A `Code` the table does not list is treated by every adapter as `INTERNAL` —
+the safe default for the unknown: 500, `Internal`, nack + retry, then DLQ.
 
 **Why the two auth codes dead-letter rather than retry or ack.** The message
 won't get a better token by waiting — retrying an expired credential just burns
@@ -540,7 +556,7 @@ the table.
 
 - **Path** `warren/validate` · **Module** core · **Wraps** `go-playground/validator/v10` · **Mode** Wrap
 
-Wrapped so failures surface as `*warren.Error` with `CodeInvalid` and per-field details, rather than leaking `validator.ValidationErrors` into handlers. Transport adapters call it automatically after decode; handlers never invoke it.
+Wrapped so failures surface as `*errors.Error` with `CodeInvalid` and per-field details, rather than leaking `validator.ValidationErrors` into handlers. Transport adapters call it automatically after decode; handlers never invoke it.
 
 ```go
 type RegisterUser struct {
@@ -815,7 +831,7 @@ Registers a lifecycle hook: starts after all dependencies are healthy, stops bef
 
 - **Wraps** `google.golang.org/grpc` · **Mode** Wrap
 
-Wrapped specifically so interceptors register through the same middleware chain as HTTP, and so `warren.Error` maps to `codes.Code` without handler involvement. Reflection and the health service are on by default.
+Wrapped specifically so interceptors register through the same middleware chain as HTTP, and so `errors.Error` maps to `codes.Code` without handler involvement. Reflection and the health service are on by default.
 
 ```go
 grpc.Server(
@@ -970,7 +986,7 @@ func (r *UserRepository) FindByID(ctx context.Context, id domain.UserID) (*domai
     var u domain.User
     if err := row.Scan(&u.ID, &u.Email, &u.Name, &u.Status); err != nil {
         if errors.Is(err, pgx.ErrNoRows) {
-            return nil, errors.NotFound("user", id)
+            return nil, werrors.NotFound("user", id)
         }
         return nil, err
     }
@@ -979,6 +995,11 @@ func (r *UserRepository) FindByID(ctx context.Context, id domain.UserID) (*domai
 ```
 
 Plain pgx, plain SQL, fully readable, yours to edit. `r.db(ctx)` is the only piece of framework magic and it does one thing: return the ambient transaction if one exists, else the pool.
+
+Generated repositories import the standard library's `errors` bare and Warren's
+under an alias — `werrors "github.com/MerseniBilel/warren/errors"` — so
+`errors.Is(err, pgx.ErrNoRows)` and `werrors.NotFound("user", id)` coexist in
+one file.
 
 ### 6.2–6.4 `mysql` / `mongo` / `redis`
 
@@ -1117,7 +1138,7 @@ All generators support `--dry-run` and `--force`.
 | Config | — | Build | Viper rejected: weight + global state |
 | Lifecycle | — | Build | fx rejected: imposes its own lifecycle |
 | Logging | `log/slog` | Vendor | stdlib |
-| Validation | `go-playground/validator/v10` | Wrap | errors normalised to `warren.Error` |
+| Validation | `go-playground/validator/v10` | Wrap | errors normalised to `errors.Error` |
 | HTTP | `go-chi/chi/v5` | Wrap | `net/http`-compatible; Gin/Echo/Fiber adapters |
 | gRPC | `google.golang.org/grpc` | Wrap | shared middleware chain |
 | Proto | `buf` | Vendor | tooling only |

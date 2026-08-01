@@ -59,20 +59,21 @@ Progress is spec-first: ☑ means *done and verified*, not *started*.
 - [x] Core decisions taken: config `Source` split, auth-code DLQ rows,
       `Root[K]` constraint, concrete registrars on Go 1.27
 - [ ] Remaining decisions folded into their specs and re-approved
-- [ ] Tooling rebuilt: Makefile, CI workflow, `golangci` config, module-rules check
+- [x] Tooling rebuilt: Makefile, CI workflow, `golangci` config, module-rules
+      check (`scripts/invariants.sh`)
 - [ ] Dependency audits run (`dig` first) — no library enters a `go.mod` without one
 
 ### Phase 1 — kernel (buildable on Go 1.26, in dependency order)
 
-- [ ] `errors` — the semantic vocabulary; load-bearing for everything
-      *(spec: table complete; constructor signatures still open)*
-- [ ] `domain` — `Entity`, `Root[K]`, `AggregateRoot`, `Event` *(spec: compile
-      blockers resolved, pending re-approval)*
+- [x] `errors` — the semantic vocabulary; load-bearing for everything
+      *(spec approved; implemented, golden-file tested, `make ci` green)*
+- [ ] `domain` — `Entity`, `Root[K]`, `AggregateRoot`, `Event` *(spec approved)*
 - [ ] `log` — context-carried logger *(spec approved)*
 - [ ] `di` — the container wrap; the golden diagnostic is the product
       *(spec approved)*
 - [ ] `lifecycle` — ordered start/stop, readiness gate *(spec approved)*
-- [ ] `config` + `config/yaml` — Source-split loading *(spec pending re-approval)*
+- [ ] `config` + `config/yaml` — Source-split loading *(core spec approved;
+      `config/yaml` spec still to write)*
 - [ ] `warren` (root) — module system and boot sequence *(spec approved)*
 - [ ] `app` — `Handler`/`Middleware`/`Chain` *(approved; built-in middleware
       blocked on the core-port decision)*

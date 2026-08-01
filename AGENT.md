@@ -21,18 +21,27 @@ the design.
 What exists right now:
 
 ```
-warren.md    the design — package manifest, architecture, dependency ledger
-AGENT.md     this file
-CLAUDE.md    Claude Code's pointer to this file
-LICENSE      Apache-2.0
+warren.md         the design — package manifest, architecture, dependency ledger
+AGENT.md          this file
+CLAUDE.md         Claude Code's pointer to this file
+README.md         the public front door and the roadmap checkboxes
+LICENSE           Apache-2.0
 NOTICE
+<pkg>/SPEC.md     one spec per package, in the package's own directory
+go.mod            the core module — stdlib only until warren/di lands
+Makefile          fmt · vet · lint · invariants · test, iterated per module
+.github/          CI: the same targets, plus golangci-lint v2
+.golangci.yml     linter config
+scripts/invariants.sh   the greppable invariants (1, 2, 8, naming), run in CI
+errors/           the first implemented package (approved spec, golden tests)
+docs/assets/      one usage diagram per approved spec, .puml + .png
 ```
 
-**There is no `go.mod`, no Makefile, no CI, and no linter config yet.** They are
-rebuilt as the first packages land. Do not claim a build passed, a linter ran,
-or an invariant was enforced until the tooling to do so exists and you have run
-it. Where this file says "fails CI," read it as the rule the check will enforce
-once written — the rule binds you now either way.
+The tooling was rebuilt on 2026-08-01: `make ci` is the gate, and it runs fmt,
+vet, golangci-lint, the invariants script, and `go test -race` across every
+module in the Makefile's `MODULES` list. Do not claim a check passed without
+running it. The invariants grep cannot see (driver types in public signatures,
+ring imports) still bind you in review either way.
 
 Module path: `github.com/MerseniBilel/warren`. Go 1.27 on its release
 (invariant 9); toolchain 1.26.x until then.
@@ -496,9 +505,9 @@ in: **`go test ./...` does not cross module boundaries.** Run it from the root
 and it tests one module and reports success — a green result that means almost
 nothing.
 
-Until the Makefile is rebuilt, iterate every module explicitly and say which
-ones you ran. When the Makefile exists, use its targets (`make ci` is the gate)
-and never the raw `go` command.
+Use the Makefile's targets (`make ci` is the gate) rather than the raw `go`
+command from the root, and add every new module to the Makefile's `MODULES`
+list when it is created — a module the list misses is a module CI never tests.
 
 **Verify before claiming.** Run the command and quote what it printed. If a tool
 is not installed, say so rather than asserting the code is clean.

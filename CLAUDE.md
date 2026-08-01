@@ -14,15 +14,17 @@ Go 1.27 on its release — toolchain 1.26.x until then, and nothing may depend o
 a 1.27 feature before it ships (AGENT.md invariant 9). Apache-2.0, module path
 `github.com/MerseniBilel/warren`.
 
-**The repository was reset in July 2026.** Everything except the licence and
-`warren.md` was deleted — the previous implementation had drifted from the
-design. What is on disk is `warren.md`, `AGENT.md`, this file, `LICENSE`, and
-`NOTICE`. There is **no `go.mod`, no Makefile, no CI, and no linter config**;
-they get rebuilt alongside the first packages.
+**The repository was reset in July 2026** — everything except the licence and
+`warren.md` was deleted because the previous implementation had drifted from
+the design — **and the tooling was rebuilt on 2026-08-01.** The core `go.mod`,
+the Makefile, CI, `.golangci.yml`, and `scripts/invariants.sh` all exist now;
+`make ci` (fmt · vet · lint · invariants · test) is the gate, and new modules
+must be added to the Makefile's `MODULES` list when they are created.
 
-Practically, that means: do not run `make ci` and report a result, do not say
-"lint passes," and do not assume a check exists. Read the rule in AGENT.md,
-follow it by hand, and say which parts you could verify and which you could not.
+Practically: run `make ci` and quote what it printed. The invariants script
+only covers what grep can see (core deps, dig confinement, `replace`, `XWithY`
+names); the rest of AGENT.md binds in review — say which parts you verified by
+tool and which by reading.
 
 | Question | Where |
 |---|---|
@@ -72,8 +74,8 @@ public API are decisions to be taken together, not discovered by writing code
 and seeing what happens.
 
 **Multi-module means `go test ./...` lies.** From the root it tests one module
-and exits zero. Until the Makefile exists, iterate the modules explicitly and
-state which ones you ran.
+and exits zero. Use the Makefile targets — they iterate the `MODULES` list —
+and add every new module to that list when it is created.
 
 **Verify before claiming.** Run the command and quote what it printed. "Should
 work" is not a result, and neither is a tool you did not actually invoke.

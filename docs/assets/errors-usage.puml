@@ -1,0 +1,29 @@
+@startuml errors-usage
+title warren/errors — one vocabulary, three columns\nsource: errors/SPEC.md (approved 2026-08-01); warren.md §1.4, §2.6
+
+participant "domain / application\ncode" as domain
+participant "errors.Error\n(kernel)" as err
+participant "transport/http\n(adapter)" as http
+participant "transport/grpc\n(adapter)" as grpc
+participant "broker consumer\nchain (adapter)" as consumer
+
+== Construction — meaning, not status ==
+domain -> err : errors.Conflict("user already exists")\n.WithDetail("email", email)
+note right of err : seven constructors, seven codes:\nInvalid · NotFound · Conflict ·\nUnauthenticated · PermissionDenied ·\nUnavailable (retryable) · Internal
+note right of err : Error() → "CONFLICT: user already exists"\nUnwrap() → the %w-wrapped cause\nstdlib errors.Is/As see through it
+
+== Translation — each adapter owns its column (§2.6) ==
+err -> http : Code() = CONFLICT
+http -> http : 409 + Details() in the body
+err -> grpc : Code() = CONFLICT
+grpc -> grpc : codes.AlreadyExists
+err -> consumer : Code() = CONFLICT
+consumer -> consumer : ack (idempotent replay)
+
+note over http, consumer : UNAUTHENTICATED / PERMISSION_DENIED → DLQ, never retry —\nno better token by waiting; acking destroys the evidence.\nUNAUTHENTICATED is about the CALLER; your own downstream\nauth failure is UNAVAILABLE, and it retries.\nUnknown code → treated as INTERNAL.
+
+== Asking about meaning ==
+consumer -> err : werrors.Is(err, CodeUnavailable)?
+err --> consumer : true → nack + backoff retry
+note right : alias werrors keeps stdlib errors.Is\nusable in the same file (§6.1)
+@enduml

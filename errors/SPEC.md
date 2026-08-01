@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | Draft — **table complete (2026-08-01)**, not yet approved: constructor signatures, `Error`'s fields, `Unwrap`, and the `Is` collision (Open questions 2–7) must be decided before this package can be implemented. |
+| **Status** | **Approved (2026-08-01)** — table, constructors, `Error`'s surface, `Unwrap`, rendering, and the `Is` collision all settled (Open questions 1–7 and 9 resolved below); the one remaining open question (8, the conformance suite's home) blocks nothing in this package |
 | **Source** | [warren.md §2.6](../warren.md) |
 | **Module** | core |
 | **Mode** | Build |
@@ -58,8 +58,9 @@ protocols" stops being true.
 
 ## Public API
 
-Taken from warren.md §2.6, with doc comments added. **The `// ...` in warren.md
-elides four constructors** — see Open questions 2.
+Taken from warren.md §2.6, with doc comments added. The four constructors
+warren.md originally elided behind `// ...` were agreed on 2026-08-01 and
+warren.md §2.6 now lists all seven (Open questions 2, resolved).
 
 ```go
 // Package errors defines Warren's semantic error vocabulary: a closed set of
@@ -117,44 +118,90 @@ const (
 	CodeInternal Code = "INTERNAL"
 )
 
-// Error is Warren's semantic error. It carries a Code, a message, and any
-// details attached with WithDetail.
-//
-// The field layout is not fixed by warren.md — see Open questions 4.
-type Error struct{ /* ... */ }
+// Error is Warren's semantic error. It carries a Code, a message, an optional
+// wrapped cause, and any details attached with WithDetail. All fields are
+// unexported; adapters read them through the accessor methods below.
+type Error struct {
+	code    Code
+	msg     string
+	cause   error
+	details map[string]any
+}
 
 // Invalid reports that field failed validation or conversion, wrapping err as
-// the reason. The resulting Error carries CodeInvalid.
+// the reason. The resulting Error carries CodeInvalid and the message
+// "field <field> is invalid".
 func Invalid(field string, err error) *Error
 
 // NotFound reports that no resource of the named kind exists with this id. The
-// resulting Error carries CodeNotFound.
+// resulting Error carries CodeNotFound and the message
+// "<resource> <id> not found"; id is rendered with %v.
 func NotFound(resource string, id any) *Error
 
 // Conflict reports that the request collided with current state. The resulting
-// Error carries CodeConflict. Whether args are printf operands or slog-style
-// key/value pairs is not stated by warren.md — both §2.6 call sites pass none.
-// See Open question 2.
+// Error carries CodeConflict. args are fmt operands for msg, printf-style;
+// when args is empty, msg is used verbatim (no % expansion).
 func Conflict(msg string, args ...any) *Error
 
-// ... Unauthenticated, PermissionDenied, Unavailable, and Internal complete the
-// set (AGENT.md § Errors names all seven). warren.md elides their signatures
-// behind "// ..." — see Open questions 2.
+// Unauthenticated reports that the caller's identity was absent or could not
+// be established; reason is the message verbatim. It describes the CALLER's
+// identity — a downstream auth failure is Unavailable, never this.
+func Unauthenticated(reason string) *Error
 
-// WithDetail returns e with the key/value pair attached, so adapters can put
-// structured context in a response body. It is a method, not a type name, and
-// so is permitted by AGENT.md § Naming.
+// PermissionDenied reports that the known caller may not perform action. The
+// message is "not allowed to <action>".
+func PermissionDenied(action string) *Error
+
+// Unavailable reports that a dependency was temporarily unreachable, wrapping
+// err as the cause. The message is "<dependency> is unavailable". This is the
+// retryable code — and the right one when your own service fails to
+// authenticate downstream.
+func Unavailable(dependency string, err error) *Error
+
+// Internal reports an unanticipated failure, wrapping err as the cause. The
+// message is "unexpected failure".
+func Internal(err error) *Error
+
+// Code returns the semantic classification.
+func (e *Error) Code() Code
+
+// Message returns the human-readable message, without the code prefix and
+// without the cause.
+func (e *Error) Message() string
+
+// Details returns a copy of the details attached with WithDetail; mutating the
+// returned map does not touch e. It returns nil when no detail was attached.
+func (e *Error) Details() map[string]any
+
+// Error renders "CODE: message", with ": cause" appended when a cause is
+// wrapped. This is the string that lands in logs.
+func (e *Error) Error() string
+
+// Unwrap returns the wrapped cause, or nil — so the standard library's
+// errors.Is and errors.As see through a Warren error.
+func (e *Error) Unwrap() error
+
+// WithDetail attaches the key/value pair to e and returns e, so adapters have
+// structured context to put in a response body. It mutates e — errors are
+// constructed, decorated, and returned on one failure path, never shared. It
+// is a method, not a type name, and so is permitted by AGENT.md § Naming.
 func (e *Error) WithDetail(k string, v any) *Error
 
 // Is reports whether err, or any error it wraps, carries code. It is how
-// callers ask about meaning without a type assertion.
+// callers ask about meaning without a type assertion. It is implemented with
+// the standard library's errors.As, so it sees through %w wrapping.
 func Is(err error, code Code) bool
 ```
 
-`*Error` must satisfy the `error` interface — warren.md §10 returns
-`errors.Invalid("email", err)` directly as a function's `error` result — so
-`func (e *Error) Error() string` exists as a consequence. Its text is not fixed
-by warren.md; see Errors and Open questions 5.
+`*Error` satisfies the `error` interface — warren.md §10 returns
+`errors.Invalid("email", err)` directly as a function's `error` result.
+
+**The type's qualified name is `errors.Error`** (Open questions 3, resolved):
+warren.md's stray references to `warren.Error` in §1.4, §2.7, §4.2, and the §9
+ledger were corrected on 2026-08-01. Code that also touches driver sentinels
+imports this package under the alias `werrors`, keeping the bare `errors`
+identifier for the standard library (Open questions 7, resolved; warren.md
+§6.1 amended).
 
 ## Behaviour
 
@@ -214,7 +261,7 @@ warren.md §1.4, the transport spine:
 Handler[Req, Res].Handle
          │
          ├──▶ encode success
-         └──▶ warren.Error
+         └──▶ errors.Error
                   NotFound → 404 / NotFound / ack
                   Conflict → 409 / AlreadyExists / ack
                   Internal → 500 / Internal / nack
@@ -250,26 +297,24 @@ Handler[Req, Res].Handle
 This package *is* the error vocabulary; the question here is what text the
 constructed errors carry.
 
-**warren.md fixes no message text for any constructor.** It fixes the *call
-sites* — `Conflict("user already active")`, `Conflict("user already exists")` —
-but those strings are supplied by the caller, not by this package. For the two
-constructors that compose a message from parts, the text is open:
+The message texts were agreed on 2026-08-01. Every row is contract, covered by
+a golden file:
 
 | Constructor | Message text |
 |---|---|
-| `Invalid(field, err)` | **Open.** warren.md fixes neither the format nor whether `err`'s text is included. |
-| `NotFound(resource, id)` | **Open.** warren.md fixes neither the format nor how `id any` is rendered. |
-| `Conflict(msg, args...)` | Caller-supplied format string; this package adds nothing that warren.md states. |
-| `Unauthenticated`, `PermissionDenied`, `Unavailable`, `Internal` | **Open** — signatures themselves are elided (Open questions 2). |
-| `(*Error).Error() string` | **Open.** warren.md does not state whether the rendered text includes the code, the details, or the wrapped error. |
+| `Invalid(field, err)` | `field <field> is invalid`; `err` becomes the wrapped cause. |
+| `NotFound(resource, id)` | `<resource> <id> not found`; `id` rendered with `%v`. |
+| `Conflict(msg, args...)` | `fmt.Sprintf(msg, args...)`; `msg` verbatim when `args` is empty. |
+| `Unauthenticated(reason)` | `<reason>`, verbatim. |
+| `PermissionDenied(action)` | `not allowed to <action>`. |
+| `Unavailable(dependency, err)` | `<dependency> is unavailable`; `err` becomes the wrapped cause. |
+| `Internal(err)` | `unexpected failure`; `err` becomes the wrapped cause. |
+| `(*Error).Error() string` | `CODE: message`, with `: cause` appended when a cause is wrapped. Details are **not** rendered — they are structured payload for adapters, not log text. |
 
-AGENT.md § Errors requires that **error messages tell the user how to fix the
-problem**: "provider not found" is called out there as a bug in the error
-message. Whatever text is agreed must meet that bar — for `NotFound`, naming
-the resource kind and the id it looked for; for `Invalid`, naming the field and
-the constraint it failed. The exact wording needs the human's decision before
-implementation, because every one of these strings then gets a golden file and
-becomes part of the contract.
+These meet the AGENT.md § Errors bar — `NotFound` names the resource kind and
+the id it looked for; `Invalid` names the field and carries the violated
+constraint in its cause; `Unavailable` names *what* was unreachable, which is
+the fact an operator needs.
 
 ## Testing
 
@@ -300,23 +345,25 @@ becomes part of the contract.
 
 ## Definition of done
 
-- [ ] `Code`, the seven constants, `Error`, `Is`, `WithDetail`, and all seven
+- [x] `Code`, the seven constants, `Error`, `Is`, `WithDetail`, and all seven
       constructors exist, each with a doc comment starting with the
-      identifier's name.
-- [ ] `*Error` satisfies `error` (fixed by §10's use of it as a return value).
-- [ ] Unwrap behaviour is decided in `warren.md` and then implemented — see
-      Open question 6; warren.md does not currently state it.
-- [ ] Package compiles under the core module importing the standard library
-      only — no `net/http`, no `google.golang.org/grpc`, no driver of any kind.
-- [ ] Every message text agreed by the human is recorded in the Errors section
-      above and covered by a golden file.
-- [ ] Allocation benchmarks exist for the constructors and `WithDetail`.
-- [ ] `Is` tests cover direct, `%w`-wrapped, and non-Warren errors.
+      identifier's name — `errors/errors.go`, 2026-08-01.
+- [x] `*Error` satisfies `error` (fixed by §10's use of it as a return value).
+- [x] Unwrap behaviour decided in `warren.md` §2.6 and implemented — `Unwrap()`
+      returns the wrapped cause (Open question 6, resolved).
+- [x] Package compiles under the core module importing the standard library
+      only — no `net/http`, no `google.golang.org/grpc`, no driver of any kind;
+      enforced by `scripts/invariants.sh` in `make ci`.
+- [x] Every message text agreed by the human is recorded in the Errors section
+      above and covered by a golden file — `errors/testdata/*.golden`.
+- [x] Allocation benchmarks exist for the constructors and `WithDetail`.
+- [x] `Is` tests cover direct, `%w`-wrapped, and non-Warren errors.
 - [x] The two missing table rows (Open questions 1) are resolved and warren.md
       §2.6 is amended in the same change — done 2026-08-01: both documents now
       carry the seven-row table and the two normative paragraphs, and §1.4's
       diagram was corrected to `Conflict → 409 / AlreadyExists / ack`.
-- [ ] `make ci` passes (once the Makefile exists).
+- [x] `make ci` passes — fmt, vet, golangci-lint, invariants, `go test -race`,
+      all green on 2026-08-01.
 
 ## Open questions
 
@@ -333,42 +380,41 @@ becomes part of the contract.
    AlreadyExists / ack` in the same change, removing its contradiction with
    §2.6. The full table and both normative paragraphs are reproduced in
    Behaviour above.
-2. **Four constructors are elided behind `// ...`.** warren.md gives signatures
-   for `Invalid`, `NotFound`, and `Conflict` only. AGENT.md § Errors names all
-   seven semantic errors, so `Unauthenticated`, `PermissionDenied`,
-   `Unavailable`, and `Internal` exist — but with what signatures? `Internal`
-   plausibly wraps a cause (`Internal(err error)`), `Unavailable` plausibly
-   names the dependency, and `PermissionDenied` plausibly names the action. Not
-   guessing.
-3. **What is the name of this type — `errors.Error` or `warren.Error`?**
-   warren.md §2.6 defines `*Error` in package `warren/errors`, so the qualified
-   name is `errors.Error`. But §2.7, §4.2, and the §9 ledger all say
-   `warren.Error`, which would put the type in the root package. Three
-   references to one name and one to the other. Which package owns the type? If
-   it is `warren/errors`, the other three references need correcting.
-4. **What are `Error`'s fields, and are any exported?** warren.md never shows
-   the struct body. An adapter needs to read the code and the details to build a
-   response, so *something* must be reachable — accessor methods, exported
-   fields, or a single `Detail()` map. Not inventing this.
-5. **What does `(*Error).Error()` render?** Message only, or `CODE: message`, or
-   message plus details? This is the string that lands in logs, so it is a
-   product decision.
-6. **Does `*Error` implement `Unwrap() error`?** `Invalid(field, err)` takes a
-   cause, and AGENT.md mandates `%w` wrapping, so unwrapping is strongly
-   implied — but warren.md does not state it, and it decides whether
-   `stdlib errors.Is`/`errors.As` see through a Warren error.
-7. **`Is` collides with `errors.Is` from the standard library.** warren.md §6.1
-   shows one generated function calling both `errors.Is(err, pgx.ErrNoRows)` and
-   `errors.NotFound("user", id)` under the same `errors` identifier, which
-   cannot compile: this package's `Is(err error, code Code) bool` does not
-   accept a sentinel error. Either the generated repository imports the two
-   packages under distinct names, or `Is` is renamed, or it takes `any` and
-   dispatches. warren.md §6.1 needs correcting whichever way this goes.
+2. **RESOLVED (2026-08-01) — all seven constructors have signatures.**
+   `Unauthenticated(reason string)`, `PermissionDenied(action string)`,
+   `Unavailable(dependency string, err error)` — it names *what* was
+   unreachable — and `Internal(err error)`. warren.md §2.6 was amended to list
+   all seven; the full surface is in Public API above.
+3. **RESOLVED (2026-08-01) — the type is `errors.Error`.** warren.md §2.6
+   defines it in `warren/errors`, and that won; the stray `warren.Error`
+   references in §1.4, §2.7, §4.2, and the §9 ledger were corrected.
+4. **RESOLVED (2026-08-01) — fields unexported, read through accessors.**
+   `code Code`, `msg string`, `cause error`, `details map[string]any`, reached
+   via `Code()`, `Message()`, `Details()` (which returns a copy), and
+   `Unwrap()`. Exported fields would let an adapter mutate a shared error;
+   accessors keep the type's invariants where they belong.
+5. **RESOLVED (2026-08-01) — `Error()` renders `CODE: message`,** appending
+   `: cause` when one is wrapped. The code in front means a bare log line still
+   says what kind of failure it was; details stay out of the text because they
+   are structured payload for response bodies, not prose.
+6. **RESOLVED (2026-08-01) — yes, `Unwrap() error` returns the cause.**
+   Standard-library `errors.Is`/`errors.As` see through a Warren error, which
+   the `%w` mandate in AGENT.md § Errors already assumed.
+7. **RESOLVED (2026-08-01) — import alias, no rename.** Generated code that
+   touches driver sentinels imports this package as
+   `werrors "github.com/MerseniBilel/warren/errors"`, keeping the bare
+   `errors` identifier for the standard library. `Is(err, code)` keeps its
+   name and signature; warren.md §6.1 was amended to use `werrors.NotFound`.
 8. **Where does the cross-adapter conformance test live?** "Every adapter maps
    every code" is the property that keeps the table honest, but the core module
    cannot import the adapters and the adapters never import each other
-   (invariant 4). `warren/testing` is the natural home — is it?
-9. **Is `Code` closed by construction?** `type Code string` lets a user write
-   `Code("WHATEVER")`, which no adapter maps. Is that acceptable, or should the
-   adapters treat an unknown code as `INTERNAL`? warren.md is silent, and it
-   changes what every adapter's default branch does.
+   (invariant 4). `warren/testing` is the natural home — is it? **Deferred:**
+   decide in `testing/SPEC.md` before the first transport adapter is built;
+   nothing in this package blocks on it.
+9. **RESOLVED (2026-08-01) — `Code` stays an open string type; adapters
+   default unknown codes to `INTERNAL`.** Closing the set by construction
+   would cost an opaque type for no safety an adapter can rely on anyway (a
+   corrupted wire value is still possible). Instead the rule is on the reading
+   side, stated under the §2.6 table: a code the table does not list maps to
+   500 / `Internal` / nack + retry, then DLQ — the safe default for the
+   unknown. Every adapter's suite must assert its default branch does this.
