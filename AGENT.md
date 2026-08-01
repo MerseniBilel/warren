@@ -34,7 +34,8 @@ or an invariant was enforced until the tooling to do so exists and you have run
 it. Where this file says "fails CI," read it as the rule the check will enforce
 once written — the rule binds you now either way.
 
-Module path: `github.com/MerseniBilel/warren`. Go 1.26.
+Module path: `github.com/MerseniBilel/warren`. Go 1.27 on its release
+(invariant 9); toolchain 1.26.x until then.
 
 ---
 
@@ -71,9 +72,9 @@ ADAPTERS    transport/http   transport/grpc           separate go modules
             broker/kafka     broker/rabbitmq          never import each other
             persistence/postgres   observability
 ─────────────────────────────────────────────────────────────────────────
-CONTRACTS   app.Handler   broker.Publisher/Subscriber interfaces only
-            persistence.Repository/UnitOfWork         zero implementations
-            transport.Registrar   domain.*
+CONTRACTS   app.Handler   broker.Publisher/Subscriber ports & shared types
+            persistence.Repository/UnitOfWork         implementation-free
+            transport.Registrar   domain.*            (one exception, below)
 ─────────────────────────────────────────────────────────────────────────
 KERNEL      warren · di · lifecycle · config          stdlib + dig only
             log · errors · validate · health
@@ -171,6 +172,13 @@ depends only on the core module's contract packages.
 `domain`, `app`, `persistence`, `broker`, `transport` are interfaces, types, and
 pure functions. A concrete driver in a contract package collapses the ring.
 
+**The one deliberate exception:** the three protocol registrars in
+`warren/transport` (§3.5) are concrete structs with generic methods. Go 1.27
+permits type parameters on methods of concrete types and forbids them on
+interface methods permanently, so the registrar API is only expressible this
+way. They hold no driver type — they erase handlers into route closures. No
+other concrete type enters the contracts ring without amending this invariant.
+
 ### 6. Handlers import no transport
 
 If a change makes a use case import `net/http`, `grpc`, or a broker client, the
@@ -196,10 +204,14 @@ stated, tested, and benchmarked.
 It breaks `go get` for users, silently. Use a git-ignored `go.work` for
 cross-module development.
 
-### 9. Go 1.26
+### 9. Go 1.27, from the day it ships
 
-Warren tracks the current Go major release. No `toolchain` directive in any
-module, and no compatibility path to older releases.
+Warren tracks the current Go major release. Go 1.27 (expected August 2026)
+delivers the generic methods that §3.5's registrars require, and Warren adopts
+it on release. Until it ships the installed toolchain is 1.26.x and **nothing
+may depend on a 1.27 feature** — which is why the transport layer waits while
+the kernel is built. No `toolchain` directive in any module, and no
+compatibility path to older releases.
 
 ---
 
@@ -283,11 +295,19 @@ transports:
 | `INVALID` | 400 | `InvalidArgument` | → DLQ (never retry) |
 | `NOT_FOUND` | 404 | `NotFound` | ack + log |
 | `CONFLICT` | 409 | `AlreadyExists` | ack (idempotent replay) |
+| `UNAUTHENTICATED` | 401 | `Unauthenticated` | → DLQ (never retry) |
+| `PERMISSION_DENIED` | 403 | `PermissionDenied` | → DLQ (never retry) |
 | `UNAVAILABLE` | 503 | `Unavailable` | nack + backoff retry |
 | `INTERNAL` | 500 | `Internal` | nack + retry, then DLQ |
 
 Each adapter owns its column. A handler that maps a code to a status itself has
 broken ring 2.
+
+**`UNAUTHENTICATED` describes the caller's identity, not yours.** A service
+that fails to authenticate to something downstream — Postgres, S3, another
+API — returns `UNAVAILABLE` (retryable), never `UNAUTHENTICATED`. The two auth
+codes dead-letter on a queue because retrying will not mint a better token and
+acking destroys the evidence of a producer publishing with the wrong identity.
 
 ---
 

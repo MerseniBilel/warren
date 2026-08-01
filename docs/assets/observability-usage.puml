@@ -1,0 +1,21 @@
+@startuml observability-usage
+title warren/observability — OTel wiring, span across the broker\nsource: observability/SPEC.md (approved 2026-08-01); warren.md §7.1, §3.4
+
+participant "main.go" as main
+participant "observability.Module" as obs
+participant "publishing side\n(handler → outbox → relay)" as producer
+participant "Message.Headers" as headers
+participant "consumer chain\n(TraceExtract stage)" as consumer
+
+main -> obs : Module(\n  ServiceName("user-service"),\n  OTLPEndpoint(cfg.OTel.Endpoint),\n  SampleRatio(0.1))
+note right : inert module; SDK wiring happens\nwhen the bootstrapper materialises\nthe graph — one import instruments\nHTTP, gRPC, consumers, DB, handlers
+
+obs -> producer : span per handler,\nnamed <module>.<handler>
+note right : handler instrumentation mechanism\nis the app carve-out (OQ 1)
+producer -> headers : inject trace context\n(§3.4 reserves Headers for this)
+headers -> consumer : ...through Kafka/AMQP/NATS...
+consumer -> consumer : TraceExtract — consumer span\ncontinues the producer's trace
+note right : "a span survives the trip\nthrough Kafka into the consumer"
+
+note over obs : wraps SETUP, not the API —\ntrace.Tracer stays directly accessible
+@enduml

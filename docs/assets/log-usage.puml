@@ -1,0 +1,22 @@
+@startuml log-usage
+title warren/log — context-carried logger, correlation ID\nsource: log/SPEC.md (approved 2026-08-01); warren.md §2.5
+
+participant "transport adapter\n(edge ring)" as edge
+participant "context.Context" as ctx
+participant "handler /\nany downstream code" as handler
+
+edge -> ctx : seed logger + fields:\ntrace_id, span_id, correlation_id,\nmodule, handler
+note right : seeding surface is an open\nquestion — adapters need an\nexported way in (OQ 6)
+
+edge -> handler : Handle(ctx, req)
+handler -> ctx : log.FromContext(ctx)
+ctx --> handler : *slog.Logger\n(fields already attached)
+handler -> handler : .Info("registering user",\n  "email", cmd.Email)
+
+handler -> ctx : log.With(ctx, "user_id", id)
+ctx --> handler : derived context —\nevery later record in this\ncall tree carries the field
+
+handler -> ctx : log.CorrelationID(ctx)
+ctx --> handler : the ID tying one request's\nrecords together across\ntransports and consumers
+note over handler : handlers never construct a logger,\nnever take one as a dependency
+@enduml

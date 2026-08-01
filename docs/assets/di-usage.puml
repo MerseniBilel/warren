@@ -1,0 +1,22 @@
+@startuml di-usage
+title warren/di — scoped containers, validation before instantiation\nsource: di/SPEC.md (approved 2026-08-01); warren.md §2.2, §1.2
+
+participant "bootstrapper\n(warren root)" as boot
+participant "root Container\n(config, logger, tracer)" as root
+participant "scope user" as user
+participant "scope billing" as billing
+
+boot -> root : Scope("user") / Scope("billing")\none child container per module (step 2)
+boot -> user : Provide(constructors...)
+boot -> billing : Provide(constructors...)
+boot -> user : copy in only what its\nimports EXPORT (§1.2)
+note right of billing : billing imports platform + user:\nsees UserRepository,\nCANNOT see *UserService
+
+boot -> root : Validate()  — boot step 3
+note right : every dep resolvable?\nambiguous? unused? → fail\nBEFORE any singleton exists
+root --> boot : ✗ cannot resolve dependency\n  chain → declaration file:line\n  "Did you mean" + copy-pasteable fix
+note right : the golden diagnostic —\nno dig text ever reaches a user\n(invariant 2)
+
+boot -> root : step 4 — Invoke / Resolve[T],\nsingletons in topological order
+note over root : never consulted at request time\n(invariant 7)
+@enduml

@@ -1,0 +1,27 @@
+@startuml app-usage
+title warren/app — Handler, Middleware, Chain (the core ring)\nsource: app/SPEC.md (approved 2026-08-01 for Handler/Middleware/Chain); warren.md §3.2, §1.4
+
+participant "adapter (edge ring)\nHTTP / gRPC / consumer" as edge
+participant "composed chain\nChain(h, mw...) — built at boot step 5" as chain
+participant "Handler[Req, Res]" as handler
+
+note over chain : Middleware[Req, Res] =\nfunc(Handler) Handler\ncomposed ONCE at boot;\nthe route table stores the closure\n(five built-ins carved out —\nblocked on Open questions 1–2)
+
+edge -> edge : edge middleware → decode → validate
+note right : transport-shaped; cannot be shared
+edge -> chain : invoke(ctx, req)  — typed,\nalready validated
+chain -> handler : Handle(ctx, req)
+
+alt success
+  handler --> chain : (Res, nil)
+  chain --> edge : Res
+  edge -> edge : encode — 2xx / proto / ack
+else failure
+  handler --> chain : errors.Conflict(...) etc.
+  note right : the code must survive the chain\nunchanged — flattening CONFLICT\nto INTERNAL turns a 409 into a 500
+  chain --> edge : *Error with Code
+  edge -> edge : adapter maps its §2.6 column\n(handler never does)
+end
+
+note over handler : imports no transport package —\n"No net/http. No pgx. No kgo.\nThat is the entire point." (§10)
+@enduml

@@ -1,0 +1,31 @@
+@startuml warren-usage
+title warren (root) — declare modules, boot, run, stop\nsource: SPEC.md (approved 2026-08-01); warren.md §2.1, §1.2, §1.3
+
+participant "main.go" as main
+participant "warren.App" as app
+participant "warren/di" as di
+participant "warren/lifecycle" as lc
+
+main -> main : NewModule("user",\n  Imports(...), Providers(...),\n  Controllers(...), Consumers(...),\n  Exports[T](), OnStart(fn), OnStop(fn))
+note right : inert value — nothing registers\non construction (§1.2)
+main -> app : warren.New(modules...)
+note right : collects values only;\nNew returns no error
+main -> app : Run()
+
+group Boot — §1.3, order may not be rearranged
+  app -> app : 0  load config\n(step-0-vs-module: open question)
+  app -> di : 1–4  flatten graph, build scopes,\nVALIDATE GRAPH, instantiate
+  di --> app : startup error → boot fails,\nnothing half-started
+  app -> app : 5  register — route tables\nbuilt in memory (owner open)
+  app -> lc : 6  OnStart, dependency order\npool → repos → consumers → servers
+  app -> lc : 7  readiness opens
+  app -> app : 8  serve (blocks on SIGINT/SIGTERM)
+end
+
+[o-> app : SIGTERM
+group Shutdown
+  app -> lc : 9  readiness closes — LB drains first
+  app -> lc : 10  OnStop, reverse order,\nper-hook timeout, force-exit deadline
+end
+app --> main : Run() returns error
+@enduml

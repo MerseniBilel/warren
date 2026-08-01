@@ -10,7 +10,9 @@ This file adds only what is specific to Claude Code.
 ## Quick orientation
 
 Warren is a DDD-first framework and CLI for Go. Multi-module repository,
-Go 1.26, Apache-2.0, module path `github.com/MerseniBilel/warren`.
+Go 1.27 on its release — toolchain 1.26.x until then, and nothing may depend on
+a 1.27 feature before it ships (AGENT.md invariant 9). Apache-2.0, module path
+`github.com/MerseniBilel/warren`.
 
 **The repository was reset in July 2026.** Everything except the licence and
 `warren.md` was deleted — the previous implementation had drifted from the
@@ -37,7 +39,8 @@ The invariants that fail CI, in short — full versions in AGENT.md:
    error message — reaches a user.
 3. No driver type (`chi`, `pgx`, `kgo`, `grpc`) in a public signature.
 4. Adapters never import each other; contract packages hold zero
-   implementations.
+   implementations — single carve-out: §3.5's registrars are concrete structs
+   with generic methods (Go 1.27), driver-free.
 5. Handlers import no transport package.
 6. No reflection on the request path — the container is not consulted per
    request.
@@ -81,11 +84,20 @@ work" is not a result, and neither is a tool you did not actually invoke.
 
 The architecture diagrams live as ASCII inside [warren.md](warren.md) — the four
 rings (§1.1), scoped containers (§1.2), the boot sequence (§1.3), the transport
-spine (§1.4), and the messaging runtime (§1.5). Edit them there.
+spine (§1.4), and the messaging runtime (§1.5). Edit them there; warren.md stays
+the source of truth for the architecture.
 
-There is no PlantUML source or rendered image in the repo right now. If rendered
-diagrams come back, they get a source file committed next to them, and the
-source is what gets edited.
+Each **approved** spec also has a usage-flow diagram in `docs/assets/<pkg>-usage.puml`,
+rendered to a PNG of the same name; `docs/assets/approved-usage.puml` combines
+them into one overview. A spec's diagram is created when the spec is approved,
+not before. Regenerate after any change to a source, and commit the images:
+
+```bash
+java -jar ~/.local/bin/plantuml.jar -tpng -o . docs/assets/*.puml
+```
+
+The `plantuml` wrapper on this machine fails with an unbound-variable error when
+given no extra arguments; call the jar directly, as above.
 
 ---
 

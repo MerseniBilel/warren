@@ -1,0 +1,28 @@
+@startuml broker-usage
+title warren/broker — the messaging port\nsource: broker/SPEC.md (approved 2026-08-01 for Message/Publisher/Subscriber/MessageHandler); warren.md §3.4, §1.5
+
+participant "outbox relay\n(primary publisher)" as relay
+participant "Publisher" as pub
+participant "driver\n(kafka / rabbitmq / nats / memory)" as driver
+participant "consumer chain\n(driver-agnostic, home open)" as chain
+participant "MessageHandler" as handler
+
+relay -> pub : Publish(ctx, topic, msgs...)
+note right : Message{ID (idempotency key),\nType, Key, Payload,\nHeaders (trace context), OccurredAt}
+pub -> driver : driver translates the envelope
+
+driver -> chain : delivery as broker.Message
+chain -> chain : Recover → TraceExtract →\nDeduplicate(inbox)
+alt already seen
+  chain -> driver : ack — handler never runs
+else new
+  chain -> handler : h(ctx, Message)
+  alt nil
+    chain -> driver : ack
+  else error, by warren/errors code (§2.6)
+    note right : INVALID → DLQ, never retry\nNOT_FOUND → ack + log\nCONFLICT → ack (idempotent replay)\nUNAVAILABLE → nack + backoff retry\nINTERNAL → retry, then DLQ
+    chain -> driver : ack / nack / DLQ
+  end
+end
+note over chain : written once — applies to Kafka,\nRabbit, NATS, memory identically;\nevaporates if a consumer touches\nkgo.Record (§3.4)
+@enduml

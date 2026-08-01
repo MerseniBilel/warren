@@ -52,9 +52,9 @@ This section describes the internal design of the framework itself — not the l
 │             persistence/postgres    observability       │
 └─────────────────────────────────────────────────────────┘
 ┌─────────────────────────────────────────────────────────┐
-│  CONTRACTS  app.Handler   broker.Publisher/Subscriber   │  interfaces only
-│             persistence.Repository/UnitOfWork           │  zero implementations
-│             transport.Registrar   domain.*              │
+│  CONTRACTS  app.Handler   broker.Publisher/Subscriber   │  ports & shared types
+│             persistence.Repository/UnitOfWork           │  implementation-free
+│             transport.Registrar   domain.*              │  (one exception: §3.5)
 └─────────────────────────────────────────────────────────┘
 ┌─────────────────────────────────────────────────────────┐
 │  KERNEL     warren · di · lifecycle · config            │  stdlib + dig only
@@ -65,7 +65,7 @@ This section describes the internal design of the framework itself — not the l
 Dependencies point downward only.
 
 - **Kernel** has no knowledge that HTTP, SQL, or Kafka exist.
-- **Contracts** are pure interfaces, so an adapter and a user's domain package can both depend on `broker.Publisher` without ever meeting. This is what makes §3 packages implementation-free.
+- **Contracts** are pure interfaces, so an adapter and a user's domain package can both depend on `broker.Publisher` without ever meeting. This is what makes §3 packages implementation-free. One deliberate exception: the three protocol registrars of §3.5 are **concrete structs with generic methods** — Go 1.27 permits type parameters on methods of concrete types but never on interface methods, so §3.5's API is only expressible this way. They remain driver-free.
 - **Adapters** are leaves. `broker/kafka` and `persistence/postgres` are mutually invisible — which is precisely what makes them independently versionable and community-ownable.
 - **Tooling** is a one-way street: the CLI imports the runtime to analyse it; the runtime never imports the CLI.
 
@@ -137,7 +137,7 @@ Kafka msg ────┘   (transport-specific)                   │
                         encode success            warren.Error
                               │                          │
               ┌───────────────┼──────────┐    NotFound → 404 / NotFound / ack
-              ▼               ▼          ▼    Conflict → 409 / AlreadyExists / DLQ
+              ▼               ▼          ▼    Conflict → 409 / AlreadyExists / ack
            200 JSON      proto msg     ack    Internal → 500 / Internal / nack
 ```
 
@@ -185,6 +185,7 @@ warren/                                 MODULE: core        (stdlib + dig)
 │   config/, log/, errors/, validate/, health/            ← kernel
 └── domain/, app/, persistence/, broker/, transport/      ← contracts (interfaces only)
 
+warren/config/yaml/                     MODULE  yaml parser — library TBD, audit first
 warren/transport/http/                  MODULE  chi
 warren/transport/grpc/                  MODULE  google.golang.org/grpc
 warren/openapi/                         MODULE  —
@@ -373,7 +374,21 @@ warren.NewModule("cache",
 
 **Why not Viper:** heavy transitive dependency tree, global state, stringly-typed access. This is ~600 lines to own and it's the first thing every user touches.
 
-**Resolution order** (later wins): struct defaults → `config.yaml` → `config.<env>.yaml` → environment variables → command-line flags.
+**Core parses no files.** Config is split by where a value comes from, not by
+what parses it:
+
+| Source | Needs a parser? | Where it lives |
+|---|---|---|
+| Struct defaults | No | core |
+| Environment variables | No | core |
+| CLI flags | No | core |
+| Config files (YAML, TOML, …) | Yes | submodule (`config/yaml` first) |
+
+**Resolution order** (later wins): struct defaults → file sources → environment
+variables → command-line flags. Core merges all sources in order and binds the
+result to the struct; it never knows YAML exists — it just sees a map. The same
+hook later admits `config/toml`, `config/json`, or a Vault/AWS-Secrets source
+with no change to core.
 
 **Surface**
 
@@ -381,32 +396,50 @@ warren.NewModule("cache",
 func Load[T any](opts ...Option) (T, error)
 func Module[T any](opts ...Option) warren.Module   // provides T to the graph
 
-func WithFile(path string) Option
+// Source is where config values come from. Defaults, env, and flags ship in
+// core; anything needing a parser implements Source from its own submodule.
+// A Source is itself an Option, so it slots straight into Module and Load.
+type Source interface {
+    Load() (map[string]any, error)
+}
+
 func WithEnvPrefix(prefix string) Option
 func WithFlags(*flag.FlagSet) Option
+
+// in warren/config/yaml (separate module — the only place a YAML library exists):
+func File(path string) config.Source
 ```
 
 **Usage**
 
 ```go
 type Config struct {
-    Env      string `koanf:"env" default:"development" validate:"oneof=development staging production"`
-    HTTPPort int    `koanf:"http_port" default:"8080"`
+    Env      string `config:"env" default:"development" validate:"oneof=development staging production"`
+    HTTPPort int    `config:"http_port" default:"8080"`
 
     Postgres struct {
-        DSN         string `koanf:"dsn" validate:"required"`   // → WARREN_POSTGRES_DSN
-        MaxConns    int32  `koanf:"max_conns" default:"10"`
-    } `koanf:"postgres"`
+        DSN         string `config:"dsn" validate:"required"`   // → WARREN_POSTGRES_DSN
+        MaxConns    int32  `config:"max_conns" default:"10"`
+    } `config:"postgres"`
 
     Kafka struct {
-        Brokers []string `koanf:"brokers" validate:"required,min=1"`
-        Group   string   `koanf:"group" validate:"required"`
-    } `koanf:"kafka"`
+        Brokers []string `config:"brokers" validate:"required,min=1"`
+        Group   string   `config:"group" validate:"required"`
+    } `config:"kafka"`
 }
 
-// main.go
+// main.go — no file: core only, zero extra deps. Most containerized services.
 warren.New(
     config.Module[Config](config.WithEnvPrefix("WARREN")),
+    ...
+)
+
+// main.go — with a YAML file: pulls in the config/yaml submodule.
+warren.New(
+    config.Module[Config](
+        yaml.File("config.yaml"),
+        config.WithEnvPrefix("WARREN"),
+    ),
     ...
 )
 
@@ -480,10 +513,26 @@ func Is(err error, code Code) bool
 | `INVALID` | 400 | `InvalidArgument` | → DLQ (never retry) |
 | `NOT_FOUND` | 404 | `NotFound` | ack + log |
 | `CONFLICT` | 409 | `AlreadyExists` | ack (idempotent replay) |
+| `UNAUTHENTICATED` | 401 | `Unauthenticated` | → DLQ (never retry) |
+| `PERMISSION_DENIED` | 403 | `PermissionDenied` | → DLQ (never retry) |
 | `UNAVAILABLE` | 503 | `Unavailable` | nack + backoff retry |
 | `INTERNAL` | 500 | `Internal` | nack + retry, then DLQ |
 
 This table is why domain code can return `errors.Conflict(...)` and never import `net/http`.
+
+**Why the two auth codes dead-letter rather than retry or ack.** The message
+won't get a better token by waiting — retrying an expired credential just burns
+the backoff budget and delays the inevitable. And acking means "handled, delete
+it" — but an auth failure on a queue is a bug in your own system (a service
+published without proper identity, or with someone else's), and acking destroys
+the evidence. The DLQ stops the message, keeps it for inspection, and fires the
+DLQ alert. Which is correct, because this should wake someone up.
+
+**`UNAUTHENTICATED` describes the caller's identity, not yours.** If your
+service failed to authenticate to something downstream — Postgres, S3, another
+API — that is not `UNAUTHENTICATED`; it is `UNAVAILABLE`, and it retries.
+Adapter authors get this wrong constantly, which is why the rule sits next to
+the table.
 
 ---
 
@@ -530,11 +579,21 @@ Pure interfaces, zero implementations, in the core module. This is what lets an 
 type ID interface { comparable; fmt.Stringer }
 
 type Entity[T ID] struct{ id T }
+func (e *Entity[T]) ID() T                        // identity accessor
+
+// Root is the constraint repositories are generic over. AggregateRoot
+// satisfies it. (A struct cannot serve as a Go type constraint — only this
+// interface makes Repository[T Root[K], K ID] expressible.)
+type Root[T ID] interface {
+    ID() T
+    PullEvents() []Event
+}
 
 type AggregateRoot[T ID] struct {
     Entity[T]
     events []Event
 }
+func NewAggregateRoot[T ID](id T) AggregateRoot[T]  // identity set at construction
 func (a *AggregateRoot[T]) Raise(e Event)
 func (a *AggregateRoot[T]) PullEvents() []Event   // drained by UnitOfWork
 
@@ -563,7 +622,12 @@ type User struct {
 }
 
 func NewUser(email Email, name string) *User {
-    u := &User{Email: email, Name: name, Status: StatusPending}
+    u := &User{
+        AggregateRoot: domain.NewAggregateRoot(NewUserID()),
+        Email:  email,
+        Name:   name,
+        Status: StatusPending,
+    }
     u.Raise(UserRegistered{UserID: u.ID(), Email: email.String(), At: time.Now()})
     return u
 }
@@ -701,6 +765,16 @@ func (c *UserController) Register(r transport.Registrar) {
 ```
 
 `c.register` is an `app.Handler[RegisterUser, UserDTO]`. It imports no transport package. Adapters own decode, encode, status mapping, and ack semantics.
+
+**How this compiles.** `HTTPRegistrar`, `GRPCRegistrar`, and `EventRegistrar`
+are **concrete struct types with generic methods**, not interfaces — Go 1.27
+allows a method on a concrete type to declare its own type parameters, and
+forbids it on interface methods permanently. `Registrar` itself stays an
+interface; its three accessors return the concrete registrars. The registrars
+hold no driver type — they erase each handler into the §1.4 `route` closure,
+and the adapter behind them serves it. This is the contracts ring's one
+deliberate concrete exception (§1.1), and it is why the transport layer is not
+built until Go 1.27 ships.
 
 ---
 
@@ -1067,7 +1141,10 @@ All generators support `--dry-run` and `--force`.
 ```go
 // ── domain (imports: warren/domain, warren/errors) ───────────────────
 func NewUser(email Email, name string) *User {
-    u := &User{Email: email, Name: name, Status: StatusPending}
+    u := &User{
+        AggregateRoot: domain.NewAggregateRoot(NewUserID()),
+        Email: email, Name: name, Status: StatusPending,
+    }
     u.Raise(UserRegistered{UserID: u.ID(), Email: email.String()})
     return u
 }
