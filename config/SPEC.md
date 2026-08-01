@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | **Approved (2026-08-01)** — core surface (`Load`, `Module`, `Source`, `WithEnvPrefix`, `WithFlags`) and the parses-no-files split are binding; conditions: remaining Open questions (flag derivation, Module-vs-step-0, the validate seam) settled before those parts are implemented |
+| **Status** | **Approved (2026-08-01)** — `Load`, `Source`, `WithEnvPrefix`, `WithFlags` implemented; flag derivation and the validate seam settled the same day (Open questions 6, 9). `Module[T]` waits for the root `warren` package to exist — it returns `warren.Module` — and is the one unimplemented item |
 | **Source** | [warren.md §2.4](../warren.md) |
 | **Module** | core |
 | **Mode** | Build |
@@ -208,21 +208,21 @@ that constructors can depend on it.
 
 ## Errors
 
-`warren.md` fixes one behaviour and no text: *a missing `WARREN_POSTGRES_DSN` is
-a startup failure with the field path named, not a nil-pointer panic on the first
-query.* All wording below is **open** and must be pinned before implementation.
+`warren.md` fixes one behaviour and no text: *a missing `WARREN_POSTGRES_DSN`
+is a startup failure with the field path named, not a nil-pointer panic on the
+first query.* The wording was agreed on 2026-08-01; every non-deferred row has
+a golden file in `config/testdata/`, and every resolution failure in one
+`Load` is reported joined, so one boot names them all.
 
 | Condition | Text |
 |---|---|
-| A required field is unset after all layers merge | **Open.** Must name the field path (`postgres.dsn`), the environment variable that would set it (`WARREN_POSTGRES_DSN`), and the `config:` key a file source could supply. |
-| A field fails a `validate:` constraint | **Open.** Surfaces through `warren/validate` as `*warren.Error` with `CodeInvalid` and per-field details (§2.7). |
-| A `Source` returns an error from `Load()` | **Open.** Core reports which source failed and wraps its error with `%w`; the detail (path, parse position) is the submodule's message. Whether a missing file is an error at all is the submodule's call — Open question 4. |
-| A value cannot be converted to the field's type | **Open.** Must name the field path, the source layer, and the offending value. |
-| A `default:` tag cannot be parsed into its field type | **Open.** This is a programming error in the user's struct and should name the field. |
-
-Per AGENT.md § Errors, each message must tell the user how to fix the problem —
-for this package that means printing the exact variable name or config key to
-set.
+| A required field is unset after all layers merge | `config: postgres.dsn is required and no layer set it — set WARREN_POSTGRES_DSN, add "dsn" under "postgres" in a file source, or pass -postgres.dsn` — the fix list adapts to which layers are configured (no prefix → no env clause, no flag set → no flag clause). |
+| A field fails a `validate:` constraint | **Deferred with the validate seam (Open question 9):** core enforces only `required`; the rest of the `validate:` vocabulary surfaces through `warren/validate` once its seam exists. |
+| A `Source` returns an error from `Load()` | `config: source 1 (yaml.File) failed: <cause>` — names the layer position and the source's type, wraps the cause with `%w`; the detail is the submodule's message. |
+| A value cannot be converted to the field's type | `config: postgres.max_conns: cannot use "many" (from environment variable WARREN_POSTGRES_MAX_CONNS) as int32` — field path, layer, offending value. |
+| A `default:` tag cannot be parsed into its field type | `config: port: default: tag "not-a-number" is not a valid int — fix the struct tag` |
+| The flag set was not parsed | `config: the flag set given to WithFlags has not been parsed — call its Parse method before Load` |
+| A non-option is passed | `config: string is not an option — pass a Source, WithEnvPrefix, or WithFlags` — the price of `Option` admitting `Source` values directly (see Open question 6's resolution). |
 
 ## Testing
 
@@ -258,21 +258,29 @@ set.
 
 - [x] Spec approved (2026-08-01 — see Status for the binding scope and
       conditions).
-- [ ] Remaining Open questions settled before their parts are implemented:
-      flag derivation (6), `T` versus `*T` (7), the §10 composition-time read
-      (8), the validate seam (9).
-- [ ] Public API implemented exactly as in Public API above, with doc comments.
-- [ ] All four layers implemented in the fixed order, with a table test per
-      pair, the file layer driven by a stub `Source`.
-- [ ] Every error has agreed text and a golden-file test.
-- [ ] No package-level mutable state, no `init()`.
-- [ ] Core module `go.mod` unchanged — stdlib + `go.uber.org/dig` only, proven
-      by the core-imports test.
+- [x] Remaining Open questions settled: flag derivation (6), `T` versus `*T`
+      (7), the validate seam (9) — resolutions below, 2026-08-01. Question 8
+      (§10's composition-time read) is the root package's and moves there.
+- [x] Public API implemented exactly as in Public API above, with doc
+      comments — `config/config.go` — **except `Module[T]`**, which returns
+      `warren.Module` and therefore waits for the root package; it is one
+      provider over `Load` once `warren` exists.
+- [x] All four layers implemented in the fixed order, with a table test per
+      precedence pair, the file layer driven by a stub `Source` — including
+      the flag-default case (an unset flag must not beat the environment).
+- [x] Every non-deferred error has agreed text; golden files in
+      `config/testdata/`. All failures in one `Load` are reported joined.
+- [x] No package-level mutable state, no `init()`; the no-global-state test
+      runs two concurrent `Load` calls with different prefixes.
+- [x] Core module `go.mod` unchanged — verified 2026-08-01: `go list -deps`
+      over `warren/config` shows the standard library only, and
+      `scripts/invariants.sh` holds the module to stdlib + dig.
 - [ ] The `warren/config/yaml` submodule does **not** exist yet: it needs its
       own `SPEC.md` and a recorded dependency audit of its YAML library (TBD,
       §1.6) before the module is created. Its open questions (3 and 4 below)
-      move into that spec.
-- [ ] `warren.md` amended in the same change if any signature diverged.
+      stay parked here until then.
+- [x] `warren.md` amended in the same change — §2.4 note on `Option`'s
+      runtime shape and the settled flag semantics.
 
 ## Open questions
 
@@ -298,17 +306,32 @@ set.
 5. **RESOLVED (2026-08-01).** `WithFile` is **removed** from the surface. Files
    arrive as `Source` values (`yaml.File("config.yaml")`), so the question of
    what `WithFile` does to `config.<env>.yaml` dissolves with it.
-6. **Does `WithFlags` require an already-parsed `*flag.FlagSet`, and how are flag
-   names derived from field paths?** §2.4 fixes the signature and nothing else.
-7. **Does `Module[T]` provide `T` or `*T`?** §2.4's provider takes `cfg Config`
-   by value; whether a pointer is also bound is unstated.
-8. **§10's `main.go` reads `cfg.Postgres.DSN` and `cfg.Kafka.Brokers` inside the
-   `warren.New(...)` call**, while §2.4's pattern is that `Config` is injected
-   into providers. Where does that `cfg` come from at composition time? If the
-   answer is "a separate `config.Load[Config]()` call before `New`", the config
-   is resolved twice and §10 should say so.
-9. **Validation depends on `warren/validate`, which wraps
-   `go-playground/validator/v10` (§2.7) and sits in the core module (§1.6) —
-   which invariant 1 says is stdlib + dig only.** Is `validate` an accepted
-   exception, its own submodule, or does config validate against a core-owned
-   port? This blocks the validation path.
+6. **RESOLVED (2026-08-01) — parsed, dotted names, set-flags only.**
+   `WithFlags` requires an already-parsed set (parsing arguments is main's
+   business; an unparsed set is a boot error with its own golden text). Flag
+   names are the dotted field path (`-postgres.dsn`), and only flags
+   explicitly set on the command line override earlier layers — a flag's
+   *default* must not beat the environment, or precedence inverts.
+   Relatedly, `Option`'s runtime shape: the approved API says "a Source is
+   itself an Option", and Go's type system cannot express an interface that
+   foreign `Source` implementations satisfy alongside core's option
+   functions — so `Option` is dispatched at `Load` time and a non-option
+   argument is a boot error naming the type. Compile-time option safety was
+   traded for the fixed ergonomics, deliberately.
+7. **RESOLVED (2026-08-01) — `T`, by value, only.** §2.4's provider takes
+   `cfg Config`; binding `*T` as well would create two names for one value
+   in the graph. A constructor wanting a pointer takes `T` and takes its
+   address.
+8. **§10's composition-time read** (`cfg.Postgres.DSN` inside `warren.New`)
+   — **moved to the root package's spec**, where composition order lives;
+   nothing in this package changes either way.
+9. **RESOLVED (2026-08-01) — split the word "validation".** The headline
+   behaviour — a missing required value fails boot naming the field — is
+   *resolution completeness*, not validation: it needs no validator, so core
+   checks the `required` token itself, permanently stdlib-only. The rest of
+   the `validate:` vocabulary (`oneof`, `min`, …) is constraint validation
+   and belongs to `warren/validate`, whose own spec must resolve where its
+   implementation lives (invariant 1 forbids `go-playground/validator` in
+   core — port in core, implementation in a submodule is the expected
+   shape). Until that seam exists, non-`required` constraints are not
+   enforced, and this spec says so rather than pretending.

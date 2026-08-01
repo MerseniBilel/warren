@@ -76,8 +76,10 @@ Progress is spec-first: ☑ means *done and verified*, not *started*.
       v1.19.0 audited, `make ci` green)*
 - [x] `lifecycle` — ordered start/stop, readiness gate *(spec approved;
       implemented, `Ready()` handle settled, `make ci` green)*
-- [ ] `config` + `config/yaml` — Source-split loading *(core spec approved;
-      `config/yaml` spec still to write)*
+- [x] `config` (core) — Source-split loading *(implemented: Load, Source,
+      env, flags; `Module[T]` lands with the root package)*
+- [ ] `config/yaml` — the first file Source *(needs its own spec + YAML
+      library audit before the module exists)*
 - [ ] `warren` (root) — module system and boot sequence *(spec approved)*
 - [ ] `app` — `Handler`/`Middleware`/`Chain` *(approved; built-in middleware
       blocked on the core-port decision)*

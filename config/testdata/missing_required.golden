@@ -1,0 +1,1 @@
+config: postgres.dsn is required and no layer set it — set WARREN_POSTGRES_DSN, add "dsn" under "postgres" in a file source, or pass -postgres.dsn

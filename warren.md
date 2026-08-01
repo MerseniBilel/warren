@@ -440,6 +440,16 @@ func WithFlags(*flag.FlagSet) Option
 func File(path string) config.Source
 ```
 
+Semantics fixed with the implementation: `Option` is dispatched at `Load`
+time — the type system cannot express "a `Source` is itself an `Option`" for
+foreign implementations, so a non-option argument is a boot error naming the
+type. `WithFlags` requires an already-parsed set; flag names are the dotted
+field path (`-postgres.dsn`), and only flags explicitly set on the command
+line override earlier layers. The environment layer runs only under a
+`WithEnvPrefix` prefix. Core enforces `validate:"required"` itself — it is
+resolution completeness, not validation; the rest of the `validate:`
+vocabulary is `warren/validate`'s once its seam exists.
+
 **Usage**
 
 ```go

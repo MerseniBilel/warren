@@ -1,0 +1,1 @@
+config: postgres.max_conns: cannot use "many" (from environment variable WARREN_POSTGRES_MAX_CONNS) as int32
