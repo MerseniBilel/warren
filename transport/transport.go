@@ -250,7 +250,11 @@ func (t *Table) Unserved() error {
 		missing = append(missing, fmt.Sprintf("%d HTTP route(s) — add http.Server(...) to warren.New", n))
 	}
 	if n := len(t.grpc) + rawFor[ProtocolGRPC]; n > 0 && t.claims[ProtocolGRPC] == "" {
-		missing = append(missing, fmt.Sprintf("%d gRPC method(s) — add grpc.Server(...) to warren.New", n))
+		// transport/grpc is deferred to v0.2, so "add grpc.Server(...)" would
+		// name a package that does not exist. Say what is true instead.
+		missing = append(missing, fmt.Sprintf(
+			"%d gRPC method(s) — warren/transport/grpc is not built yet (deferred to v0.2).\n"+
+				"      Serve them over HTTP with transport.Get/Post, or drop the transport.Method calls", n))
 	}
 	if n := len(t.events) + rawFor[ProtocolEvent]; n > 0 && t.claims[ProtocolEvent] == "" {
 		missing = append(missing, fmt.Sprintf("%d event subscription(s) — add a broker module to warren.New", n))

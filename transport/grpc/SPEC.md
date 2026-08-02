@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | Draft — not approved |
+| **Status** | **DEFERRED to v0.2 (decided 2026-08-02)** — architect round complete and every open question below is now RULED. It is not blocked on a decision; it is blocked on `warren g proto`, which does not exist and is the harder of the two artifacts. Building the adapter first means building it twice, and the version shipped in between would have to lie about reflection. |
 | **Source** | [warren.md §4.2](../../warren.md) |
 | **Module** | own module (`warren/transport/grpc`) |
 | **Mode** | Wrap |
@@ -224,11 +224,166 @@ Wrap exists to prevent.
 10. This spec corrected in the same pull request wherever the implementation
     diverged.
 
+## The ruling that defers it — architect round, 2026-08-02
+
+**The crux was open question 3: how a proto message becomes the handler's
+`Req`.** Three candidates were on the table; the answer is a fourth, and it is
+what makes the adapter wait.
+
+**(a) The handler's `Req` IS the generated proto type — DISQUALIFIED, and not
+on purity.** The same handler serves `transport.Post(r, "/users", c.register)`,
+and the HTTP adapter would then JSON-encode a generated struct with
+`encoding/json`, which is not protojson: wrong field names, wrong enums, broken
+oneofs, `nil`-versus-empty confusion. **(a) breaks the HTTP adapter for the very
+handler the gRPC adapter exists to share.** It destroys the claim it was meant
+to serve.
+
+**(c) A proto codec over PLAIN Go structs — investigated, measured, and
+rejected on contract grounds.** It is mechanically possible:
+protobuf-go's aberrant-message path marshals a struct carrying
+`protobuf:"bytes,1,opt,name=email,proto3"` tags given three stub methods, and
+`grpc.ForceServerCodecV2` plus `grpc.UnknownServiceHandler` will serve method
+names with no generated `ServiceDesc` at all. It is also **faster than JSON** —
+measured on an M3 Pro, a three-field message: 108 ns/32 B/2 allocs to marshal
+against `encoding/json`'s 122/48/1, and 158/117/5 to unmarshal against 603/336/9.
+
+Those numbers are recorded here precisely so nobody re-derives them and mistakes
+them for a case. It is rejected because what it produces is not a protobuf
+service:
+
+- the message name is the **Go type name** (`main.RegisterUser`, not
+  `user.v1.RegisterRequest`);
+- the descriptor never enters `protoregistry`, so **the reflection service —
+  which §4.2 has on by default — has nothing to report**, and grpcurl,
+  `buf curl`, Postman, Envoy transcoding and grpc-gateway are all dead;
+- **field numbers would live in Go struct tags**, so a contributor reordering a
+  struct or renumbering a tag silently breaks every deployed client — which is
+  the exact failure protobuf exists to make impossible;
+- the mechanism is `internal/impl`, documented as a best-effort compatibility
+  shim for pre-APIv2 messages, not an authoring path.
+
+It ships something that speaks gRPC *framing* and is not a service any other
+language can consume. That is a worse lie than shipping no gRPC. **Rejected
+permanently.**
+
+**(d) is the answer: generated proto types at the wire, plain structs at the
+handler, and a GENERATED conversion shim in the wiring layer.** The `.proto` is
+the source of truth, `buf` generates the messages, and a generated binding
+converts `*pb.X ↔ Req` per method. This is legal against the shipped port
+today: `GRPCRoute.Bind(Codec) Invoker` is called once per route at boot, so each
+route can bind a codec that knows its own pb type. It costs one message
+allocation and one struct copy per call, no reflection on the request path, and
+it buys full proto fidelity, a working reflection service, and a `.proto` file
+as the cross-language contract.
+
+**And (d) does not work without `warren g proto`.** Without the generator every
+method needs a hand-written binding and a hand-maintained `.proto` — the exact
+drift §4.3 refuses to tolerate for OpenAPI. Generating the `.proto` is the
+*hard* half: name mapping, **stable field numbering across regenerations**, and
+evolution when a field is deleted. That is a spec of its own, it is a CLI spec,
+and it does not exist.
+
+**So: defer.** The port is not the problem — this round found **zero required
+changes to core `transport`**, which is a strong result for §3.5 and the
+strongest argument that deferring costs nothing structurally. Measured, a gRPC
+server with reflection and health costs **6 third-party modules**
+(`grpc`, `protobuf`, `genproto`, `x/net`, `x/sys`, `x/text`) plus `buf` as
+tooling — the largest footprint of any transport, bought for an adapter that
+cannot yet honour its headline feature.
+
+**This would be reversed only for a named design partner with a hard v0.1 gRPC
+requirement.** The minimum honest shape then is (d) with a hand-written
+`grpc.Bind[Req, Res](fullMethod, from, to)` per method and a hand-authored
+`.proto` — real protobuf, real descriptors, real reflection, just no generator,
+and `warren g proto` later emits exactly that call. **Option (c) is not on the
+table under any circumstances.**
+
+## The other rulings, so v0.2 resumes from a decided position
+
+**1. `Interceptors` takes a Warren-owned type, and `Recovery()`/`Tracing()` are
+deleted.**
+
+```go
+type Call struct{ FullMethod, Peer string }
+type Handler func(ctx context.Context, c Call, req any) (any, error)
+type Interceptor func(next Handler) Handler
+```
+
+Driver-free, so invariant 3 holds with no carve-out. §4.2 is wrong to make
+recovery and tracing user-supplied options: `transport/http` makes recover
+**outermost and not removable** and composes telemetry off `Table.Telemetry()`,
+and an application must not be able to disable panic recovery by forgetting an
+argument.
+
+The driver carve-out is the **`Raw*` prefix**, and it needs a second member:
+`Raw(func(*grpc.Server))` runs after `NewServer`, so it cannot install
+`ChainUnaryInterceptor` or a keepalive policy. `RawServerOptions(...grpc.ServerOption)`
+covers that, and `scripts/invariants.sh` scopes the carve-out to the prefix.
+
+**2. Streaming is out, and `transport.Raw` already covers it — no core change.**
+Same ruling as HTTP: typed byte-in/byte-out is the only typed shape.
+`transport.Raw(r, transport.ProtocolGRPC, "user.v1.UserService/Watch", h)`,
+where the pattern is the full method name and carries no verb because gRPC has
+none. The adapter asserts `grpc.StreamHandler` and fails the boot naming the
+route and the type, exactly as the HTTP adapter asserts `http.Handler`. That
+the user's module then imports grpc is the identical precedent to a raw HTTP
+route importing `net/http`.
+
+**4. `WithoutReflection()` and `WithoutHealthService()`**, both on by default.
+Reflection publishes the entire API surface and operations teams will want it
+off in production; health stays on unless disabled, because Kubernetes `grpc`
+probes require it.
+
+**5. TLS matches `transport/http` exactly: `TLS(*tls.Config)` and
+`TLSFiles(certFile, keyFile)`.** `*tls.Config` is standard library, not a
+driver type. §4.2's `TLS(certFile, keyFile)` becomes `TLSFiles`; the path-pair
+form alone cannot reach mTLS, client CAs, or in-memory certificates. One shape
+across every adapter.
+
+**7. The default port is `:50051`, not 9090.** 50051 is the gRPC ecosystem's
+own default; **9090 is Prometheus's**, and it will collide the day
+`observability` exposes a scrape endpoint. `Addr(string)` and
+`Listener(net.Listener)` come too, for parity with HTTP — the second is what
+this spec's own bufconn testing requirement needs.
+
+**8. The `grpc.Server` collision is accepted and documented, and §4.2's example
+does not compile as written.** Warren keeps the package name `grpc`, for
+symmetry with `http.Server(...)`. A user reaching the escape hatch aliases:
+
+```go
+import (
+    "google.golang.org/grpc"
+    wgrpc "github.com/MerseniBilel/warren/transport/grpc"
+)
+wgrpc.Raw(func(s *grpc.Server) { pb.RegisterLegacyServer(s, impl) })
+```
+
+**9. `warren g proto` is in the design and out of v0.1.** It is what the adapter
+is blocked on, so it gets specced *with* the adapter, in the CLI spec, and §8's
+command surface gains it in the same change. Until then §4.2 must stop promising
+a command §8 does not list.
+
+**The health service does NOT use grpc-go's `health.Server`.** That keeps its
+own status map and would need polling into sync, giving two sources of truth.
+`grpc_health_v1.HealthServer` is implemented directly over the injected
+`health.Registry` — `Check` with an empty service maps `Ready(ctx)` to
+`SERVING`/`NOT_SERVING`, an unknown service name is `codes.NotFound` per the
+health spec, and `Watch` polls and emits on change because Envoy uses it. Both
+bypass the edge ring except recover, mirroring `/healthz` and `/readyz`.
+
+**Telemetry comes off `tbl.Telemetry()`, never injected** — injecting
+`app.Telemetry` makes it a required dependency and every uninstrumented service
+fails to resolve it. Handler instrumentation is already composed in core by
+`buildInvoker`, so this adapter owns only the SERVER span and trace
+continuation from incoming metadata. HTTP/gRPC parity is free, not a promise.
+
 ## Open questions
 
 For the human. warren.md does not answer these, and none should be guessed.
 
-1. **What type does `Interceptors` accept?** Invariant 3 rules out
+**All nine are now ruled — kept for the record of what was asked.**
+
+1. **RULED (see above).** What type does `Interceptors` accept? Invariant 3 rules out
    `grpc.UnaryServerInterceptor`, but §4.2 gives no Warren-owned alternative,
    and there is no stdlib-shaped signature to fall back on the way HTTP falls
    back on `func(http.Handler) http.Handler`. This is a port shape and blocks the

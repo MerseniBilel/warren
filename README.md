@@ -11,7 +11,8 @@
 > **`persistence/postgres`**, whose unit of work commits aggregate state and
 > the outbox rows for that aggregate's events in one transaction. What is
 > *not* built yet are the driver adapters that need third-party libraries:
-> `transport/grpc`, `broker/kafka`.
+> `broker/kafka`, and `transport/grpc` — the latter deferred to v0.2 with its
+> design decided; see [its spec](transport/grpc/SPEC.md).
 > The repository is being rebuilt spec-first: every
 > package gets an approved `SPEC.md` before its first line of Go, retired once
 > the package is implemented and reviewed. [warren.md](warren.md) is the
@@ -133,7 +134,14 @@ contract now.
       for, and chi measured worst of five candidates on this project's own
       first priority. Zero third-party dependencies; 17 allocations per
       request, asserted by a test)*
-- [ ] `transport/grpc` — interceptors through the shared chain, the gRPC column
+- [ ] `transport/grpc` — **deferred to v0.2**, and the reasons are decided
+      rather than open: a handler's `Req` must stay a plain Go struct or the
+      HTTP adapter mis-encodes the same handler, so the wire needs generated
+      proto messages and a *generated* shim between them — which needs
+      `warren g proto`, the harder of the two artifacts. A proto codec over
+      plain structs was prototyped, measured (faster than JSON) and rejected:
+      no reflection descriptor, and field numbers in Go struct tags. The round
+      found **zero required changes to core `transport`**
 - [ ] Fallback if 1.27 slips: generic free functions (compiles on 1.26; call
       sites change shape)
 

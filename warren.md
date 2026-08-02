@@ -1263,19 +1263,56 @@ There is no `http.Raw(func(mux *http.ServeMux))`: a `ServeMux`'s entire API is `
 
 - **Wraps** `google.golang.org/grpc` · **Mode** Wrap
 
-Wrapped specifically so interceptors register through the same middleware chain as HTTP, and so `errors.Error` maps to `codes.Code` without handler involvement. Reflection and the health service are on by default.
+**DEFERRED TO v0.2 (decided 2026-08-02).** Every design question is ruled — see
+`transport/grpc/SPEC.md` — and the adapter is blocked not on a decision but on
+`warren g proto`, which does not exist and is the harder of the two artifacts.
+
+The reason, in one paragraph: a handler's `Req` must stay a plain Go struct, or
+the HTTP adapter would `encoding/json`-encode a generated proto type for the
+same handler and get field names, enums and oneofs wrong. So the wire needs
+generated proto messages and the handler needs plain structs, with a
+**generated** shim converting between them — which is legal against the shipped
+port today, because `GRPCRoute.Bind(Codec)` is per-route, and impossible to
+maintain by hand at scale. A proto codec over plain structs *was* prototyped and
+measured (faster than JSON) and is rejected permanently: the descriptor never
+reaches `protoregistry`, so the reflection service this section turns on by
+default would have nothing to report, and field numbers would live in Go struct
+tags where a reordering silently breaks every deployed client.
+
+The round found **zero required changes to core `transport`**, which is the
+strongest evidence that §3.5's `Codec`/`Bind` design holds. Measured, the
+adapter costs **6 third-party modules** — `grpc`, `protobuf`, `genproto`,
+`x/net`, `x/sys`, `x/text` — plus `buf` as tooling.
+
+The v0.2 landing zone, decided rather than guessed:
 
 ```go
-grpc.Server(
-    grpc.Port(9090),
-    grpc.Interceptors(grpc.Recovery(), grpc.Tracing()),
-    grpc.TLS(certFile, keyFile),
+wgrpc.Server(
+    wgrpc.Port(50051),              // 50051, not 9090 — that is Prometheus's
+    wgrpc.Interceptors(...),        // Warren-owned Interceptor, driver-free
+    wgrpc.TLS(cfg),                 // matches transport/http; TLSFiles for paths
 )
 ```
 
-Escape hatch: `grpc.Raw(func(s *grpc.Server) { pb.RegisterLegacyServer(s, impl) })`.
+`Recovery()` and `Tracing()` are NOT options: recover is outermost and not
+removable, and telemetry composes off `Table.Telemetry()` — an application must
+not be able to disable panic recovery by forgetting an argument.
 
-`warren g proto user --service UserService` generates the `.proto`, runs `buf generate`, and wires the generated service to existing handlers.
+Escape hatch, aliased because the package name collides with Google's:
+
+```go
+import (
+    "google.golang.org/grpc"
+    wgrpc "github.com/MerseniBilel/warren/transport/grpc"
+)
+wgrpc.Raw(func(s *grpc.Server) { pb.RegisterLegacyServer(s, impl) })
+```
+
+Streaming is out of both v0.1 and v0.2's typed surface; `transport.Raw` with
+`ProtocolGRPC` already carries it, exactly as it carries HTTP upgrades.
+
+`warren g proto` is specced WITH the adapter, in the CLI spec, and §8's command
+surface gains it in the same change — not before.
 
 ---
 
