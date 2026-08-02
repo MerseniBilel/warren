@@ -80,9 +80,6 @@ func (c *container) Provide(constructor any, opts ...ProvideOption) error {
 		return errNonConstructor(constructor)
 	}
 	t := v.Type()
-	if t.IsVariadic() {
-		return errVariadic(funcName(v))
-	}
 
 	name := cfg.name
 	if name == "" {
@@ -95,8 +92,16 @@ func (c *container) Provide(constructor any, opts ...ProvideOption) error {
 		exported: cfg.exported,
 		scope:    c,
 	}
-	for in := range t.Ins() {
-		p.inputs = append(p.inputs, in)
+	// A variadic constructor is provided with no variadic arguments — which
+	// is exactly how warren's own option-taking constructors (memory.New,
+	// inbox.NewMemoryStore, health.New) are meant to be used as providers.
+	// Its trailing slice parameter is not a dependency to resolve.
+	nIn := t.NumIn()
+	if t.IsVariadic() {
+		nIn--
+	}
+	for i := range nIn {
+		p.inputs = append(p.inputs, t.In(i))
 	}
 	for out := range t.Outs() {
 		if out != errType {

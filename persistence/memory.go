@@ -2,7 +2,6 @@ package persistence
 
 import (
 	"context"
-	"maps"
 	"reflect"
 	"sync"
 
@@ -16,10 +15,11 @@ import (
 // suite need not reach for Docker — the same reasons broker/memory and
 // inbox.NewMemoryStore live in core.
 //
-// Its isolation is insert/delete visibility, not field-level snapshotting:
-// it stores the aggregate pointers it was given, so a mutation to an
-// already-saved aggregate is visible before commit. Real drivers snapshot;
-// the contract suite asserts only what every driver can promise.
+// It hands every reader its own copy of an aggregate, as a real driver does
+// by materialising rows: two transactions cannot see each other's
+// uncommitted mutations, a rolled-back transaction leaves the committed
+// aggregate untouched, and a retried handler re-reads clean state instead of
+// re-applying its change to the object it already mutated.
 type MemoryUnitOfWork struct {
 	mu       sync.Mutex
 	entities map[string]any // committed state, keyed by type+id
@@ -106,7 +106,12 @@ func (u *MemoryUnitOfWork) Do(ctx context.Context, fn func(context.Context) erro
 
 	u.mu.Lock()
 	s.mu.Lock()
-	maps.Copy(u.entities, s.puts)
+	// Commit copies, so the handler's aggregate and committed state part
+	// ways at commit: a later mutation of the handler's object cannot
+	// rewrite what was committed.
+	for k, v := range s.puts {
+		u.entities[k] = copyAggregate(v)
+	}
 	for k := range s.deletes {
 		delete(u.entities, k)
 	}
@@ -132,8 +137,9 @@ func NewMemoryRepository[T domain.Root[K], K domain.ID](uow *MemoryUnitOfWork) *
 
 func (r *MemoryRepository[T, K]) key(id K) string { return r.kind + "/" + id.String() }
 
-// FindByID returns the aggregate, reading the ambient transaction's pending
-// writes first — a handler sees what it just saved.
+// FindByID returns a COPY of the aggregate, reading the ambient
+// transaction's pending writes first — a handler sees what it just saved,
+// and never the object another transaction is mutating.
 func (r *MemoryRepository[T, K]) FindByID(ctx context.Context, id K) (T, error) {
 	var zero T
 	k := r.key(id)
@@ -142,10 +148,12 @@ func (r *MemoryRepository[T, K]) FindByID(ctx context.Context, id K) (T, error) 
 		s.mu.Lock()
 		if s.deletes[k] {
 			s.mu.Unlock()
-			return zero, errors.NotFound("aggregate", id)
+			return zero, errors.NotFound(r.kind, id)
 		}
 		if v, ok := s.puts[k]; ok {
 			s.mu.Unlock()
+			// Within one transaction the handler owns its aggregate: hand
+			// back the same object so its own mutations accumulate.
 			return v.(T), nil
 		}
 		s.mu.Unlock()
@@ -155,9 +163,24 @@ func (r *MemoryRepository[T, K]) FindByID(ctx context.Context, id K) (T, error) 
 	defer r.uow.mu.Unlock()
 	v, ok := r.uow.entities[k]
 	if !ok {
-		return zero, errors.NotFound("aggregate", id)
+		return zero, errors.NotFound(r.kind, id)
 	}
-	return v.(T), nil
+	return copyAggregate(v).(T), nil
+}
+
+// copyAggregate shallow-copies the pointed-to struct, which is what gives
+// each transaction its own aggregate. A real driver gets this for free by
+// materialising rows; the memory driver must do it deliberately, or every
+// caller shares one object and the "confined to one goroutine" contract
+// domain.AggregateRoot states becomes unkeepable through the repository.
+func copyAggregate(v any) any {
+	rv := reflect.ValueOf(v)
+	if rv.Kind() != reflect.Pointer || rv.IsNil() {
+		return v
+	}
+	dup := reflect.New(rv.Type().Elem())
+	dup.Elem().Set(rv.Elem())
+	return dup.Interface()
 }
 
 // Save stages the aggregate and enlists it, so its events reach the outbox
@@ -174,10 +197,12 @@ func (r *MemoryRepository[T, K]) Save(ctx context.Context, root T) error {
 		return nil
 	}
 	// Outside a transaction the write is immediate; the events stay pending
-	// on the aggregate for a later Do.
+	// on the aggregate for a later Do. The stored value is a copy, so a
+	// later mutation of the caller's object does not silently rewrite
+	// committed state.
 	r.uow.mu.Lock()
 	defer r.uow.mu.Unlock()
-	r.uow.entities[k] = root
+	r.uow.entities[k] = copyAggregate(root)
 	return nil
 }
 

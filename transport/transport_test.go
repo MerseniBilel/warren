@@ -437,3 +437,36 @@ func TestValidatorIsConfigurable(t *testing.T) {
 		t.Errorf("validate.None() did not unblock registration: %v", err)
 	}
 }
+
+// TestChainedHandlerGetsAMeaningfulName pins the review's B1: the registered
+// handler is normally an app.Chain, whose outermost value is a middleware's
+// anonymous closure — deriving the name from it gave every span in a service
+// the same name, "module.1".
+func TestChainedHandlerGetsAMeaningfulName(t *testing.T) {
+	t.Parallel()
+
+	pass := func(next app.Handler[registerUser, userDTO]) app.Handler[registerUser, userDTO] {
+		return app.HandlerFunc[registerUser, userDTO](func(ctx context.Context, r registerUser) (userDTO, error) {
+			return next.Handle(ctx, r)
+		})
+	}
+	chained := app.Chain(
+		app.Handler[registerUser, userDTO](app.HandlerFunc[registerUser, userDTO](
+			func(context.Context, registerUser) (userDTO, error) { return userDTO{}, nil })),
+		pass, pass,
+	)
+
+	b := transport.NewBuilder()
+	transport.Post(b.For("inventory"), "/x", chained)
+	tbl, err := b.Table()
+	if err != nil {
+		t.Fatalf("Table: %v", err)
+	}
+	got := tbl.HTTP()[0].Name
+	if got == "inventory.1" || strings.HasPrefix(got, "inventory.func") {
+		t.Fatalf("name = %q — every span in the service would share it", got)
+	}
+	if got != "inventory.registerUser" {
+		t.Errorf("name = %q, want the request type as the stable fallback", got)
+	}
+}

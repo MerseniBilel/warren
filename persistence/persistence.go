@@ -14,6 +14,7 @@ import (
 	"context"
 	"sync"
 
+	"github.com/MerseniBilel/warren/app"
 	"github.com/MerseniBilel/warren/domain"
 	"github.com/MerseniBilel/warren/errors"
 )
@@ -149,6 +150,25 @@ func Collect(ctx context.Context) (context.Context, func() []domain.Event) {
 		}
 		return events
 	}
+}
+
+// ForApp adapts a UnitOfWork to app.UnitOfWork, the one-method seam
+// app.Transactional takes. The two differ only in Do's variadic options,
+// which app deliberately does not know about — this adapter is the seam, so
+// no application has to write it.
+//
+//	warren.Providers(persistence.ForApp)   // *MemoryUnitOfWork → app.UnitOfWork
+func ForApp(uow UnitOfWork, opts ...Option) app.UnitOfWork {
+	return appUnitOfWork{uow: uow, opts: opts}
+}
+
+type appUnitOfWork struct {
+	uow  UnitOfWork
+	opts []Option
+}
+
+func (a appUnitOfWork) Do(ctx context.Context, fn func(context.Context) error) error {
+	return a.uow.Do(ctx, fn, a.opts...)
 }
 
 // InTransaction reports whether a unit of work is in scope on ctx.

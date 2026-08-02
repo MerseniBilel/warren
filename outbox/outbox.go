@@ -59,8 +59,8 @@ type Store interface {
 }
 
 // Waiter is the optional low-latency seam a Store may implement: Wait blocks
-// until a record is appended or ctx is done. The relay asserts for it once
-// and falls back to its poll interval, so a missed signal delays publication
+// until a record is appended or ctx is done. Relay.Run asserts for it once at
+// start and falls back to PollInterval, so a missed signal delays publication
 // and never loses it. Appending is the signal — Postgres delivers it with
 // LISTEN/NOTIFY, the memory store with a channel.
 type Waiter interface {
@@ -156,6 +156,9 @@ type Relay struct {
 	pub     broker.Publisher
 	batch   int
 	backoff app.RetryPolicy
+	poll    time.Duration
+	flush   time.Duration
+	elector Elector
 
 	mu       sync.Mutex
 	attempts map[string]int
@@ -163,6 +166,33 @@ type Relay struct {
 
 // RelayOption configures a Relay.
 type RelayOption func(*Relay)
+
+// PollInterval is how long Run waits between drains when the store offers no
+// Waiter, and the safety net when it does — a missed signal delays
+// publication, never loses it. Default 1s.
+func PollInterval(d time.Duration) RelayOption {
+	if d <= 0 {
+		panic(fmt.Sprintf("outbox: PollInterval(%v) — a relay that never waits is a busy loop", d))
+	}
+	return func(r *Relay) { r.poll = d }
+}
+
+// LeaderElection sets who may drain. The default is Standalone(), which
+// always leads — correct for one instance and for the modular monolith, and
+// wrong for several replicas over a durable store, where every replica would
+// drain.
+func LeaderElection(e Elector) RelayOption {
+	if e == nil {
+		panic("outbox: LeaderElection(nil) — pass an Elector, or omit the option for Standalone()")
+	}
+	return func(r *Relay) { r.elector = e }
+}
+
+// FlushTimeout bounds the final drain at shutdown, inside the lifecycle's
+// force-exit budget. Default 10s.
+func FlushTimeout(d time.Duration) RelayOption {
+	return func(r *Relay) { r.flush = d }
+}
 
 // BatchSize caps how many records one drain publishes. Default 100.
 func BatchSize(n int) RelayOption {
@@ -192,12 +222,108 @@ func NewRelay(store Store, pub broker.Publisher, opts ...RelayOption) *Relay {
 		pub:      pub,
 		batch:    100,
 		backoff:  broker.ExponentialBackoff(10),
+		poll:     time.Second,
+		flush:    10 * time.Second,
+		elector:  Standalone(),
 		attempts: map[string]int{},
 	}
 	for _, opt := range opts {
 		opt(r)
 	}
 	return r
+}
+
+// Run drains the outbox until ctx is cancelled: it acquires leadership,
+// then loops — drain everything pending, then wait for the store's signal
+// (or the poll interval) and drain again. It returns when leadership ends or
+// ctx is cancelled, which is what makes it a lifecycle participant rather
+// than a goroutine someone forgot about.
+//
+// Register it from a constructor that injects lifecycle.Lifecycle:
+//
+//	lc.Append(lifecycle.Hook{
+//	    Name:    "outbox relay",
+//	    OnStart: func(ctx context.Context) error { go relay.Run(ctx); return nil },
+//	    OnStop:  relay.Flush,
+//	})
+//
+// A drain error does not end the loop — a broker outage is transient by
+// definition, and the disposition rules already decide what happens to the
+// records.
+func (r *Relay) Run(ctx context.Context) error {
+	return r.elector.Lead(ctx, func(ctx context.Context) error {
+		waiter, _ := r.store.(Waiter)
+		timer := time.NewTimer(r.poll)
+		defer timer.Stop()
+
+		for {
+			if ctx.Err() != nil {
+				return nil
+			}
+			// Drain everything currently pending, not just one batch.
+			for {
+				n, err := r.DrainOnce(ctx)
+				if err != nil || n == 0 {
+					break
+				}
+			}
+			if ctx.Err() != nil {
+				return nil
+			}
+
+			if waiter != nil {
+				// Appending is the signal; the timer is the safety net for a
+				// signal that never arrives.
+				waited := make(chan struct{})
+				go func() { waiter.Wait(ctx); close(waited) }()
+				if !timer.Stop() {
+					select {
+					case <-timer.C:
+					default:
+					}
+				}
+				timer.Reset(r.poll)
+				select {
+				case <-waited:
+				case <-timer.C:
+				case <-ctx.Done():
+					return nil
+				}
+				continue
+			}
+
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			timer.Reset(r.poll)
+			select {
+			case <-timer.C:
+			case <-ctx.Done():
+				return nil
+			}
+		}
+	})
+}
+
+// Flush drains what is pending one last time, bounded by FlushTimeout. It is
+// the relay's OnStop: shutdown step 4, after consumers stop and before
+// connections close. Rows written after it are simply published by the next
+// process — which is precisely what an outbox is for.
+func (r *Relay) Flush(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(ctx, r.flush)
+	defer cancel()
+	for {
+		n, err := r.DrainOnce(ctx)
+		if err != nil {
+			return err
+		}
+		if n == 0 || ctx.Err() != nil {
+			return nil
+		}
+	}
 }
 
 // DrainOnce publishes one batch and returns how many records were

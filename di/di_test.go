@@ -324,18 +324,26 @@ func TestNonConstructor(t *testing.T) {
 	}
 }
 
-func TestVariadicConstructor(t *testing.T) {
+func TestVariadicConstructorIsProvidedWithNoArguments(t *testing.T) {
 	t.Parallel()
 
+	// Warren's own constructors take options — memory.New, health.New,
+	// inbox.NewMemoryStore. Rejecting them as providers would make the
+	// framework unusable with itself, so a variadic constructor is provided
+	// with no variadic arguments and its trailing slice is not a dependency.
 	root := di.New()
-	err := root.Provide(func(...string) *user.UserService { return user.NewUserService() })
-	if err == nil {
-		t.Fatal("Provide of a variadic constructor succeeded")
+	if err := root.Provide(func(opts ...string) *user.UserService {
+		if len(opts) != 0 {
+			t.Errorf("variadic parameter received %d arguments, want none", len(opts))
+		}
+		return user.NewUserService()
+	}); err != nil {
+		t.Fatalf("Provide of a variadic constructor: %v", err)
 	}
-	if !strings.Contains(err.Error(), "✗ variadic constructor") {
-		t.Errorf("diagnostic is not the variadic block:\n%s", err)
+	got, err := di.Resolve[*user.UserService](root)
+	if err != nil || got == nil {
+		t.Fatalf("Resolve: %v", err)
 	}
-	assertNoDigLeak(t, err)
 }
 
 func TestConstructorError(t *testing.T) {

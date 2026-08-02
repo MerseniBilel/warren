@@ -3,6 +3,7 @@ package outbox_test
 import (
 	"context"
 	stderrors "errors"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -336,3 +337,86 @@ func TestEndToEnd(t *testing.T) {
 		t.Errorf("message = %+v, want the event's key and type", got[0])
 	}
 }
+
+func TestRelayRunLoop(t *testing.T) {
+	t.Parallel()
+
+	store := outbox.NewMemoryStore()
+	pub := newCapture()
+	relay := outbox.NewRelay(store, pub, outbox.PollInterval(50*time.Millisecond))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- relay.Run(ctx) }()
+
+	// Appending is the signal: the loop must publish without waiting out the
+	// poll interval.
+	_ = store.Append(context.Background(), outbox.Record{Topic: "orders", Message: broker.Message{ID: "1"}})
+	deadline := time.Now().Add(5 * time.Second)
+	for len(pub.published("orders")) == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("the run loop never drained an appended record")
+		}
+		runtime.Gosched()
+	}
+
+	// A second append is picked up by the same loop.
+	_ = store.Append(context.Background(), outbox.Record{Topic: "orders", Message: broker.Message{ID: "2"}})
+	for len(pub.published("orders")) < 2 {
+		if time.Now().After(deadline) {
+			t.Fatal("the run loop stopped after the first drain")
+		}
+		runtime.Gosched()
+	}
+
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Errorf("Run = %v, want nil on cancellation", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not return after its context was cancelled — it would outlive the process's shutdown")
+	}
+}
+
+func TestRelayFlush(t *testing.T) {
+	t.Parallel()
+
+	store := outbox.NewMemoryStore()
+	pub := newCapture()
+	for _, id := range []string{"1", "2", "3"} {
+		_ = store.Append(context.Background(), outbox.Record{Topic: "t", Message: broker.Message{ID: id}})
+	}
+	relay := outbox.NewRelay(store, pub, outbox.BatchSize(2))
+
+	if err := relay.Flush(context.Background()); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+	if got := len(pub.published("t")); got != 3 {
+		t.Errorf("flushed %d records, want all 3 — a bounded batch must not leave the rest behind at shutdown", got)
+	}
+}
+
+func TestLeaderElectionGatesTheLoop(t *testing.T) {
+	t.Parallel()
+
+	store := outbox.NewMemoryStore()
+	pub := newCapture()
+	_ = store.Append(context.Background(), outbox.Record{Topic: "t", Message: broker.Message{ID: "1"}})
+
+	// A non-leader drains nothing.
+	relay := outbox.NewRelay(store, pub, outbox.LeaderElection(neverLeads{}))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := relay.Run(ctx); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if got := len(pub.published("t")); got != 0 {
+		t.Errorf("a non-leader published %d records — every replica draining is the bug elections prevent", got)
+	}
+}
+
+type neverLeads struct{}
+
+func (neverLeads) Lead(context.Context, func(context.Context) error) error { return nil }

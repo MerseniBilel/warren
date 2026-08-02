@@ -2,11 +2,14 @@
 
 **A DDD-first application framework and CLI for Go backends.**
 
-> ⚠️ **Pre-release, v0.1 in progress.** The kernel is importable and works
-> today — use cases, errors, domain, config, DI, lifecycle, the module system,
-> and the consumer chain. The transport adapters, outbox, and broker drivers
-> are not built yet, so a service currently drives handlers directly and
-> through `broker.Pipeline`. The repository is being rebuilt spec-first: every
+> ⚠️ **Pre-release, v0.1 in progress.** Most of the framework is importable
+> and works today — use cases, errors, domain, config, DI, lifecycle, the
+> module system, the consumer chain, the transactional outbox, the
+> persistence and transport ports, health, and validation. What is *not*
+> built yet are the driver adapters that need third-party libraries:
+> `transport/http`, `transport/grpc`, `persistence/postgres`,
+> `broker/kafka`. Until they land a service serves requests by driving the
+> `transport.Table` itself. The repository is being rebuilt spec-first: every
 > package gets an approved `SPEC.md` before its first line of Go, retired once
 > the package is implemented and reviewed. [warren.md](warren.md) is the
 > design; [AGENT.md](AGENT.md) is the rules.

@@ -12,9 +12,10 @@
 // a Go 1.27 feature. Until it ships, registration is generic FREE functions
 // with the same names (Get, Post, Method, OnEvent) and the same argument
 // order, so the migration is a mechanical rewrite of call sites inside
-// Register bodies; Register's own signature never changes. Note that the
-// explicit type arguments are mandatory in both forms: Go cannot infer
-// [Req, Res] from a concrete handler passed where an interface is expected.
+// Register bodies; Register's own signature never changes. Type arguments
+// are usually inferred — transport.Post(r, "/users", c.register) compiles —
+// and only need spelling out when the handler's own type does not determine
+// Req and Res.
 package transport
 
 import (
@@ -493,22 +494,57 @@ func planRule[Req any](v validate.Validator) (func(*Req) error, error) {
 
 // handlerName renders "<module>.<handler>" — the telemetry name Traced and
 // Metered read off the context.
+//
+// The registered handler is usually an app.Chain, whose outermost value is a
+// middleware's anonymous closure; deriving the name from it yields
+// "module.1", which would make every span in a service share one name. So a
+// closure's name is used only when it is meaningful, and the REQUEST TYPE is
+// the fallback: "inventory.ReserveStock" identifies the use case, is stable
+// across composition changes, and cannot collide within a module the way an
+// anonymous function can. transport.Named overrides both.
 func handlerName[Req, Res any](module string, h app.Handler[Req, Res]) string {
-	name := "handler"
+	if name := concreteName(h); name != "" {
+		return module + "." + name
+	}
+	if t := reflect.TypeFor[Req](); t.Name() != "" {
+		return module + "." + t.Name()
+	}
+	return module + ".handler"
+}
+
+// concreteName is the handler's own name when it has one: a named type, or a
+// method value like c.register. Anonymous closures — every composed chain —
+// have none.
+func concreteName[Req, Res any](h app.Handler[Req, Res]) string {
 	if fn, ok := any(h).(app.HandlerFunc[Req, Res]); ok {
-		if f := runtime.FuncForPC(reflect.ValueOf(fn).Pointer()); f != nil {
-			name = shortName(f.Name())
+		f := runtime.FuncForPC(reflect.ValueOf(fn).Pointer())
+		if f == nil {
+			return ""
 		}
-	} else {
-		t := reflect.TypeOf(h)
-		for t != nil && t.Kind() == reflect.Pointer {
-			t = t.Elem()
+		name := shortName(f.Name())
+		// "func1", "func1.1" — a closure, not a use case.
+		if name == "" || strings.HasPrefix(name, "func") || isNumeric(name) {
+			return ""
 		}
-		if t != nil && t.Name() != "" {
-			name = t.Name()
+		return name
+	}
+	t := reflect.TypeOf(h)
+	for t != nil && t.Kind() == reflect.Pointer {
+		t = t.Elem()
+	}
+	if t != nil && t.Name() != "" {
+		return t.Name()
+	}
+	return ""
+}
+
+func isNumeric(s string) bool {
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
 		}
 	}
-	return module + "." + name
+	return s != ""
 }
 
 func shortName(full string) string {

@@ -1543,8 +1543,10 @@ func (h *RegisterUserHandler) Handle(ctx context.Context, cmd RegisterUser) (Use
 
 // ── interfaces (imports: warren/transport) ───────────────────────────
 func (c *UserController) Register(r transport.Registrar) {
-    r.HTTP().Post("/users", c.register)
-    r.GRPC().Method("user.v1.UserService/Register", c.register)
+    // v0.1 (Go 1.26): free functions. On 1.27 these become methods with the
+    // same names and argument order — see §3.5.
+    transport.Post(r, "/users", c.register)
+    transport.Method(r, "user.v1.UserService/Register", c.register)
 }
 
 // ── bootstrap ────────────────────────────────────────────────────────

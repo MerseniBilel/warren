@@ -89,12 +89,6 @@ func errNonConstructor(got any) error {
 		"✗ not a constructor\n\n    Provide expects a function whose returns are the types it provides,\n    optionally with a trailing error. Got %T.", got)}
 }
 
-// errVariadic reports a variadic constructor, which Warren does not accept.
-func errVariadic(name string) error {
-	return &diagnostic{text: fmt.Sprintf(
-		"✗ variadic constructor\n\n    %s is variadic. A constructor's parameters are the dependencies it\n    resolves, so each must be a single concrete requirement.", name)}
-}
-
 // errConstructorFailed presents a user constructor's own error, wrapped so
 // errors.Is and errors.As still reach it.
 func errConstructorFailed(scope string, cause error) error {
