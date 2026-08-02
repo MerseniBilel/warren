@@ -197,3 +197,62 @@ func TestBootFailureSurfacesWarrensDiagnostic(t *testing.T) {
 	_ = stderrors.New
 	_ = domain.Event(registered{})
 }
+
+// TestInvokeInReachesEveryBootedModule covers the case a real service hits
+// on its first end-to-end test: three features on one graph, and a use case
+// to drive in each.
+//
+// Invoke alone cannot do it — it resolves from the one module
+// NewModuleTest was pointed at, and InModule fixes that choice at boot for
+// every call. Without InvokeIn, every multi-feature test hand-writes the
+// same generic wrapper over App.Warren().Invoke.
+func TestInvokeInReachesEveryBootedModule(t *testing.T) {
+	t.Parallel()
+
+	a := warrentest.NewModuleTest(t, moduleA(), warrentest.WithModules(moduleB()))
+
+	got, err := warrentest.InvokeIn[echoReq, echoRes](context.Background(), a, "a", echoReq{Text: "from a"})
+	if err != nil {
+		t.Fatalf("InvokeIn a: %v", err)
+	}
+	if got.Text != "a: from a" {
+		t.Errorf("got %+v", got)
+	}
+
+	// The other module, from the same booted app — which is the whole point.
+	got, err = warrentest.InvokeIn[echoReq, echoRes](context.Background(), a, "b", echoReq{Text: "from b"})
+	if err != nil {
+		t.Fatalf("InvokeIn b: %v", err)
+	}
+	if got.Text != "b: from b" {
+		t.Errorf("got %+v", got)
+	}
+
+	// And a module that is not booted names itself in the failure.
+	if _, err = warrentest.InvokeIn[echoReq, echoRes](context.Background(), a, "nope", echoReq{}); err == nil {
+		t.Fatal("invoking into an unbooted module succeeded")
+	} else if !strings.Contains(err.Error(), "nope") {
+		t.Errorf("the diagnostic does not name the module:\n%v", err)
+	}
+}
+
+type echoReq struct{ Text string }
+type echoRes struct{ Text string }
+
+type echoHandler struct{ prefix string }
+
+func (h echoHandler) Handle(_ context.Context, r echoReq) (echoRes, error) {
+	return echoRes{Text: h.prefix + ": " + r.Text}, nil
+}
+
+func moduleA() warren.Module {
+	return warren.NewModule("a", warren.Providers(
+		func() app.Handler[echoReq, echoRes] { return echoHandler{prefix: "a"} },
+	))
+}
+
+func moduleB() warren.Module {
+	return warren.NewModule("b", warren.Providers(
+		func() app.Handler[echoReq, echoRes] { return echoHandler{prefix: "b"} },
+	))
+}

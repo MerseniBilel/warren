@@ -136,9 +136,20 @@ func (a *App) Warren() *warren.App { return a.app }
 // everywhere else in Warren. A resolution failure — the module does not
 // provide that handler — is returned as Warren's boot diagnostic.
 func Invoke[Req, Res any](ctx context.Context, a *App, req Req) (Res, error) {
+	return InvokeIn[Req, Res](ctx, a, a.module, req)
+}
+
+// InvokeIn is Invoke against a NAMED module, for a test that spans several.
+//
+// Invoke resolves from the one module NewModuleTest was pointed at, and
+// InModule fixes that choice at boot for every call — so an end-to-end test
+// driving three features has neither. This is that test's entry point, and
+// it exists because writing it by hand over App.Warren().Invoke was the
+// first thing a real service had to do.
+func InvokeIn[Req, Res any](ctx context.Context, a *App, module string, req Req) (Res, error) {
 	var res Res
 	var handleErr error
-	err := a.app.Invoke(a.module, func(h app.Handler[Req, Res]) {
+	err := a.app.Invoke(module, func(h app.Handler[Req, Res]) {
 		res, handleErr = h.Handle(ctx, req)
 	})
 	if err != nil {
