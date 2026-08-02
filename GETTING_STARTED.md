@@ -301,6 +301,39 @@ decision.
 
 ---
 
+## 7b. Logs you can join to a request
+
+The service already puts a correlation ID on every response
+(`X-Correlation-Id`) and in every error body. Getting it onto your **log
+lines** is one line in `main`, and it is worth doing on day one:
+
+```go
+slog.SetDefault(slog.New(log.Handler(slog.NewJSONHandler(os.Stdout, nil))))
+```
+
+`log.Handler` resolves the correlation ID when a record is emitted, so a
+request that logs nothing pays nothing for this. Then, in a handler:
+
+```go
+log.FromContext(ctx).InfoContext(ctx, "note saved", "id", n.ID)
+```
+
+**Use the `*Context` methods.** `InfoContext`, `ErrorContext`, `WarnContext`.
+Passing the context twice looks redundant and is not — slog's plain `Info`
+passes `context.Background()`, so it resolves nothing and the record silently
+loses every field that would let you join it to the request:
+
+```json
+{"level":"INFO","msg":"note saved","id":"n1"}                          // .Info
+{"level":"INFO","msg":"note saved","id":"n1","correlation_id":"…-1"}   // .InfoContext
+```
+
+Add `warren/observability` later and the same line starts carrying `trace_id`
+and `span_id` too — pass `observability.LogAttrs()` as a second argument to
+`log.Handler`.
+
+---
+
 ## 8. Swapping the map for Postgres
 
 The in-memory repository above is a real implementation of the port, and

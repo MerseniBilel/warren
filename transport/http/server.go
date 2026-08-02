@@ -314,6 +314,16 @@ func portOf(addr string) string {
 	return ""
 }
 
+func errNotHijackable() error {
+	return diagnostic(
+		"✗ response writer is not hijackable\n\n" +
+			"    A raw route tried to hijack the connection, and the underlying\n" +
+			"    writer does not support it — HTTP/2 never does.\n\n" +
+			"  WebSocket upgrade needs HTTP/1.1. If this server has H2C enabled,\n" +
+			"  the client negotiated HTTP/2; serve the upgrade endpoint from a\n" +
+			"  listener without it.")
+}
+
 func errNotAHandler(rr transport.RawRoute) error {
 	return diagnostic(fmt.Sprintf(
 		"✗ raw route is not an http.Handler\n\n"+

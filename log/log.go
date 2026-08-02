@@ -17,11 +17,26 @@ type loggerKey struct{}
 
 type correlationKey struct{}
 
-// FromContext returns the logger carried by ctx. The trace ID, span ID,
-// correlation ID, module, and handler are already attached to it by the
-// transport adapter that seeded the context. When ctx was never seeded —
-// a unit test, a detached goroutine — it returns slog.Default(), so the
-// result is always usable and never nil.
+// FromContext returns the logger carried by ctx, or slog.Default() when ctx
+// was never seeded — a unit test, a detached goroutine — so the result is
+// always usable and never nil.
+//
+// USE THE *Context METHODS ON IT: InfoContext, ErrorContext, and so on.
+//
+//	log.FromContext(ctx).InfoContext(ctx, "saved", "id", id)   // correct
+//	log.FromContext(ctx).Info("saved", "id", id)               // loses everything
+//
+// Passing the context twice looks redundant and is not. Correlation and
+// trace IDs are resolved from the context when a record is EMITTED — see
+// Handler — which is what makes a request that logs nothing cost nothing.
+// slog's non-Context methods pass context.Background(), so they resolve
+// nothing, and the record is silently missing every field that would let you
+// join it to the request.
+//
+// An earlier version of this comment claimed the fields were "already
+// attached" by the transport adapter. They are not, deliberately: attaching
+// them at the edge costs 8 allocations on every request, measured, whether or
+// not the request ever logs.
 func FromContext(ctx context.Context) *slog.Logger {
 	if l, ok := ctx.Value(loggerKey{}).(*slog.Logger); ok && l != nil {
 		return l

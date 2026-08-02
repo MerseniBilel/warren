@@ -123,7 +123,7 @@ contract now.
       drain-before-stop *(implemented on **`net/http.ServeMux`**, not chi:
       the sealed `Registrar` already discards everything a router is bought
       for, and chi measured worst of five candidates on this project's own
-      first priority. Zero third-party dependencies; 18 allocations per
+      first priority. Zero third-party dependencies; 17 allocations per
       request, asserted by a test)*
 - [ ] `transport/grpc` — interceptors through the shared chain, the gRPC column
 - [ ] Fallback if 1.27 slips: generic free functions (compiles on 1.26; call
@@ -161,7 +161,7 @@ contract now.
 - [x] `observability` — OTel wiring: handlers, HTTP and broker propagation
       instrumented by one import, composed at BOOT so the request path decides
       nothing *(implemented; DB spans need one explicit `postgres.Configure`
-      line. 16 third-party modules, confined here by an invariant — a service
+      line. 24 third-party modules, confined here by an invariant — a service
       that does not import it pays nothing)*
 - [ ] `validate` — port in core, implementation in a submodule
 - [x] `health` — check registry, liveness/readiness verdicts, root-scope

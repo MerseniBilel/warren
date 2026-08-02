@@ -1,13 +1,18 @@
 package http
 
 import (
+	"bufio"
 	"crypto/rand"
 	"encoding/hex"
+	"net"
 	"net/http"
 	"runtime/debug"
 	"strconv"
 	"sync/atomic"
 
+	"strings"
+
+	"github.com/MerseniBilel/warren/app"
 	"github.com/MerseniBilel/warren/errors"
 	"github.com/MerseniBilel/warren/log"
 )
@@ -41,7 +46,12 @@ func (s *server) recoverer(h http.Handler) http.Handler {
 				panic(rec)
 			}
 			ctx := r.Context()
-			log.FromContext(ctx).Error("handler panicked",
+			// ErrorContext, not Error. slog's non-Context methods pass
+			// context.Background(), so a log.Handler resolving correlation
+			// and trace IDs at emit time sees nothing — and the panic line
+			// would be the one record in the service unjoinable to the
+			// request that caused it, in the place that link is worth most.
+			log.FromContext(ctx).ErrorContext(ctx, "handler panicked",
 				"panic", rec,
 				"path", r.URL.Path,
 				"stack", string(debug.Stack()))
@@ -102,17 +112,104 @@ func nextCorrelationID() string {
 	return idPrefix + strconv.FormatUint(idCounter.Add(1), 36)
 }
 
-// telemetry continues the CALLER's trace: it reads the W3C traceparent off
-// the request through the core seam and seeds the context, so the handler's
-// span is a child of the caller's rather than the root of an orphan trace.
+// telemetry continues the CALLER's trace and opens the SERVER span.
 //
-// It is composed into the edge ring only when a Telemetry is bound at boot.
-// An uninstrumented service has no such stage and pays nothing — not a nil
+// Continuation reads the W3C traceparent off the request through the core
+// seam, so the handler's span is a child of the caller's rather than the root
+// of an orphan trace.
+//
+// The SERVER span wraps EVERYTHING — decode, validation, the handler, encode,
+// and the error rendering — which is what makes a trace answer the questions
+// an incident actually asks: which route, which status, how much of the
+// latency was transport. Opening it here rather than around the handler is
+// also what makes a malformed body, a 404 and a panic visible at all: those
+// never reach the handler, so a handler-only span shows nothing.
+//
+// route is the matched PATTERN, not the concrete path — "/users/{id}", whose
+// cardinality is the size of the route table rather than of the traffic. It
+// is resolved from Request.Pattern, which net/http sets in place, with no
+// clone (Go 1.23).
+//
+// The whole stage is composed into the edge ring only when a Telemetry is
+// bound at boot, and the span only when that Telemetry implements
+// app.RequestSpan. An uninstrumented service has no stage at all — not a nil
 // check, not a closure.
 func (s *server) telemetry(h http.Handler) http.Handler {
 	tel := s.tel
+	spanner, _ := tel.(app.RequestSpan)
+
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ctx := tel.Extract(r.Context(), r.Header.Get)
-		h.ServeHTTP(w, r.WithContext(ctx))
+		if spanner == nil {
+			h.ServeHTTP(w, r.WithContext(ctx))
+			return
+		}
+
+		scheme := "http"
+		if r.TLS != nil {
+			scheme = "https"
+		}
+		ctx, end := spanner.ServerSpan(ctx, app.RequestInfo{
+			Protocol: "http",
+			Method:   r.Method,
+			Route:    routeOf(r),
+			Path:     r.URL.Path,
+			Scheme:   scheme,
+			Host:     r.Host,
+		})
+		// The status is only knowable by watching the write, so the recorder
+		// is allocated on the INSTRUMENTED path only.
+		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+		h.ServeHTTP(rec, r.WithContext(ctx))
+		end(rec.status, nil)
 	})
+}
+
+// routeOf returns the matched pattern with the method stripped — net/http
+// reports "POST /users/{id}" and the method is already its own attribute.
+// An unmatched request has no pattern, and "" is the honest answer: naming
+// the concrete path there is how a 404 flood becomes a cardinality incident.
+func routeOf(r *http.Request) string {
+	p := r.Pattern
+	if _, path, ok := strings.Cut(p, " "); ok {
+		return path
+	}
+	return p
+}
+
+// statusRecorder observes the status code. It implements the optional
+// interfaces net/http handlers reach for, because swallowing them would break
+// SSE and WebSocket upgrade on a raw route the moment telemetry is switched
+// on — a failure mode that would look like "tracing broke my streaming".
+type statusRecorder struct {
+	http.ResponseWriter
+	status  int
+	written bool
+}
+
+func (s *statusRecorder) WriteHeader(code int) {
+	if !s.written {
+		s.status, s.written = code, true
+	}
+	s.ResponseWriter.WriteHeader(code)
+}
+
+func (s *statusRecorder) Write(b []byte) (int, error) {
+	s.written = true
+	return s.ResponseWriter.Write(b)
+}
+
+func (s *statusRecorder) Unwrap() http.ResponseWriter { return s.ResponseWriter }
+
+func (s *statusRecorder) Flush() {
+	if f, ok := s.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+func (s *statusRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	if hj, ok := s.ResponseWriter.(http.Hijacker); ok {
+		return hj.Hijack()
+	}
+	return nil, nil, errNotHijackable()
 }

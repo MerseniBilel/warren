@@ -486,3 +486,148 @@ func TestHandlePatternContributesToAllow(t *testing.T) {
 		t.Errorf("Allow = %q", got)
 	}
 }
+
+// --- telemetry -------------------------------------------------------------
+
+// spanRecorder is an app.Telemetry that records the SERVER spans the edge
+// opens, so the test can assert on route, status and kind without a collector.
+type spanRecorder struct {
+	mu     sync.Mutex
+	server []serverSpan
+}
+
+type serverSpan struct {
+	info   app.RequestInfo
+	status int
+}
+
+func (s *spanRecorder) Span(ctx context.Context, _ string) (context.Context, func(error)) {
+	return ctx, func(error) {}
+}
+func (s *spanRecorder) Record(string, time.Duration, error)             {}
+func (s *spanRecorder) Inject(context.Context, func(key, value string)) {}
+func (s *spanRecorder) Extract(ctx context.Context, get func(string) string) context.Context {
+	if get("x-trace") != "" {
+		return context.WithValue(ctx, traceKey{}, get("x-trace"))
+	}
+	return ctx
+}
+
+type traceKey struct{}
+
+func (s *spanRecorder) ServerSpan(ctx context.Context, info app.RequestInfo) (context.Context, func(int, error)) {
+	return ctx, func(status int, _ error) {
+		s.mu.Lock()
+		s.server = append(s.server, serverSpan{info: info, status: status})
+		s.mu.Unlock()
+	}
+}
+
+func (s *spanRecorder) seen() []serverSpan {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]serverSpan(nil), s.server...)
+}
+
+// The SERVER span must carry the matched PATTERN, not the concrete path: its
+// cardinality has to be bounded by the route table, not by traffic.
+func TestServerSpanCarriesTheRouteNotThePath(t *testing.T) {
+	t.Parallel()
+
+	rec := &spanRecorder{}
+	base := serveWithTelemetry(t, rec, userModule())
+	do(t, "GET", base+"/users/u-42", "")
+
+	spans := rec.seen()
+	if len(spans) != 1 {
+		t.Fatalf("server spans = %d, want 1", len(spans))
+	}
+	if spans[0].info.Route != "/users/{id}" {
+		t.Errorf("route = %q, want the pattern — a concrete path is unbounded cardinality", spans[0].info.Route)
+	}
+	if spans[0].info.Path != "/users/u-42" {
+		t.Errorf("path = %q", spans[0].info.Path)
+	}
+	if spans[0].info.Method != "GET" || spans[0].status != 200 {
+		t.Errorf("method/status = %s/%d", spans[0].info.Method, spans[0].status)
+	}
+}
+
+// The span wraps EVERYTHING, so requests that never reach the handler are
+// visible: a malformed body, a 404, a validation failure. A handler-only span
+// shows none of them, and "clients started getting 400s at 14:00" is then
+// unanswerable from traces.
+func TestServerSpanCoversRequestsThatNeverReachTheHandler(t *testing.T) {
+	t.Parallel()
+
+	rec := &spanRecorder{}
+	base := serveWithTelemetry(t, rec, userModule())
+
+	do(t, "POST", base+"/users", `{not json`)    // 400, decode fails
+	do(t, "POST", base+"/users", `{"name":"x"}`) // 400, validation fails
+	do(t, "GET", base+"/nope", "")               // 404, no route at all
+
+	spans := rec.seen()
+	if len(spans) != 3 {
+		t.Fatalf("server spans = %d, want 3 — pre-handler failures must be traced", len(spans))
+	}
+	for _, s := range spans {
+		if s.status != 400 && s.status != 404 {
+			t.Errorf("status = %d, want the real response status", s.status)
+		}
+	}
+	// The 404 is served by the catch-all pattern, so its route is "/" — one
+	// bounded value, not the concrete path. That is the property that
+	// matters: a flood of requests to random URLs produces ONE route label,
+	// not one per URL, so a 404 storm cannot become a cardinality incident.
+	for _, s := range spans {
+		if s.status == 404 && s.info.Route == "/nope" {
+			t.Errorf("the 404's span named the concrete path %q — a 404 flood would then explode cardinality", s.info.Route)
+		}
+	}
+}
+
+func TestServerSpanRecordsTheErrorStatus(t *testing.T) {
+	t.Parallel()
+
+	rec := &spanRecorder{}
+	base := serveWithTelemetry(t, rec, userModule())
+	do(t, "POST", base+"/fail", `{"code":"other"}`)
+
+	spans := rec.seen()
+	if len(spans) != 1 || spans[0].status != 500 {
+		t.Fatalf("spans = %+v, want one 500", spans)
+	}
+}
+
+// Probes bypass the edge ring, so they must not produce spans: one every two
+// seconds is a telemetry bill, not a signal.
+func TestProbesProduceNoSpans(t *testing.T) {
+	t.Parallel()
+
+	rec := &spanRecorder{}
+	base := serveWithTelemetry(t, rec, userModule())
+	do(t, "GET", base+"/healthz", "")
+	do(t, "GET", base+"/readyz", "")
+
+	if spans := rec.seen(); len(spans) != 0 {
+		t.Errorf("probes produced %d spans", len(spans))
+	}
+}
+
+func serveWithTelemetry(t *testing.T, tel app.Telemetry, modules ...warren.Module) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	a := warren.New(append(modules, whttp.Server(whttp.Listener(ln), whttp.DrainDelay(0)))...)
+	if err := a.Telemetry(tel); err != nil {
+		t.Fatalf("Telemetry: %v", err)
+	}
+	if err := a.Start(context.Background()); err != nil {
+		t.Fatalf("boot: %v", err)
+	}
+	t.Cleanup(func() { _ = a.Stop(context.Background()) })
+	return "http://" + ln.Addr().String()
+}

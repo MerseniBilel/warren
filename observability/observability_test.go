@@ -199,6 +199,33 @@ func TestTraceContextSurvivesAMapRoundTrip(t *testing.T) {
 
 // The trace ID reaches every log line with no per-request work: resolution
 // happens in Handle, where slog is designed to do it.
+// Installing the correlation handler over the BUILT-IN default deadlocks:
+// slog.SetDefault redirects the log package through the new handler, so a
+// handler wrapping the default recurses slog -> handler -> default ->
+// log.Output -> slog. This package used to do exactly that at boot, and every
+// service with an OTLP endpoint hung on its first log line.
+//
+// The rule is that log.Handler wraps a handler the CALLER built. This test
+// pins that a wrapped concrete handler emits exactly once and returns.
+func TestHandlerOverAConcreteHandlerDoesNotRecurse(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(wlog.Handler(slog.NewJSONHandler(&buf, nil), observability.LogAttrs()))
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		logger.InfoContext(context.Background(), "hello")
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("logging through the correlation handler did not return — it recursed")
+	}
+	if n := strings.Count(buf.String(), "hello"); n != 1 {
+		t.Errorf("record emitted %d times, want exactly 1", n)
+	}
+}
+
 func TestLogAttrsPutTheTraceOnTheRecord(t *testing.T) {
 	var buf bytes.Buffer
 	h := wlog.Handler(slog.NewJSONHandler(&buf, nil), observability.LogAttrs())
@@ -292,4 +319,50 @@ func buildTable(t *testing.T, tel app.Telemetry, c transport.Controller) *transp
 		t.Fatalf("Table: %v", err)
 	}
 	return tbl
+}
+
+// --- regressions found by field-testing, 2026-08-02 ------------------------
+
+// The module could not boot with an OTLPEndpoint at all: resource.Merge
+// refuses two differing schema URLs, and this package pinned a semconv
+// version the SDK had moved past. Every test that set an endpoint asserted a
+// FAILURE — sample ratio, missing service name — and each returned before
+// resource.Merge was reached, so a green suite covered a package whose
+// primary path was dead.
+//
+// This is that missing test. It asserts the happy path, which is the only
+// kind of test that could have caught it.
+func TestBootWithAnEndpointSucceeds(t *testing.T) {
+	a := warren.New(observability.Module(
+		observability.ServiceName("tasks-service"),
+		observability.ServiceVersion("1.2.3"),
+		observability.ResourceAttr("deployment.environment", "test"),
+		observability.OTLPEndpoint("localhost:4317"),
+		observability.Insecure(),
+	))
+	// No collector is listening, and that must not matter: the OTLP exporter
+	// does not dial at construction. Boot succeeds and export fails later,
+	// which is the right trade — telemetry must never stop a service starting.
+	if err := a.Start(context.Background()); err != nil {
+		t.Fatalf("boot with an endpoint must succeed:\n%v", err)
+	}
+	if err := a.Stop(context.Background()); err != nil {
+		t.Errorf("Stop: %v", err)
+	}
+}
+
+// The same, with metrics off: a second resource-building path.
+func TestBootWithAnEndpointAndNoMetrics(t *testing.T) {
+	a := warren.New(observability.Module(
+		observability.ServiceName("tasks-service"),
+		observability.OTLPEndpoint("localhost:4317"),
+		observability.Insecure(),
+		observability.WithoutMetrics(),
+	))
+	if err := a.Start(context.Background()); err != nil {
+		t.Fatalf("boot: %v", err)
+	}
+	if err := a.Stop(context.Background()); err != nil {
+		t.Errorf("Stop: %v", err)
+	}
 }

@@ -1232,9 +1232,10 @@ API is `Handle`, so a mux escape hatch would buy exactly what `Handle` gives.
 The escape hatch that matters is `transport.Raw` (§3.5), registered from a
 controller so the module's own container builds the handler.
 
-Measured on go1.26.3/darwin-arm64: **18 allocations** for a POST with a JSON
-body and a path and query parameter — 2 for `ServeMux` dispatch, 6 for the edge
-ring, 10 for the typed path of which ~7 are `encoding/json`. The same handler
+Measured on go1.26.3/darwin-arm64: **17 allocations** for a POST with a JSON
+body and a path and query parameter, asserted at a budget of 18 — 2 for
+`ServeMux` dispatch, 6 for the edge ring, the rest for the typed path of which
+~7 are `encoding/json`. The same handler
 called directly allocates **0**. `TestAllocations` asserts the exact number.
 
 **Usage**
@@ -1606,7 +1607,18 @@ postgres.Configure(func(c *pgxpool.Config) error {
 
 Handler instrumentation is composed at BOOT — `buildInvoker` wraps `app.Traced` and `app.Metered` around every route once, at step 5 — so the request path decides nothing, and a service with no telemetry bound has byte-identical route closures. `trace.Tracer` stays directly accessible through OTel's own global provider: this wraps setup, not the API, and **no OpenTelemetry type appears in any Warren signature**.
 
-**List `observability.Module` FIRST in `warren.New`.** Declared hooks unwind in reverse module order, so first-listed flushes last — after consumers stop, after the outbox relay, after the pool closes. The spans emitted during teardown are the ones nobody can reproduce.
+**List `observability.Module` anywhere in `warren.New`.** The exporter flushes LAST — after servers stop, after consumers drain, after pools close — because the bootstrapper resolves the telemetry before it instantiates anything else, so the flush hook is appended first and unwinds last. That is a property of the boot phase, not of argument order, which is the point: it cannot be got wrong.
+
+**Log correlation is one line in `main`, and this module does not install it:**
+
+```go
+slog.SetDefault(slog.New(log.Handler(
+    slog.NewJSONHandler(os.Stdout, nil), observability.LogAttrs())))
+```
+
+`log.Handler` is core, so a service with no telemetry still gets `correlation_id` on every record; `LogAttrs` adds `trace_id` and `span_id` when this module is present. Both resolve at emit time, so a request that logs nothing pays nothing. **Use the `*Context` methods** — `log.FromContext(ctx).InfoContext(ctx, …)`; slog's plain `Info` passes `context.Background()` and silently drops every correlation field.
+
+**Known gaps, carried from the implementation round:** a handler span opens inside the route closure, so `app.Metered`'s histogram covers the handler only — the transport-level `SERVER` span around decode, validation and encode is what carries route and status. `WithoutMetrics()` disables the meter provider entirely. There is no exporter-connectivity health check: `/readyz` stays green while export is failing, and export failures surface as WARN log lines with a `module` field.
 
 ```go
 observability.Module(
@@ -1747,7 +1759,7 @@ All generators support `--dry-run` and `--force`.
 | Postgres | `jackc/pgx/v5` | Wrap | no ORM, by design. **Audited 2026-08-02**: v5.10.0, MIT, 14 087 stars, pushed 2026-08-01, not archived. Six modules compiled in — `pgpassfile`, `pgservicefile`, `pgx`, `puddle`, `x/sync`, `x/text` — measured with `go list -deps`, not read off a README. One pgx type in one exported signature: `postgres.Raw` |
 | Migrations | **none — Build** | Build | **`pressly/goose` REJECTED 2026-08-02.** Healthy (MIT, v3.27.3 2026-07-22, 11.3k stars) and only 5 modules as a library import — but once migrating at boot is banned it buys nothing an ordered applier and a version table do not, and against goal 2 a contributor debugging a migration reads 100 lines of ours instead of goose's dialect/locker/provider layering. `postgres.Schema` ships in goose's FILE format, so a project already running goose, atlas or dbmate applies it with one line |
 | Redis | `redis/go-redis/v9` | Wrap | cache + lock |
-| Telemetry | OpenTelemetry Go | Wrap | **Audited 2026-08-02**: v1.44.0 (2026-05-27), Apache-2.0, 6 500 stars, pushed 2026-08-02, not archived. **16 third-party modules compiled in**, including grpc, protobuf and genproto — an order of magnitude above anything else here (core 1, transport/http 0, postgres 6), which is why it is opt-in in its own module and `scripts/invariants.sh` refuses `go.opentelemetry.io` in any other go.mod. OTLP over gRPC only: the HTTP exporter reaches grpc through its own config package and is not lighter. Wiring only — no OTel type in any Warren signature |
+| Telemetry | OpenTelemetry Go | Wrap | **Audited 2026-08-02**: v1.44.0 (2026-05-27), Apache-2.0, 6 500 stars, pushed 2026-08-02, not archived. **24 third-party modules in the build graph**, including grpc, protobuf and genproto — an order of magnitude above anything else here (core 1, transport/http 0, postgres 6), which is why it is opt-in in its own module and `scripts/invariants.sh` refuses `go.opentelemetry.io` in any other go.mod. OTLP over gRPC only: the HTTP exporter reaches grpc through its own config package and is not lighter. Wiring only — no OTel type in any Warren signature |
 | Auth | `golang-jwt/jwt/v5`, `coreos/go-oidc` | Wrap | |
 | Resilience | `sony/gobreaker`, `cenkalti/backoff/v4` | Wrap | one `Policy` interface |
 | Cron | `robfig/cron/v3` | Wrap | lifecycle-aware |

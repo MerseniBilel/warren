@@ -61,7 +61,7 @@ done
 
 # OpenTelemetry is confined to warren/observability.
 #
-# It costs 16 third-party modules, including grpc and protobuf — an order of
+# It costs 24 third-party modules, including grpc and protobuf — an order of
 # magnitude more than anything else in the repository — so it is opt-in, in
 # its own module, and a service that does not import it must pay nothing. The
 # seam is core-shaped (app.Telemetry, log.ContextAttrs), so nothing else has

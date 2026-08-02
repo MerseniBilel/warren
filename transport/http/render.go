@@ -69,7 +69,10 @@ func writeError(w http.ResponseWriter, r *http.Request, err error) {
 	body := errorPayload{Code: string(code), CorrelationID: log.CorrelationID(ctx)}
 	if code == errors.CodeInternal {
 		body.Message = "internal error"
-		log.FromContext(ctx).Error("request failed", "error", err.Error(), "path", r.URL.Path)
+		// ErrorContext: see the note in edge.go's recoverer. The correlation
+		// ID is in the response body, and it must be on this line too or the
+		// two cannot be joined.
+		log.FromContext(ctx).ErrorContext(ctx, "request failed", "error", err.Error(), "path", r.URL.Path)
 	} else {
 		body.Message = werr.Message()
 		body.Details = werr.Details()

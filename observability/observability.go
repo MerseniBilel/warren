@@ -23,11 +23,13 @@
 //
 // # What it costs
 //
-// Measured 2026-08-02: 15 third-party modules, including google.golang.org/grpc
-// and protobuf. That is the going rate for OTLP in Go — the HTTP exporter
-// reaches grpc through its own config package, so it is not lighter — and it
-// is why this is an opt-in module of its own. A service that does not import
-// it pays nothing.
+// Measured 2026-08-02, the way a consumer sees it — every module in this
+// package's build graph: 24, including google.golang.org/grpc, protobuf and
+// genproto. That is the going rate for OTLP in Go; the HTTP exporter reaches
+// grpc through its own config package and is not lighter. It is why this is
+// an opt-in module of its own, and why scripts/invariants.sh refuses
+// go.opentelemetry.io in any other go.mod. A service that does not import it
+// pays nothing.
 package observability
 
 import (
@@ -44,12 +46,11 @@ import (
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
-	semconv "go.opentelemetry.io/otel/semconv/v1.27.0"
+	semconv "go.opentelemetry.io/otel/semconv/v1.41.0"
 
 	"github.com/MerseniBilel/warren"
 	"github.com/MerseniBilel/warren/app"
 	"github.com/MerseniBilel/warren/lifecycle"
-	"github.com/MerseniBilel/warren/log"
 )
 
 // ModuleName is the name of the module Module returns — the scope name that
@@ -70,9 +71,8 @@ type config struct {
 	metricInterval time.Duration
 	exportTimeout  time.Duration
 
-	noMetrics        bool
-	noHandlerInstr   bool
-	noLogCorrelation bool
+	noMetrics      bool
+	noHandlerInstr bool
 }
 
 func defaults() config {
@@ -88,11 +88,17 @@ func defaults() config {
 // handler invocation, a continued trace per HTTP request, and trace context
 // carried into and out of broker.Message.Headers.
 //
-// LIST IT FIRST in warren.New. Declared shutdown hooks unwind in reverse
-// module order, so a module listed first flushes LAST — after consumers have
-// stopped, after the outbox relay, after the pool closes. Spans emitted
-// during shutdown are the ones worth having, and flushing earlier drops
-// exactly the teardown bugs telemetry exists to catch.
+// LIST IT ANYWHERE in warren.New. The exporter flushes LAST — after servers
+// stop, after consumers drain, after pools close — because the bootstrapper
+// resolves the telemetry before it instantiates anything else, so this
+// module's flush hook is appended first and therefore unwinds last. Spans
+// emitted while everything else shuts down are the ones nobody can
+// reproduce, and they are only captured if the exporter is still alive.
+//
+// That is a property of the boot phase, not of argument order, which is the
+// point: it cannot be got wrong. An earlier version of this comment told you
+// to list the module first and was simply false — the hook landed after every
+// module's own, the flush ran before them, and position changed nothing.
 //
 // Database query spans are the one boundary this module cannot reach on its
 // own: the pgx tracer seam is a pgx type, and an adapter may not import
@@ -102,6 +108,22 @@ func defaults() config {
 //	    c.ConnConfig.Tracer = otelpgx.NewTracer()
 //	    return nil
 //	})
+//
+// # Log correlation is one line in main, and this module does not install it
+//
+// Putting trace_id and span_id on every log record is log.Handler's job, and
+// installing it belongs in main, not here:
+//
+//	slog.SetDefault(slog.New(log.Handler(
+//	    slog.NewJSONHandler(os.Stdout, nil), observability.LogAttrs())))
+//
+// This module used to do it for you and it was a mistake twice over. It only
+// worked for services that imported this module, so correlation_id — a core
+// concept with nothing to do with OpenTelemetry — was missing from every
+// service that did not. And wrapping slog.Default's handler in place
+// DEADLOCKS: slog.SetDefault redirects the log package's output through the
+// new handler, so a handler wrapping the built-in default recurses
+// slog -> handler -> default -> log.Output -> slog, forever.
 //
 // A missing or empty OTLPEndpoint builds no exporter and binds no telemetry:
 // boot composes no instrumentation and the request path costs exactly what an
@@ -153,9 +175,9 @@ func ResourceAttr(key, value string) Option {
 // Module.
 //
 // The exporter is OTLP over gRPC and is not swappable. Measured 2026-08-02:
-// the gRPC and HTTP exporters compile the same 15 third-party modules,
-// because otlptracehttp reaches google.golang.org/grpc through its own config
-// package regardless. One transport means one code path to test.
+// the gRPC and HTTP exporters cost the same, because otlptracehttp reaches
+// google.golang.org/grpc through its own config package regardless. One
+// transport means one code path to test.
 func OTLPEndpoint(addr string) Option {
 	return Option{apply: func(c *config) { c.endpoint = addr }}
 }
@@ -216,15 +238,6 @@ func WithoutHandlerInstrumentation() Option {
 	return Option{apply: func(c *config) { c.noHandlerInstr = true }}
 }
 
-// WithoutLogCorrelation stops this module re-wrapping slog.Default's handler
-// at boot. By default it wraps it with log.Handler and LogAttrs, so every
-// record emitted inside a request carries correlation_id, trace_id and
-// span_id with no per-request work at all. Set this when main builds its own
-// log.Handler.
-func WithoutLogCorrelation() Option {
-	return Option{apply: func(c *config) { c.noLogCorrelation = true }}
-}
-
 // newTelemetry builds the providers and registers the flush. It returns a nil
 // app.Telemetry when no endpoint is configured — app.WithTelemetry's
 // typed-nil probe and boot's own nil check both treat that as "uninstrumented",
@@ -233,15 +246,11 @@ func newTelemetry(cfg config, lc lifecycle.Lifecycle) (app.Telemetry, error) {
 	if cfg.sampleRatio < 0 || cfg.sampleRatio > 1 {
 		return nil, errBadSampleRatio(cfg.sampleRatio)
 	}
-	// Propagation and log correlation are free and useful even with no
-	// exporter: a service behind a mesh still continues an inbound trace, and
-	// still writes the trace ID on its log lines.
+	// Propagation is free and useful even with no exporter: a service behind
+	// a mesh still continues an inbound trace.
 	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(
 		propagation.TraceContext{}, propagation.Baggage{},
 	))
-	if !cfg.noLogCorrelation {
-		slog.SetDefault(slog.New(log.Handler(slog.Default().Handler(), LogAttrs())))
-	}
 
 	if cfg.endpoint == "" {
 		return nil, nil
@@ -250,8 +259,16 @@ func newTelemetry(cfg config, lc lifecycle.Lifecycle) (app.Telemetry, error) {
 		return nil, errNoServiceName()
 	}
 
-	res, err := resource.Merge(resource.Default(), resource.NewWithAttributes(
-		semconv.SchemaURL,
+	// NewSchemaless, NOT NewWithAttributes(semconv.SchemaURL, ...).
+	//
+	// resource.Merge refuses two resources with different, non-empty schema
+	// URLs — and resource.Default() carries whichever semconv version the SDK
+	// was built against. Pinning our own semconv import to match it made the
+	// module unbootable the moment the two drifted, which is exactly what
+	// happened: every configuration with an OTLPEndpoint failed with
+	// "conflicting Schema URL". A schemaless resource merges with any SDK
+	// version, so an SDK bump can never reintroduce it.
+	res, err := resource.Merge(resource.Default(), resource.NewSchemaless(
 		append([]attribute.KeyValue{
 			semconv.ServiceName(cfg.serviceName),
 			semconv.ServiceVersion(cfg.serviceVersion),
@@ -322,12 +339,28 @@ func (t *telemetry) start(ctx context.Context, res *resource.Resource) error {
 		}
 	}
 
-	slog.Info("telemetry exporting",
+	// "configured", not "exporting": the OTLP exporter does not dial at
+	// construction, so at this point nothing has reached the collector and
+	// nothing has proved it can. Claiming otherwise at INFO is a line that
+	// reads as confirmation and is not one — a service pointed at a blackhole
+	// logged "telemetry exporting" and then failed silently for twelve
+	// seconds.
+	slog.Info("telemetry configured",
 		"module", ModuleName,
 		"endpoint", t.cfg.endpoint,
 		"service", t.cfg.serviceName,
 		"sample_ratio", t.cfg.sampleRatio,
-		"metrics", !t.cfg.noMetrics)
+		"metrics", !t.cfg.noMetrics,
+		"note", "the exporter connects lazily; export failures surface as warnings")
+
+	// OTel reports export failures through a global handler that writes
+	// unstructured lines to stderr at no particular level. Route them into
+	// this service's own log, at WARN, with the module — otherwise a
+	// collector outage is invisible to anything that alerts on structured
+	// logs.
+	otel.SetErrorHandler(otel.ErrorHandlerFunc(func(err error) {
+		slog.Warn("telemetry export failed", "module", ModuleName, "error", err)
+	}))
 	return nil
 }
 
@@ -337,18 +370,28 @@ func (t *telemetry) start(ctx context.Context, res *resource.Resource) error {
 // A flush that exceeds ExportTimeout logs and returns nil: a saturated
 // collector must not hold a pod in Terminating past its grace period.
 func (t *telemetry) stop(ctx context.Context) error {
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), t.cfg.exportTimeout)
-	defer cancel()
+	base := context.WithoutCancel(ctx)
 
-	if t.meterProvider != nil {
-		if err := t.meterProvider.Shutdown(ctx); err != nil {
-			slog.Warn("telemetry: metric flush did not complete", "module", ModuleName, "error", err)
-		}
-	}
+	// TRACES FIRST, and each flush gets its OWN ExportTimeout budget.
+	//
+	// One shared context meant metrics spent the whole budget against a dead
+	// collector and traces inherited an already-expired deadline — reporting
+	// a bare "context deadline exceeded" without ever having tried. Traces
+	// are the signal worth having at shutdown, so they go first and they get
+	// their own clock.
 	if t.tracerProvider != nil {
-		if err := t.tracerProvider.Shutdown(ctx); err != nil {
+		tctx, cancel := context.WithTimeout(base, t.cfg.exportTimeout)
+		if err := t.tracerProvider.Shutdown(tctx); err != nil {
 			slog.Warn("telemetry: span flush did not complete", "module", ModuleName, "error", err)
 		}
+		cancel()
+	}
+	if t.meterProvider != nil {
+		mctx, cancel := context.WithTimeout(base, t.cfg.exportTimeout)
+		if err := t.meterProvider.Shutdown(mctx); err != nil {
+			slog.Warn("telemetry: metric flush did not complete", "module", ModuleName, "error", err)
+		}
+		cancel()
 	}
 	return nil
 }

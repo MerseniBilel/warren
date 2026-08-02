@@ -72,6 +72,39 @@ type Telemetry interface {
 	Extract(ctx context.Context, get func(key string) string) context.Context
 }
 
+// RequestInfo describes one inbound request to the telemetry seam, in terms
+// core can express: no net/http type, no gRPC type, no OTel type.
+//
+// Route is the PATTERN — "/users/{id}", not "/users/42". It is the field a
+// dashboard groups by and an alert fires on, and the only one whose
+// cardinality is bounded by the size of the route table rather than by
+// traffic.
+type RequestInfo struct {
+	Protocol string // "http", "grpc"
+	Method   string // "POST", or the gRPC full method
+	Route    string // the matched pattern, NOT the concrete path
+	Path     string // the concrete path, for a span attribute only
+	Scheme   string // "http", "https"
+	Host     string
+}
+
+// RequestSpan is the optional interface a Telemetry implements to open a
+// transport-level SERVER span around a whole request — decode, validation,
+// the handler, and encode.
+//
+// It is what makes a trace answer "which route", "which status" and "how much
+// of the latency was transport" rather than only "which handler was slow".
+// The handler span nested inside it is where the business time is; this one
+// is where the request is.
+//
+// Optional because the seam must work for a Telemetry that only implements
+// the two required methods: an adapter checks and falls back to no span.
+type RequestSpan interface {
+	// ServerSpan opens the span and returns the derived context and the
+	// function that ends it, recording the response status and the error.
+	ServerSpan(ctx context.Context, info RequestInfo) (context.Context, func(status int, err error))
+}
+
 // HandlerInstrumentation is the optional interface a Telemetry implements to
 // decline boot-time composition of Traced and Metered around every route.
 //

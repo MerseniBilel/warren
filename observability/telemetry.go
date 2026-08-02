@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"time"
 
 	"go.opentelemetry.io/otel"
@@ -13,6 +14,7 @@ import (
 	"go.opentelemetry.io/otel/metric"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	semconv "go.opentelemetry.io/otel/semconv/v1.41.0"
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/MerseniBilel/warren/app"
@@ -37,7 +39,58 @@ type telemetry struct {
 var (
 	_ app.Telemetry              = (*telemetry)(nil)
 	_ app.HandlerInstrumentation = (*telemetry)(nil)
+	_ app.RequestSpan            = (*telemetry)(nil)
 )
+
+// ServerSpan opens the transport-level SERVER span around a whole request.
+//
+// SpanKind Server is what makes a trace UI render this service as an entry
+// point rather than an internal step, and the http.* attributes are what let
+// you filter by route and by status. Without them a trace answers only
+// "which handler was slow" — the handler span nested inside this one — and
+// not "which route", "which status", or "how much of the latency was
+// transport".
+//
+// The span is named "<METHOD> <route>", the OTel HTTP server convention, and
+// route is the matched PATTERN, so cardinality is bounded by the size of the
+// route table rather than by traffic.
+func (t *telemetry) ServerSpan(ctx context.Context, info app.RequestInfo) (context.Context, func(int, error)) {
+	if t.tracer == nil {
+		return ctx, func(int, error) {}
+	}
+	name := info.Method
+	if info.Route != "" {
+		name += " " + info.Route
+	}
+	attrs := []attribute.KeyValue{
+		semconv.HTTPRequestMethodKey.String(info.Method),
+		semconv.URLScheme(info.Scheme),
+		semconv.URLPath(info.Path),
+	}
+	if info.Route != "" {
+		attrs = append(attrs, semconv.HTTPRoute(info.Route))
+	}
+	if info.Host != "" {
+		attrs = append(attrs, semconv.ServerAddress(info.Host))
+	}
+	ctx, span := t.tracer.Start(ctx, name,
+		trace.WithSpanKind(trace.SpanKindServer),
+		trace.WithAttributes(attrs...))
+
+	return ctx, func(status int, err error) {
+		span.SetAttributes(semconv.HTTPResponseStatusCode(status))
+		// Only 5xx marks the SPAN as failed. A 404 or a 409 is the server
+		// working correctly, and marking those Error makes every error-rate
+		// dashboard read the client's mistakes as the service's.
+		if status >= 500 {
+			span.SetStatus(codes.Error, http.StatusText(status))
+		}
+		if err != nil {
+			span.RecordError(err)
+		}
+		span.End()
+	}
+}
 
 // InstrumentHandlers reports whether boot composes Traced and Metered around
 // every route — false when WithoutHandlerInstrumentation was passed. Trace

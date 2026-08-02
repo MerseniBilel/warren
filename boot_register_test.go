@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/MerseniBilel/warren"
 	"github.com/MerseniBilel/warren/app"
@@ -301,5 +302,80 @@ func TestControllerUnderProvidersFailsTheBoot(t *testing.T) {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("diagnostic must contain %q:\n%s", want, err)
 		}
+	}
+}
+
+// telemetryStub registers a flush hook from its constructor, exactly as
+// warren/observability does.
+type telemetryStub struct{}
+
+func (telemetryStub) Span(ctx context.Context, _ string) (context.Context, func(error)) {
+	return ctx, func(error) {}
+}
+func (telemetryStub) Record(string, time.Duration, error)             {}
+func (telemetryStub) Inject(context.Context, func(key, value string)) {}
+func (telemetryStub) Extract(ctx context.Context, _ func(string) string) context.Context {
+	return ctx
+}
+
+// The telemetry flush must unwind LAST — after servers stop, after consumers
+// drain, after pools close — because the spans emitted while everything else
+// shuts down are the ones nobody can reproduce.
+//
+// This was documented as a property of listing observability.Module first in
+// warren.New, and it was not true: the hook was appended when the provider
+// was resolved, which happened after every module's declared hooks, so the
+// flush ran BEFORE them and argument order changed nothing. Found by
+// field-testing, 2026-08-02. It is now a property of the boot phase, so it
+// cannot be got wrong — and this test is what says so.
+func TestTelemetryFlushesLastWhereverItIsListed(t *testing.T) {
+	for _, listedFirst := range []bool{true, false} {
+		t.Run(map[bool]string{true: "listed first", false: "listed last"}[listedFirst], func(t *testing.T) {
+			var mu sync.Mutex
+			var order []string
+			mark := func(s string) func(context.Context) error {
+				return func(context.Context) error {
+					mu.Lock()
+					order = append(order, s)
+					mu.Unlock()
+					return nil
+				}
+			}
+
+			telemetry := warren.NewModule("telemetry",
+				warren.Providers(func(lc lifecycle.Lifecycle) app.Telemetry {
+					lc.Append(lifecycle.Hook{Name: "telemetry", OnStop: mark("telemetry-flush")})
+					return telemetryStub{}
+				}),
+				warren.Exports[app.Telemetry](),
+			)
+			// A domain module whose OnStop stands in for closing a pool.
+			domain := warren.NewModule("greeter",
+				warren.Controllers(func() *echoController { return &echoController{} }),
+				warren.Providers(func(tbl *transport.Table, lc lifecycle.Lifecycle) *tableReader {
+					return newTableReader(tbl, lc, new([]string))
+				}),
+				warren.Eager[*tableReader](),
+				warren.OnStop(mark("pool-close")),
+			)
+
+			mods := []warren.Module{telemetry, domain}
+			if !listedFirst {
+				mods = []warren.Module{domain, telemetry}
+			}
+			a := warren.New(mods...)
+			if err := a.Start(context.Background()); err != nil {
+				t.Fatalf("Start: %v", err)
+			}
+			if err := a.Stop(context.Background()); err != nil {
+				t.Fatalf("Stop: %v", err)
+			}
+
+			mu.Lock()
+			defer mu.Unlock()
+			if len(order) != 2 || order[0] != "pool-close" || order[1] != "telemetry-flush" {
+				t.Errorf("stop order = %v, want [pool-close telemetry-flush] — the flush must be last", order)
+			}
+		})
 	}
 }

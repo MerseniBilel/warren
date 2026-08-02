@@ -248,6 +248,38 @@ func (a *App) Start(ctx context.Context) error {
 		return err
 	}
 
+	// Step 3b — resolve the telemetry BEFORE anything else is instantiated.
+	//
+	// Two things depend on it happening here. Step 5 composes app.Traced and
+	// app.Metered into every route closure, so the binding must exist by
+	// then. And a telemetry provider registers its flush hook from its
+	// constructor — resolving it first means that hook is appended FIRST, so
+	// it unwinds LAST: after the servers stop, after the consumers drain,
+	// after the pools close. The spans emitted while everything else shuts
+	// down are the ones nobody can reproduce, and they are only captured if
+	// the exporter is still alive to take them.
+	//
+	// It is a scan over module SCOPES, not the root: a module's providers are
+	// private to it, so an exported app.Telemetry lives in the exporting
+	// module's scope. Where the user listed that module makes no difference —
+	// the ordering is a property of this phase, not of argument order, which
+	// is exactly why it cannot be got wrong.
+	a.mu.Lock()
+	telemetry := a.telemetry
+	a.mu.Unlock()
+	if telemetry == nil {
+		for _, m := range ordered {
+			v, err := resolveDynamic(scopes[m.name], telemetryType)
+			if err != nil {
+				continue
+			}
+			if t, ok := v.(app.Telemetry); ok && t != nil {
+				telemetry = t
+				break
+			}
+		}
+	}
+
 	// Step 4 — instantiate each module's entry points in dependency order
 	// (singletons materialise topologically behind them), KEEPING the values:
 	// step 5 registers them, and a discarded controller can register nothing.
@@ -300,29 +332,7 @@ func (a *App) Start(ctx context.Context) error {
 	// step 2. Every registration problem is reported together.
 	a.mu.Lock()
 	validator := a.validator
-	telemetry := a.telemetry
 	a.mu.Unlock()
-	// A service that lists observability.Module exports an app.Telemetry;
-	// resolving it here is what makes "one import instruments every handler"
-	// true without the user decorating anything.
-	//
-	// The scan is over module SCOPES, not the root: a module's providers are
-	// private to it, so an exported app.Telemetry lives in the exporting
-	// module's scope and in those that import it. The first that resolves
-	// wins, and they are all the same instance. Boot-time reflection, which
-	// invariant 7 is explicitly not about.
-	if telemetry == nil {
-		for _, m := range ordered {
-			v, err := resolveDynamic(scopes[m.name], telemetryType)
-			if err != nil {
-				continue
-			}
-			if t, ok := v.(app.Telemetry); ok && t != nil {
-				telemetry = t
-				break
-			}
-		}
-	}
 	var bopts []transport.BuilderOption
 	if validator != nil {
 		bopts = append(bopts, transport.WithValidator(validator))

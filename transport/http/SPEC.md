@@ -682,7 +682,7 @@ the service's — a downstream auth failure is `UNAVAILABLE`.
 Rule 4 of the spec process: where the code had to differ, the spec is
 corrected in the same change rather than later.
 
-**1. The allocation budget is 18, not 16.** The 16 was an estimate made before
+**1. The allocation budget is 17, asserted at 18 — not the 16 the spec estimated.** The 16 was an estimate made before
 the code existed. Measured on go1.26.3/darwin-arm64, with the breakdown
 committed in `TestAllocations`:
 
@@ -691,7 +691,7 @@ committed in `TestAllocations`:
 | `net/http.ServeMux` dispatch, one path wildcard | 2 |
 | edge ring — ID string, response-header slice, correlation context value, and the `http.Request` clone `r.WithContext` makes so user middleware sees the ID | 6 |
 | typed path — of which ~7 are `encoding/json`'s decoder | 10 |
-| **total** | **18** |
+| **total** | **17** (budget asserted at 18) |
 
 The same handler called directly allocates **0**, and `BenchmarkHandlerDirect`
 prints it beside `BenchmarkRequest` so the gap is never an adjective.
