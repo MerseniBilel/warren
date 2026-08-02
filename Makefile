@@ -1,7 +1,7 @@
 # Warren — multi-module repository. `go test ./...` from the root tests one
 # module and exits zero (CLAUDE.md); every target iterates MODULES explicitly.
 # Adapter modules are appended here as they are created.
-MODULES := . cli transport/http
+MODULES := . cli transport/http persistence/postgres
 
 .PHONY: ci fmt vet lint invariants test bench workspace
 
@@ -11,10 +11,13 @@ ci: workspace fmt vet lint invariants test
 # It is GENERATED, never committed: a committed replace or workspace breaks
 # `go get` for users, which is invariant 8. Regenerating is idempotent, so
 # every target that compiles depends on it.
+# NB: `go work init` only — never `go work sync`. Sync writes the workspace's
+# resolved versions BACK into every module's go.mod, which quietly added an
+# indirect testify require to the CORE module. Invariant 1 is about direct
+# dependencies, so the check passed and the contamination would have shipped.
 workspace:
 	@rm -f go.work go.work.sum
 	@go work init $(MODULES)
-	@go work sync
 
 fmt:
 	@for m in $(MODULES); do \

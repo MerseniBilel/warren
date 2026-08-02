@@ -177,9 +177,16 @@ func InTransaction(ctx context.Context) bool {
 	return ok
 }
 
-// errNestedOptions is returned when a nested Do tries to configure the
-// transaction it is joining.
-func errNestedOptions() error {
+// ErrNestedOptions is the error a driver returns when a nested Do is passed
+// an Option. It is exported because every driver must return the SAME error
+// for it — a driver in another module that re-implements the message drifts
+// from this one, and the two then disagree in a way only a user notices.
+//
+// The refusal is not fastidiousness. On a SQL database isolation and
+// read-only are properties of a transaction's first statement, so a nested
+// Do cannot honour an Option even in principle; silently ignoring one would
+// mean a handler asking for Serializable and quietly getting Read Committed.
+func ErrNestedOptions() error {
 	return errors.Invalid("transaction options",
 		stderrString("a nested Do cannot configure the transaction it joins — move ReadOnly/Isolation to the outermost Do"))
 }

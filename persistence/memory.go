@@ -57,7 +57,7 @@ type staging struct {
 func (u *MemoryUnitOfWork) Do(ctx context.Context, fn func(context.Context) error, opts ...Option) error {
 	if s, ok := ctx.Value(stagingKey{}).(*staging); ok {
 		if len(opts) > 0 {
-			return errNestedOptions()
+			return ErrNestedOptions()
 		}
 		_ = s
 		return fn(ctx)

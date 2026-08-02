@@ -82,7 +82,7 @@ Warren gets this via **scoped child containers**:
         ┌─────────────────┼─────────────────┐
         ▼                 ▼                 ▼
    platform scope    user scope        billing scope
-   ├ *pgxpool.Pool   ├ *UserService    ├ *InvoiceService
+   ├ postgres.DB     ├ *UserService    ├ *InvoiceService
    ├ broker.Conn     ├ UserRepository  ├ InvoiceRepo
    └ exports: both   └ exports:        └ imports: platform, user
                        UserRepository        ↳ sees UserRepository
@@ -201,7 +201,7 @@ warren/openapi/                         MODULE  —
 warren/broker/kafka/                    MODULE  twmb/franz-go
 warren/broker/rabbitmq/                 MODULE  rabbitmq/amqp091-go
 warren/broker/nats/                     MODULE  nats-io/nats.go
-warren/persistence/postgres/            MODULE  jackc/pgx + pressly/goose
+warren/persistence/postgres/            MODULE  jackc/pgx
 warren/persistence/mongo/               MODULE  mongo-driver
 warren/persistence/redis/               MODULE  redis/go-redis
 warren/observability/                   MODULE  OpenTelemetry SDK
@@ -219,7 +219,7 @@ warren/cli/                             MODULE  cobra                   (build-t
 | Service profile | Direct deps in the user's `go.mod` |
 |---|---|
 | HTTP only | `warren`, `warren/transport/http` — two modules, zero third party |
-| + Postgres | `+ warren/persistence/postgres`, `pgx`, `goose` |
+| + Postgres | `+ warren/persistence/postgres`, `pgx` — two modules, one third party |
 | + gRPC + Kafka + OTel | `+ grpc`, `franz-go`, OTel SDK + exporter |
 
 If a hello-world service's `go.sum` looks like a Java project's, the multi-module split has failed.
@@ -577,7 +577,7 @@ warren.New(
 )
 
 // Any provider now takes Config as a dependency:
-func NewUserRepository(cfg Config, pool *pgxpool.Pool) domain.UserRepository { ... }
+func NewUserRepository(cfg Config, db postgres.DB) domain.UserRepository { ... }
 ```
 
 Validation runs at boot. A missing `WARREN_POSTGRES_DSN` is a startup failure with the field path named, not a nil-pointer panic on the first query.
@@ -1486,9 +1486,13 @@ wants a durable store.
 
 ### 6.1 `warren/persistence/postgres`
 
-- **Wraps** `jackc/pgx/v5`, `pressly/goose` · **Mode** Wrap
+- **Wraps** `jackc/pgx/v5` · **Mode** Wrap
 
-**Provides:** `*pgxpool.Pool`, a `UnitOfWork` implementation, transaction-context propagation, outbox table + writer, a health check, and migration running at boot (optional).
+**Provides** (implemented 2026-08-02): `postgres.DB` — a driver-free query handle repositories inject — a `UnitOfWork` implementation, transaction-context propagation, the outbox store with `LISTEN`/`NOTIFY`, an advisory-lock elector, a durable inbox store, and a ping health check.
+
+**It does NOT provide `*pgxpool.Pool`, and it never migrates at boot.** The pool reaches user code only through the named escape hatch `postgres.Raw(func(ctx, *pgxpool.Pool) error) Option`; a raw handle as the default path is what Wrap mode exists to prevent. Migrating from a lifecycle hook races every replica of a rolling deploy, applies DDL the still-serving old replicas were not written against, and turns one bad file into a simultaneous crash-loop — so `postgres.Schema` (plain SQL, goose file format) and `postgres.Migrate` are a deploy step, and there is no option to make them a boot step.
+
+The outbox, inbox and elector are OPTIONS of `Module` — `WithOutbox()`, `WithInbox()`, `WithAdvisoryLock()` — not sibling modules: they need the pool, and a sibling module cannot see another module's providers.
 
 ```go
 postgres.Module(
@@ -1674,8 +1678,8 @@ All generators support `--dry-run` and `--force`.
 | Kafka | `twmb/franz-go` | Wrap | pure Go, Kafka ≤4.2+, transactions |
 | RabbitMQ | `rabbitmq/amqp091-go` | Wrap | official successor to streadway/amqp |
 | NATS | `nats-io/nats.go` | Wrap | JetStream |
-| Postgres | `jackc/pgx/v5` | Wrap | no ORM, by design |
-| Migrations | `pressly/goose` | Vendor | |
+| Postgres | `jackc/pgx/v5` | Wrap | no ORM, by design. **Audited 2026-08-02**: v5.10.0, MIT, 14 087 stars, pushed 2026-08-01, not archived. Six modules compiled in — `pgpassfile`, `pgservicefile`, `pgx`, `puddle`, `x/sync`, `x/text` — measured with `go list -deps`, not read off a README. One pgx type in one exported signature: `postgres.Raw` |
+| Migrations | **none — Build** | Build | **`pressly/goose` REJECTED 2026-08-02.** Healthy (MIT, v3.27.3 2026-07-22, 11.3k stars) and only 5 modules as a library import — but once migrating at boot is banned it buys nothing an ordered applier and a version table do not, and against goal 2 a contributor debugging a migration reads 100 lines of ours instead of goose's dialect/locker/provider layering. `postgres.Schema` ships in goose's FILE format, so a project already running goose, atlas or dbmate applies it with one line |
 | Redis | `redis/go-redis/v9` | Wrap | cache + lock |
 | Telemetry | OpenTelemetry Go | Wrap | wiring only |
 | Auth | `golang-jwt/jwt/v5`, `coreos/go-oidc` | Wrap | |

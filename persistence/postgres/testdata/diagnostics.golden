@@ -1,0 +1,105 @@
+── no DSN
+✗ postgres has no connection string
+
+    postgres.Module() was declared without postgres.DSN(...).
+
+  Give it one, usually from config:
+
+      postgres.Module(postgres.DSN(cfg.DatabaseURL))
+
+  Either form works:
+      postgres://user:pass@localhost:5432/app?sslmode=disable
+      host=localhost user=app dbname=app sslmode=disable
+
+── bad DSN
+✗ postgres connection string is not valid
+
+    postgres://app:xxxxx@:not-a-port/app
+    context deadline exceeded
+
+  This is a parse failure, not a connection failure — nothing was
+  dialled. Check the scheme, the port, and sslmode.
+
+── cannot connect
+✗ cannot connect to postgres
+
+    postgres://app:xxxxx@db:5432/app
+    context deadline exceeded
+
+  The connection string parsed, so this is the database, the network,
+  or the credentials. Check that the server is reachable from here and
+  that the role exists:
+
+      psql 'postgres://app:xxxxx@db:5432/app' -c 'select 1'
+
+── not started
+✗ postgres pool used before it was started
+
+    The pool is opened by this module's OnStart hook, at boot step 6.
+
+  Something reached the database during CONSTRUCTION instead. A
+  constructor wires; it does not acquire. Move the query into an
+  OnStart hook of your own, which runs after this one.
+
+── write outside a transaction
+✗ save user outside a transaction
+
+    This write was attempted with no persistence.UnitOfWork in scope.
+
+  It would autocommit — and the events the aggregate raised would stay
+  pending on an object about to go out of scope, and be lost. Silently:
+  no error, no outbox row, no way to find out afterwards.
+
+  Wrap the use case:
+
+      func (h *handler) Handle(ctx context.Context, cmd Cmd) (Res, error) {
+          return res, h.uow.Do(ctx, func(ctx context.Context) error {
+              return h.repo.Save(ctx, aggregate)
+          })
+      }
+
+  or declare the handler with app.Transactional, which does it for you.
+
+  Reads need no transaction; only writes are refused.
+
+── table missing
+✗ table "warren_outbox" does not exist
+
+    The warren/persistence/postgres module started, but its table has not been created.
+
+  Warren never migrates at boot — under a rolling deploy that races
+  every replica and applies DDL the still-serving old ones were not
+  written against. Apply the schema as a DEPLOY STEP instead.
+
+  Either run Warren's own applier from a small main, or a deploy job:
+
+      postgres.Migrate(ctx, os.Getenv("DATABASE_URL"), postgres.Schema)
+
+  or point the migration tool you already use at postgres.Schema — the
+  files are plain SQL in goose's format, so goose, atlas and dbmate all
+  read them unchanged.
+
+── no migrations
+✗ no migrations found
+
+    The filesystem passed to Migrate contains no .sql files.
+
+  Pass postgres.Schema for Warren's own tables, or an fs.FS of your
+  own numbered files — 00001_name.sql, applied in name order.
+
+── empty migration
+✗ migration 00003_add_index.sql has no statements
+
+    Its "-- +goose Up" section is empty.
+
+  A file that applies nothing would still be recorded as applied, and
+  the real statements would never run. Write the section, or delete
+  the file.
+
+── migration failed
+✗ migration 00003_add_index.sql failed
+
+    context deadline exceeded
+
+  It was rolled back and NOT recorded, so fixing the file and running
+  again resumes from here — the migrations before it stay applied.

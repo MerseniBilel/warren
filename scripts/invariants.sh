@@ -16,6 +16,22 @@ if [ -n "$direct" ]; then
 	fail=1
 fi
 
+# Invariant 1, second half — and no INDIRECT requires either.
+#
+# The check above filters "// indirect", which is how `go work sync` quietly
+# added an indirect testify require to the core go.mod on 2026-08-02 and got
+# a green run. An indirect require is still a line in the core module's
+# dependency graph, and today the correct count is zero: dig brings nothing
+# of its own into go.mod. If that ever changes legitimately, change this
+# check deliberately rather than widening the filter.
+indirect=$(grep -c '// indirect' go.mod || true)
+if [ "$indirect" != "0" ]; then
+	echo "invariant 1: core go.mod has $indirect indirect require(s); it must have none:"
+	grep '// indirect' go.mod
+	echo "  If this came from 'go work sync', that command must not be run — see the Makefile."
+	fail=1
+fi
+
 # Invariant 2 — dig is imported by warren/di alone.
 offenders=$(grep -rl --include='*.go' 'go.uber.org/dig' . | grep -v '^\./di/' || true)
 if [ -n "$offenders" ]; then
