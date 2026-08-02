@@ -1009,43 +1009,78 @@ over loss, never silently).
 
 ### 3.5 `warren/transport`
 
-- **Mode** Build (ports only)
+- **Mode** Build (port) · **One `Register`, three protocols.**
+
+**v0.1 (Go 1.26).** Generic methods on concrete types are a Go 1.27 feature,
+so registration is generic **free functions** — warren.md §9's recorded
+"Fix A" — with the names and argument order the 1.27 methods will have:
 
 ```go
-type Registrar interface {
-    HTTP() HTTPRegistrar
-    GRPC() GRPCRegistrar
-    Events() EventRegistrar
-}
+type Registrar interface{ /* sealed: transport holds the only implementation */ }
+type Controller interface{ Register(r Registrar) }
 
-type Controller interface {
-    Register(Registrar)
-}
+func Get[Req, Res any](r Registrar, pattern string, h app.Handler[Req, Res], opts ...RouteOption)
+func Post[Req, Res any](...)   // default success 201; Delete 204; the rest 200
+func Method[Req, Res any](r Registrar, fullMethod string, h app.Handler[Req, Res], opts ...RouteOption)
+func OnEvent[Req, Res any](r Registrar, topic string, h app.Handler[Req, Res], opts ...broker.SubscribeOption)
+
+func Status(code int) RouteOption
+func Guard(p app.AuthorizationPolicy) RouteOption   // runs BEFORE decode
+func Named(name string) RouteOption
+
+type Invoker func(ctx context.Context, raw []byte) ([]byte, error)
+type Codec interface{ Name() string; Decode([]byte, any) error; Encode(any) ([]byte, error) }
+func JSON() Codec
+
+type HTTPRoute struct { Verb, Pattern, Name string; Success int
+    Guards []app.AuthorizationPolicy; Request, Response reflect.Type
+    Bind func(Codec) Invoker }
+type GRPCRoute struct{ ... }
+type EventRoute struct { Topic, Name string; Options []broker.SubscribeOption
+    Request reflect.Type; Bind func(Codec) broker.MessageHandler }
+
+type Builder struct{ ... }
+func NewBuilder(opts ...BuilderOption) *Builder
+func (b *Builder) For(module string) Registrar
+func (b *Builder) Table() (*Table, error)
+func (t *Table) HTTP() []HTTPRoute; GRPC() []GRPCRoute; Events() []EventRoute
+func (t *Table) Claim(p Protocol, by string); Unserved() error
 ```
 
-**The payoff — one handler, three exposures:**
+A controller registers once and is exposed three ways:
 
 ```go
 func (c *UserController) Register(r transport.Registrar) {
-    r.HTTP().Post("/users", c.register)
-    r.GRPC().Method("user.v1.UserService/Register", c.register)
-    r.Events().On("billing.customer.created", c.register)
-
-    r.HTTP().Get("/users/{id}", c.get)
+    transport.Post(r, "/users", c.register)
+    transport.Method(r, "user.v1.UserService/Register", c.register)
+    transport.OnEvent(r, "billing.customer.created", c.register)
 }
 ```
 
-`c.register` is an `app.Handler[RegisterUser, UserDTO]`. It imports no transport package. Adapters own decode, encode, status mapping, and ack semantics.
+**The registrar is sealed** — an adapter cannot reimplement registration and
+drift from it, so every router decodes, validates, binds parameters, and
+defaults statuses identically. Adapters consume `[]HTTPRoute` instead.
 
-**How this compiles.** `HTTPRegistrar`, `GRPCRegistrar`, and `EventRegistrar`
-are **concrete struct types with generic methods**, not interfaces — Go 1.27
-allows a method on a concrete type to declare its own type parameters, and
-forbids it on interface methods permanently. `Registrar` itself stays an
-interface; its three accessors return the concrete registrars. The registrars
-hold no driver type — they erase each handler into the §1.4 `route` closure,
-and the adapter behind them serves it. This is the contracts ring's one
-deliberate concrete exception (§1.1), and it is why the transport layer is not
-built until Go 1.27 ships.
+**`Bind(Codec) Invoker`, not a finished closure**: the gRPC codec is protobuf
+and lives in an adapter module, so a core-built closure could never serve
+gRPC. Handing out a boot-time factory keeps the erasure — the part that needs
+`Req`/`Res` — in core where the type parameters exist, and the serialisation
+in the adapter where the driver is.
+
+**Guards travel as data**, not composed into the closure, so a denial
+precedes the decoder: an unauthorized caller's malformed body is a 403, not a
+400, and unauthenticated input never reaches the JSON decoder.
+
+Registration errors accumulate and surface together from `Table()`; duplicate
+routes and empty patterns fail the boot; `Claim`/`Unserved` fail the boot when
+routes are registered for a protocol nothing serves — a route nobody serves is
+a route that silently 404s in production.
+
+**Honest note on the 1.27 migration:** explicit type arguments are mandatory
+in *both* shapes — Go cannot infer `[Req, Res]` from a concrete handler passed
+where an interface is expected — so §3.5's inference-free call sites are a
+risk to verify when 1.27 ships, not a certainty.
+
 
 ---
 

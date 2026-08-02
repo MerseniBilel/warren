@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | Draft — not approved |
+| **Status** | **Approved and implemented (2026-08-02), v0.1 / Go 1.26 shape** — sealed `Registrar`, generic free functions (`Get`/`Post`/`Put`/`Patch`/`Delete`/`Method`/`OnEvent`), `Builder`, `Table`, the three `*Route` description types, `Codec`, `RouteOption`, and `param:`/`query:` binding all ship in core. On Go 1.27 the free functions become generic methods with the same names and argument order — a mechanical call-site rewrite inside `Register` bodies; `Register`'s own signature never changes. `transport.Module()` and the exported cross-adapter suite wait for the first real adapter. |
 | **Source** | [warren.md §3.5](../warren.md), §1.4, §5.1 |
 | **Module** | core |
 | **Mode** | Build (ports only) |

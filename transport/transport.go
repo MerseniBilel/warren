@@ -1,0 +1,559 @@
+// Package transport is the port through which a controller exposes a use
+// case over HTTP, gRPC, and events. One Register call, three protocols: that
+// is the framework's first claim made concrete.
+//
+// It is boot-time only. Registration happens at boot step 5 and produces a
+// driver-neutral route table of pre-built closures; by the time a request
+// arrives the container is never consulted and nothing is resolved.
+//
+// # Go 1.26 and the shape of registration
+//
+// warren.md §3.5 registers through generic METHODS on concrete registrars —
+// a Go 1.27 feature. Until it ships, registration is generic FREE functions
+// with the same names (Get, Post, Method, OnEvent) and the same argument
+// order, so the migration is a mechanical rewrite of call sites inside
+// Register bodies; Register's own signature never changes. Note that the
+// explicit type arguments are mandatory in both forms: Go cannot infer
+// [Req, Res] from a concrete handler passed where an interface is expected.
+package transport
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"reflect"
+	"runtime"
+	"strings"
+
+	"github.com/MerseniBilel/warren/app"
+	"github.com/MerseniBilel/warren/broker"
+	"github.com/MerseniBilel/warren/errors"
+	"github.com/MerseniBilel/warren/validate"
+)
+
+// Registrar accumulates the routes one controller registers. It is sealed:
+// this package holds the only implementation, so no adapter can reimplement
+// registration and drift from it — every router decodes, validates, binds
+// params, and defaults statuses identically.
+type Registrar interface {
+	record(e entry)
+	moduleName() string
+}
+
+// Controller exposes handlers over transports. Register is called once, at
+// boot step 5, on an already-instantiated controller — never per request.
+type Controller interface {
+	Register(r Registrar)
+}
+
+// Consumer is a Controller that registers event subscriptions. The two names
+// mirror warren.Controllers and warren.Consumers, which differ in lifecycle
+// placement — consumers start before servers and stop after them — not in
+// what may be registered.
+type Consumer = Controller
+
+// Invoker is the route closure: bytes in, bytes out, middleware already
+// composed. The DI container is never consulted inside it.
+type Invoker func(ctx context.Context, raw []byte) ([]byte, error)
+
+// Codec is the edge's serialisation seam. JSON is the default for HTTP and
+// events; the gRPC adapter supplies its own proto codec, which is why a
+// route hands out a Bind(Codec) rather than a finished closure.
+type Codec interface {
+	Name() string
+	Decode(data []byte, v any) error
+	Encode(v any) ([]byte, error)
+}
+
+// JSON returns the standard-library codec.
+func JSON() Codec { return jsonCodec{} }
+
+type jsonCodec struct{}
+
+func (jsonCodec) Name() string                    { return "application/json" }
+func (jsonCodec) Decode(data []byte, v any) error { return json.Unmarshal(data, v) }
+func (jsonCodec) Encode(v any) ([]byte, error)    { return json.Marshal(v) }
+
+// Params carries path and query parameters. The adapter seeds them; the
+// route closure binds them into Req from `param:` and `query:` tags using
+// setters computed at registration.
+type Params interface {
+	Path(name string) (string, bool)
+	Query(name string) (string, bool)
+}
+
+type paramsKey struct{}
+
+// WithParams returns a copy of ctx carrying p.
+func WithParams(ctx context.Context, p Params) context.Context {
+	return context.WithValue(ctx, paramsKey{}, p)
+}
+
+// ParamsFromContext returns the parameters the adapter seeded, or nil.
+func ParamsFromContext(ctx context.Context) Params {
+	p, _ := ctx.Value(paramsKey{}).(Params)
+	return p
+}
+
+// RouteOption configures one route.
+type RouteOption struct{ apply func(*routeConfig) }
+
+type routeConfig struct {
+	status int
+	guards []app.AuthorizationPolicy
+	name   string
+}
+
+// Status sets the success status an HTTP adapter writes. The default is 201
+// for Post and 200 for every other verb.
+func Status(code int) RouteOption {
+	return RouteOption{apply: func(c *routeConfig) { c.status = code }}
+}
+
+// Guard requires the policy to allow the caller BEFORE the request is
+// decoded, so an unauthorized caller's malformed body is a 403 and not a
+// 400, and unauthenticated input never reaches the decoder. Guards travel as
+// data on the route for exactly that reason.
+func Guard(p app.AuthorizationPolicy) RouteOption {
+	return RouteOption{apply: func(c *routeConfig) { c.guards = append(c.guards, p) }}
+}
+
+// Named overrides the "<module>.<handler>" telemetry name.
+func Named(name string) RouteOption {
+	return RouteOption{apply: func(c *routeConfig) { c.name = name }}
+}
+
+// HTTPRoute is one registered HTTP endpoint, described without a driver type.
+type HTTPRoute struct {
+	Verb     string // "GET", "POST", …
+	Pattern  string // "/users/{id}" — net/http 1.22 and chi syntax
+	Name     string // "<module>.<handler>"
+	Success  int
+	Guards   []app.AuthorizationPolicy
+	Request  reflect.Type
+	Response reflect.Type
+	Bind     func(Codec) Invoker
+}
+
+// GRPCRoute is one registered gRPC method.
+type GRPCRoute struct {
+	FullMethod string
+	Name       string
+	Guards     []app.AuthorizationPolicy
+	Request    reflect.Type
+	Response   reflect.Type
+	Bind       func(Codec) Invoker
+}
+
+// EventRoute is one registered subscription. Bind produces a
+// broker.MessageHandler: decode, run, discard the response — the disposition
+// is the consumer chain's.
+type EventRoute struct {
+	Topic   string
+	Name    string
+	Options []broker.SubscribeOption
+	Request reflect.Type
+	Bind    func(Codec) broker.MessageHandler
+}
+
+// Protocol names one of the three exposures.
+type Protocol uint8
+
+const (
+	// ProtocolHTTP is served by warren/transport/http.
+	ProtocolHTTP Protocol = iota + 1
+	// ProtocolGRPC is served by warren/transport/grpc.
+	ProtocolGRPC
+	// ProtocolEvent is served by a broker driver.
+	ProtocolEvent
+)
+
+func (p Protocol) String() string {
+	switch p {
+	case ProtocolHTTP:
+		return "HTTP"
+	case ProtocolGRPC:
+		return "gRPC"
+	case ProtocolEvent:
+		return "event"
+	default:
+		return "unknown"
+	}
+}
+
+// Table is the finished, driver-neutral description of every registration.
+type Table struct {
+	http   []HTTPRoute
+	grpc   []GRPCRoute
+	events []EventRoute
+	claims map[Protocol]string
+}
+
+// HTTP returns the registered HTTP routes.
+func (t *Table) HTTP() []HTTPRoute { return t.http }
+
+// GRPC returns the registered gRPC methods.
+func (t *Table) GRPC() []GRPCRoute { return t.grpc }
+
+// Events returns the registered subscriptions.
+func (t *Table) Events() []EventRoute { return t.events }
+
+// Claim records that an adapter is serving a protocol.
+func (t *Table) Claim(p Protocol, by string) {
+	if t.claims == nil {
+		t.claims = map[Protocol]string{}
+	}
+	t.claims[p] = by
+}
+
+// Unserved reports routes registered for a protocol nothing is serving —
+// three gRPC methods in an application with no gRPC server is detectable at
+// boot, so it fails at boot.
+func (t *Table) Unserved() error {
+	var missing []string
+	if len(t.http) > 0 && t.claims[ProtocolHTTP] == "" {
+		missing = append(missing, fmt.Sprintf("%d HTTP route(s) — add http.Server(...) to warren.New", len(t.http)))
+	}
+	if len(t.grpc) > 0 && t.claims[ProtocolGRPC] == "" {
+		missing = append(missing, fmt.Sprintf("%d gRPC method(s) — add grpc.Server(...) to warren.New", len(t.grpc)))
+	}
+	if len(t.events) > 0 && t.claims[ProtocolEvent] == "" {
+		missing = append(missing, fmt.Sprintf("%d event subscription(s) — add a broker module to warren.New", len(t.events)))
+	}
+	if len(missing) == 0 {
+		return nil
+	}
+	return diagnostic(fmt.Sprintf(
+		"✗ registered routes have no adapter serving them\n\n    %s\n\n"+
+			"  A route nobody serves is a route that silently 404s in production.",
+		strings.Join(missing, "\n    ")))
+}
+
+// BuilderOption configures a Builder.
+type BuilderOption struct{ apply func(*builderConfig) }
+
+type builderConfig struct {
+	validator validate.Validator
+}
+
+// WithValidator sets the validator whose rules are compiled into every route
+// closure. The default is validate.Required().
+func WithValidator(v validate.Validator) BuilderOption {
+	return BuilderOption{apply: func(c *builderConfig) { c.validator = v }}
+}
+
+// Builder is the accumulator boot step 5 drives: it hands each controller a
+// Registrar and freezes the result into a Table.
+type Builder struct {
+	cfg     builderConfig
+	entries []entry
+	errs    []error
+}
+
+// NewBuilder returns a Builder.
+func NewBuilder(opts ...BuilderOption) *Builder {
+	b := &Builder{cfg: builderConfig{validator: validate.Required()}}
+	for _, opt := range opts {
+		opt.apply(&b.cfg)
+	}
+	return b
+}
+
+// For returns the Registrar passed to one module's controllers.
+func (b *Builder) For(module string) Registrar { return &registrar{b: b, module: module} }
+
+// Table freezes the registrations. Every registration problem is reported
+// together, so one boot names them all.
+func (b *Builder) Table() (*Table, error) {
+	t := &Table{claims: map[Protocol]string{}}
+	seenHTTP := map[string]bool{}
+	seenGRPC := map[string]bool{}
+	seenEvent := map[string]bool{}
+
+	for _, e := range b.entries {
+		switch e.protocol {
+		case ProtocolHTTP:
+			key := e.verb + " " + e.pattern
+			if seenHTTP[key] {
+				b.errs = append(b.errs, errDuplicate(key))
+				continue
+			}
+			seenHTTP[key] = true
+			t.http = append(t.http, HTTPRoute{
+				Verb: e.verb, Pattern: e.pattern, Name: e.name, Success: e.status,
+				Guards: e.guards, Request: e.req, Response: e.res, Bind: e.bindInvoker,
+			})
+		case ProtocolGRPC:
+			if seenGRPC[e.pattern] {
+				b.errs = append(b.errs, errDuplicate(e.pattern))
+				continue
+			}
+			seenGRPC[e.pattern] = true
+			t.grpc = append(t.grpc, GRPCRoute{
+				FullMethod: e.pattern, Name: e.name, Guards: e.guards,
+				Request: e.req, Response: e.res, Bind: e.bindInvoker,
+			})
+		case ProtocolEvent:
+			key := e.pattern + " → " + e.name
+			if seenEvent[key] {
+				b.errs = append(b.errs, errDuplicate(key))
+				continue
+			}
+			seenEvent[key] = true
+			t.events = append(t.events, EventRoute{
+				Topic: e.pattern, Name: e.name, Options: e.subOptions,
+				Request: e.req, Bind: e.bindHandler,
+			})
+		}
+	}
+	if len(b.errs) > 0 {
+		return nil, errRegistration(b.errs)
+	}
+	return t, nil
+}
+
+// entry is one registration, protocol-tagged and already type-erased.
+type entry struct {
+	protocol    Protocol
+	verb        string
+	pattern     string
+	name        string
+	status      int
+	guards      []app.AuthorizationPolicy
+	subOptions  []broker.SubscribeOption
+	req, res    reflect.Type
+	bindInvoker func(Codec) Invoker
+	bindHandler func(Codec) broker.MessageHandler
+}
+
+type registrar struct {
+	b      *Builder
+	module string
+}
+
+func (r *registrar) record(e entry)     { r.b.entries = append(r.b.entries, e) }
+func (r *registrar) moduleName() string { return r.module }
+
+func (r *registrar) fail(err error) { r.b.errs = append(r.b.errs, err) }
+
+// Get registers an HTTP GET route.
+func Get[Req, Res any](r Registrar, pattern string, h app.Handler[Req, Res], opts ...RouteOption) {
+	register(r, ProtocolHTTP, "GET", pattern, h, 200, opts...)
+}
+
+// Post registers an HTTP POST route. Its default success status is 201.
+func Post[Req, Res any](r Registrar, pattern string, h app.Handler[Req, Res], opts ...RouteOption) {
+	register(r, ProtocolHTTP, "POST", pattern, h, 201, opts...)
+}
+
+// Put registers an HTTP PUT route.
+func Put[Req, Res any](r Registrar, pattern string, h app.Handler[Req, Res], opts ...RouteOption) {
+	register(r, ProtocolHTTP, "PUT", pattern, h, 200, opts...)
+}
+
+// Patch registers an HTTP PATCH route.
+func Patch[Req, Res any](r Registrar, pattern string, h app.Handler[Req, Res], opts ...RouteOption) {
+	register(r, ProtocolHTTP, "PATCH", pattern, h, 200, opts...)
+}
+
+// Delete registers an HTTP DELETE route.
+func Delete[Req, Res any](r Registrar, pattern string, h app.Handler[Req, Res], opts ...RouteOption) {
+	register(r, ProtocolHTTP, "DELETE", pattern, h, 204, opts...)
+}
+
+// Method registers a gRPC method, named "package.Service/Method".
+func Method[Req, Res any](r Registrar, fullMethod string, h app.Handler[Req, Res], opts ...RouteOption) {
+	register(r, ProtocolGRPC, "", fullMethod, h, 0, opts...)
+}
+
+// OnEvent subscribes a handler to a topic. The options are warren/broker's
+// own per-subscription options, forwarded to broker.Pipeline unchanged.
+func OnEvent[Req, Res any](r Registrar, topic string, h app.Handler[Req, Res], opts ...broker.SubscribeOption) {
+	reg, ok := r.(*registrar)
+	if !ok {
+		panic("transport: OnEvent with a foreign Registrar — the interface is sealed")
+	}
+	if h == nil {
+		panic("transport: OnEvent registered a nil handler for topic " + topic)
+	}
+	if topic == "" {
+		reg.fail(errEmptyPattern("OnEvent"))
+		return
+	}
+	name := handlerName(reg.moduleName(), h)
+	rule, err := planRule[Req](reg.b.cfg.validator)
+	if err != nil {
+		reg.fail(err)
+		return
+	}
+	setters, err := paramSetters(reflect.TypeFor[Req]())
+	if err != nil {
+		reg.fail(err)
+		return
+	}
+	reg.record(entry{
+		protocol:   ProtocolEvent,
+		pattern:    topic,
+		name:       name,
+		subOptions: opts,
+		req:        reflect.TypeFor[Req](),
+		res:        reflect.TypeFor[Res](),
+		bindHandler: func(c Codec) broker.MessageHandler {
+			invoke := buildInvoker(c, h, rule, setters, name)
+			return func(ctx context.Context, msg broker.Message) error {
+				_, err := invoke(ctx, msg.Payload)
+				return err
+			}
+		},
+	})
+}
+
+func register[Req, Res any](r Registrar, p Protocol, verb, pattern string, h app.Handler[Req, Res], defaultStatus int, opts ...RouteOption) {
+	reg, ok := r.(*registrar)
+	if !ok {
+		panic("transport: registration with a foreign Registrar — the interface is sealed")
+	}
+	if h == nil {
+		panic("transport: registered a nil handler for " + verb + " " + pattern)
+	}
+	if pattern == "" {
+		reg.fail(errEmptyPattern(verb))
+		return
+	}
+
+	cfg := routeConfig{status: defaultStatus}
+	for _, opt := range opts {
+		opt.apply(&cfg)
+	}
+	name := cfg.name
+	if name == "" {
+		name = handlerName(reg.moduleName(), h)
+	}
+	rule, err := planRule[Req](reg.b.cfg.validator)
+	if err != nil {
+		reg.fail(err)
+		return
+	}
+	setters, err := paramSetters(reflect.TypeFor[Req]())
+	if err != nil {
+		reg.fail(err)
+		return
+	}
+
+	reg.record(entry{
+		protocol: p,
+		verb:     verb,
+		pattern:  pattern,
+		name:     name,
+		status:   cfg.status,
+		guards:   cfg.guards,
+		req:      reflect.TypeFor[Req](),
+		res:      reflect.TypeFor[Res](),
+		bindInvoker: func(c Codec) Invoker {
+			return buildInvoker(c, h, rule, setters, name)
+		},
+	})
+}
+
+// buildInvoker is the erasure: everything that needs Req and Res happens
+// here, at boot, inside a generic function. What escapes is a closure over
+// bytes.
+func buildInvoker[Req, Res any](c Codec, h app.Handler[Req, Res], rule func(*Req) error, setters []setter, name string) Invoker {
+	return func(ctx context.Context, raw []byte) ([]byte, error) {
+		var req Req
+		if len(raw) > 0 {
+			if err := c.Decode(raw, &req); err != nil {
+				return nil, errors.Invalid("body", err)
+			}
+		}
+		if len(setters) > 0 {
+			if err := bindParams(&req, ParamsFromContext(ctx), setters); err != nil {
+				return nil, err
+			}
+		}
+		if rule != nil {
+			if err := rule(&req); err != nil {
+				return nil, err
+			}
+		}
+		res, err := h.Handle(app.WithHandlerName(ctx, name), req)
+		if err != nil {
+			return nil, err
+		}
+		return c.Encode(res)
+	}
+}
+
+func planRule[Req any](v validate.Validator) (func(*Req) error, error) {
+	if v == nil || reflect.TypeFor[Req]().Kind() != reflect.Struct {
+		return nil, nil
+	}
+	return validate.PlanFor[Req](v)
+}
+
+// handlerName renders "<module>.<handler>" — the telemetry name Traced and
+// Metered read off the context.
+func handlerName[Req, Res any](module string, h app.Handler[Req, Res]) string {
+	name := "handler"
+	if fn, ok := any(h).(app.HandlerFunc[Req, Res]); ok {
+		if f := runtime.FuncForPC(reflect.ValueOf(fn).Pointer()); f != nil {
+			name = shortName(f.Name())
+		}
+	} else {
+		t := reflect.TypeOf(h)
+		for t != nil && t.Kind() == reflect.Pointer {
+			t = t.Elem()
+		}
+		if t != nil && t.Name() != "" {
+			name = t.Name()
+		}
+	}
+	return module + "." + name
+}
+
+func shortName(full string) string {
+	if i := strings.LastIndex(full, "."); i >= 0 {
+		full = full[i+1:]
+	}
+	full = strings.TrimSuffix(full, "-fm")
+	return full
+}
+
+type diagnostic string
+
+func (d diagnostic) Error() string { return string(d) }
+
+func errDuplicate(route string) error {
+	return diagnostic(fmt.Sprintf(
+		"✗ duplicate route\n\n    %s is registered twice.\n\n"+
+			"  One registration would silently shadow the other — remove one, or give\n"+
+			"  them distinct patterns.", route))
+}
+
+func errEmptyPattern(what string) error {
+	return diagnostic(fmt.Sprintf(
+		"✗ empty route pattern\n\n    %s was registered with an empty pattern.\n\n"+
+			"  Give it a path (\"/users\"), a full method name\n"+
+			"  (\"user.v1.UserService/Register\"), or a topic.", what))
+}
+
+func errRegistration(errs []error) error {
+	var b strings.Builder
+	b.WriteString("✗ route registration failed\n")
+	for _, err := range errs {
+		b.WriteString("\n")
+		b.WriteString(indent(err.Error()))
+		b.WriteString("\n")
+	}
+	return diagnostic(strings.TrimRight(b.String(), "\n"))
+}
+
+func indent(s string) string {
+	lines := strings.Split(s, "\n")
+	for i, l := range lines {
+		if l != "" {
+			lines[i] = "  " + l
+		}
+	}
+	return strings.Join(lines, "\n")
+}

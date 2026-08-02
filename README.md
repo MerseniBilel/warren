@@ -103,10 +103,13 @@ contract now.
       *(implemented; §2.6 disposition table one test per code)*
 - [x] `inbox` — dedupe-store port + stdlib memory store *(implemented)*
 
-### Phase 2 — transport (blocked until Go 1.27 ships, expected August 2026)
+### Phase 2 — transport
 
+- [x] `transport` (port) — sealed `Registrar`, generic free functions, route
+      table of pre-built closures *(implemented on Go 1.26 — the "Fix A"
+      shape; the 1.27 method form is a mechanical call-site rewrite)*
 - [ ] Bump toolchain to Go 1.27; verify generic methods compile as designed
-- [ ] `transport` (port) — `Registrar` + three concrete generic registrars
+      *(and that inference works — explicit type arguments are needed today)*
 - [ ] `transport/http` — chi-backed adapter, the HTTP error column
 - [ ] `transport/grpc` — interceptors through the shared chain, the gRPC column
 - [ ] Fallback if 1.27 slips: generic free functions (compiles on 1.26; call
