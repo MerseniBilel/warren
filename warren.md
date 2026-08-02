@@ -245,6 +245,12 @@ func Controllers(...any) ModuleOption
 func Consumers(...any) ModuleOption
 func Exports[T any]() ModuleOption
 func Eager[T any]() ModuleOption       // materialise at boot even if unconsumed
+
+// boot-time substitution — the seam warren/testing is built on
+func Substitute[T any](v T) Substitution  // replace every provider of T
+func Bind[T any](v T) Substitution        // add a root-scope binding
+func (a *App) Substitute(subs ...Substitution) error
+func (m Module) Name() string
 func OnStart(fn func(context.Context) error) ModuleOption
 func OnStop(fn func(context.Context) error) ModuleOption
 ```

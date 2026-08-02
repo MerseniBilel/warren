@@ -22,6 +22,7 @@ import (
 // containers, and its run loop.
 type App struct {
 	modules []Module
+	subs    []Substitution
 
 	mu       sync.Mutex
 	booted   bool
@@ -35,6 +36,19 @@ type App struct {
 // sequence runs in Run or Start.
 func New(modules ...Module) *App {
 	return &App{modules: modules, lc: lifecycle.New()}
+}
+
+// Substitute applies substitutions before boot: Substitute[T] replaces every
+// provider of T, Bind[T] adds one in the root scope. It must be called
+// before Start.
+func (a *App) Substitute(subs ...Substitution) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.booted {
+		return errors.New("warren: Substitute after Start — substitutions are boot-time")
+	}
+	a.subs = append(a.subs, subs...)
+	return nil
 }
 
 // Run boots the application and blocks until SIGINT or SIGTERM, then runs
@@ -81,6 +95,7 @@ func (a *App) Start(ctx context.Context) error {
 
 	// Step 2 — one scope per module; copy in only what imports export.
 	root := di.New()
+	matched := map[reflect.Type]bool{}
 	a.mu.Lock()
 	lc := a.lc
 	a.mu.Unlock()
@@ -107,7 +122,16 @@ func (a *App) Start(ctx context.Context) error {
 			for _, ctor := range group {
 				opts := []di.ProvideOption{di.DeclaredAt(splitSite(m.declared))}
 				exported := false
-				for _, out := range outputsOf(ctor) {
+				outs := outputsOf(ctor)
+				if sub, ok := a.replacementFor(outs); ok {
+					// A substituted provider is replaced wholesale: the fake
+					// is provided instead, and the real constructor never
+					// runs (so its own dependencies need not resolve).
+					ctor = constantProvider(sub.t, sub.value)
+					outs = []reflect.Type{sub.t}
+					matched[sub.t] = true
+				}
+				for _, out := range outs {
 					provided[out] = true
 					exported = exported || slices.Contains(m.exports, out)
 				}
@@ -145,6 +169,21 @@ func (a *App) Start(ctx context.Context) error {
 					return err
 				}
 			}
+		}
+	}
+
+	// Bind substitutions land in the root scope, where every module sees
+	// them; a Substitute that matched no provider is a boot error, because a
+	// fake that was silently ignored is worse than no fake.
+	for _, sub := range a.subs {
+		if sub.replace {
+			if !matched[sub.t] {
+				return errUnmatchedSubstitution(sub.t)
+			}
+			continue
+		}
+		if err := root.Provide(constantProvider(sub.t, sub.value)); err != nil {
+			return err
 		}
 	}
 
@@ -239,6 +278,41 @@ func (a *App) Stop(ctx context.Context) error {
 	lc := a.lc
 	a.mu.Unlock()
 	return lc.Stop(ctx)
+}
+
+// replacementFor reports the substitution matching any of these output
+// types.
+func (a *App) replacementFor(outs []reflect.Type) (Substitution, bool) {
+	for _, sub := range a.subs {
+		if !sub.replace {
+			continue
+		}
+		if slices.Contains(outs, sub.t) {
+			return sub, true
+		}
+	}
+	return Substitution{}, false
+}
+
+// constantProvider builds a func() T returning v, so a substituted value
+// enters the graph as an ordinary provider.
+func constantProvider(t reflect.Type, v any) any {
+	fnType := reflect.FuncOf(nil, []reflect.Type{t}, false)
+	val := reflect.ValueOf(v)
+	return reflect.MakeFunc(fnType, func([]reflect.Value) []reflect.Value {
+		if !val.IsValid() {
+			return []reflect.Value{reflect.Zero(t)}
+		}
+		return []reflect.Value{val}
+	}).Interface()
+}
+
+func errUnmatchedSubstitution(t reflect.Type) error {
+	return diagnostic(fmt.Sprintf(
+		"✗ substitution matched no provider\n\n    Substitute[%s] was applied, but no module in the graph provides %s.\n\n"+
+			"  Check the type — a substitution that silently does nothing is a fake\n"+
+			"  you would trust and never get. Use Bind[%s] to add a binding the\n"+
+			"  graph does not already have.", t, t, t))
 }
 
 // flatten walks the New list and every transitive import into one

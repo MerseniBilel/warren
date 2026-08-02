@@ -146,7 +146,9 @@ contract now.
 - [ ] `validate` — port in core, implementation in a submodule
 - [x] `health` — check registry, liveness/readiness verdicts, root-scope
       binding *(implemented; the routes land with the transport adapters)*
-- [ ] `auth`, `resilience`, `jobs`, `testing`, `openapi`
+- [x] `warren/testing` (`warrentest`) — boot a module with fakes, Invoke by
+      type, AssertPublished, Golden *(implemented; stdlib + core only)*
+- [ ] `auth`, `resilience`, `jobs`, `openapi`
 
 ### Phase 6 — the CLI
 

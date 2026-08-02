@@ -127,6 +127,32 @@ func OnStop(fn func(context.Context) error) ModuleOption {
 	return func(m *Module) { m.onStop = append(m.onStop, fn) }
 }
 
+// Name reports the module's name — the scope App.Invoke addresses and the
+// name diagnostics print.
+func (m Module) Name() string { return m.name }
+
+// Substitution replaces or adds a binding before boot. It is the seam test
+// harnesses use to inject fakes, and main can use it to provide a value it
+// computed itself.
+type Substitution struct {
+	t       reflect.Type
+	value   any
+	replace bool
+}
+
+// Substitute replaces every provider of T with v. An unmatched substitution
+// is a boot error naming T — a typo'd fake is never silently ignored, which
+// is the failure mode that makes test doubles untrustworthy.
+func Substitute[T any](v T) Substitution {
+	return Substitution{t: reflect.TypeFor[T](), value: v, replace: true}
+}
+
+// Bind provides v as T in the root scope, where every module can see it.
+// A conflict with an existing provider is a boot error.
+func Bind[T any](v T) Substitution {
+	return Substitution{t: reflect.TypeFor[T](), value: v}
+}
+
 // callerSite records where the module was really declared, trimmed to the
 // last two path segments the way the diagnostics print sites. Frames inside
 // the framework itself are skipped, so a module FACTORY — config.Module,

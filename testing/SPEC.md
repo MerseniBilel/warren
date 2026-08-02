@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | Draft — not approved |
+| **Status** | **Approved and implemented in part (2026-08-02)** — `NewModuleTest`, `Replace`, `Provide`, `WithModules`, `InModule`, `WithMemoryBroker`, `Invoke`, `Published`, `AssertPublished`, and `Golden` ship, on the kernel seam `warren.Substitute`/`Bind`/`Module.Name`. Package `warrentest` at path `warren/testing`, standard library + core only — no testify, no testcontainers. Container fixtures wait for `warren/testing/containers`, its own module, so Docker never enters this graph. Port-conformance suites live beside their ports (`broker/brokertest`, `persistence.RunContract`), which this spec's open question anticipated. |
 | **Source** | [warren.md §7.5](../warren.md) |
 | **Module** | own module (`github.com/MerseniBilel/warren/testing`) |
 | **Mode** | Vendor |
