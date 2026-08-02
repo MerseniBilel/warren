@@ -117,7 +117,8 @@ contract now.
 - [ ] Outbox/inbox ownership decisions (writer split, leader election, module map)
 - [x] `broker/memory` — in-process driver, default in tests *(implemented;
       passes the exported `broker/brokertest` contract suite)*
-- [ ] `outbox` — writer port + leader-elected relay
+- [x] `outbox` — writer port, relay, elector, memory store *(implemented;
+      the SQL store and advisory-lock elector land with postgres)*
 - [x] `inbox` — dedupe store, on by default *(port + memory store shipped
       with the broker chain)*
 - [ ] `broker/kafka` — franz-go driver *(SASL type decision applied)*

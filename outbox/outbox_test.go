@@ -1,0 +1,338 @@
+package outbox_test
+
+import (
+	"context"
+	stderrors "errors"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/MerseniBilel/warren/broker"
+	"github.com/MerseniBilel/warren/domain"
+	werrors "github.com/MerseniBilel/warren/errors"
+	"github.com/MerseniBilel/warren/outbox"
+)
+
+// --- fixtures --------------------------------------------------------------
+
+type placed struct {
+	Order string
+	Total int
+	At    time.Time
+}
+
+func (p placed) EventName() string     { return "order.placed" }
+func (p placed) OccurredAt() time.Time { return p.At }
+func (p placed) AggregateID() string   { return p.Order }
+
+// capturePublisher records what the relay published; failWith makes every
+// publish fail with that error.
+type capturePublisher struct {
+	mu       sync.Mutex
+	got      map[string][]broker.Message
+	failWith error
+	calls    int
+}
+
+func newCapture() *capturePublisher {
+	return &capturePublisher{got: map[string][]broker.Message{}}
+}
+
+func (p *capturePublisher) Publish(_ context.Context, topic string, msgs ...broker.Message) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.calls++
+	if p.failWith != nil {
+		return p.failWith
+	}
+	p.got[topic] = append(p.got[topic], msgs...)
+	return nil
+}
+
+func (p *capturePublisher) published(topic string) []broker.Message {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]broker.Message(nil), p.got[topic]...)
+}
+
+func (p *capturePublisher) callCount() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.calls
+}
+
+func TestJSONEncoder(t *testing.T) {
+	t.Parallel()
+
+	e := outbox.JSONEncoder()
+	rec, err := e.Encode(placed{Order: "o-1", Total: 500, At: time.Unix(42, 0).UTC()})
+	if err != nil {
+		t.Fatalf("Encode: %v", err)
+	}
+	if rec.Topic != "order.placed" || rec.Message.Type != "order.placed" {
+		t.Errorf("topic/type = %q/%q, want the event name", rec.Topic, rec.Message.Type)
+	}
+	if rec.Message.Key != "o-1" {
+		t.Errorf("Key = %q, want the aggregate id — it is what preserves per-aggregate order through a partitioned broker", rec.Message.Key)
+	}
+	if !rec.Message.OccurredAt.Equal(time.Unix(42, 0).UTC()) {
+		t.Errorf("OccurredAt = %v, want the event's own time", rec.Message.OccurredAt)
+	}
+	if !strings.Contains(string(rec.Message.Payload), `"Total":500`) {
+		t.Errorf("payload = %s, want the concrete event encoded", rec.Message.Payload)
+	}
+}
+
+func TestMemoryStore(t *testing.T) {
+	t.Parallel()
+
+	t.Run("append assigns ids and pending returns insertion order", func(t *testing.T) {
+		t.Parallel()
+		s := outbox.NewMemoryStore()
+		ctx := context.Background()
+		for _, id := range []string{"a", "b", "c"} {
+			if err := s.Append(ctx, outbox.Record{Topic: "t", Message: broker.Message{Key: id}}); err != nil {
+				t.Fatalf("Append: %v", err)
+			}
+		}
+		recs, err := s.Pending(ctx, 10)
+		if err != nil {
+			t.Fatalf("Pending: %v", err)
+		}
+		if len(recs) != 3 {
+			t.Fatalf("pending = %d, want 3", len(recs))
+		}
+		for i, want := range []string{"a", "b", "c"} {
+			if recs[i].Message.Key != want {
+				t.Errorf("position %d = %q, want %q — insertion order is the guarantee", i, recs[i].Message.Key, want)
+			}
+			if recs[i].Message.ID == "" {
+				t.Error("a record with no ID was not assigned one — the inbox dedupes on it")
+			}
+		}
+	})
+
+	t.Run("limit is honoured", func(t *testing.T) {
+		t.Parallel()
+		s := outbox.NewMemoryStore()
+		for range 5 {
+			_ = s.Append(context.Background(), outbox.Record{Topic: "t"})
+		}
+		recs, _ := s.Pending(context.Background(), 2)
+		if len(recs) != 2 {
+			t.Errorf("pending = %d, want the limit of 2", len(recs))
+		}
+	})
+
+	t.Run("published records do not come back", func(t *testing.T) {
+		t.Parallel()
+		s := outbox.NewMemoryStore()
+		ctx := context.Background()
+		_ = s.Append(ctx, outbox.Record{Topic: "t", Message: broker.Message{ID: "one"}})
+		if err := s.MarkPublished(ctx, "one"); err != nil {
+			t.Fatalf("MarkPublished: %v", err)
+		}
+		if recs, _ := s.Pending(ctx, 10); len(recs) != 0 {
+			t.Errorf("pending = %d after publish, want 0", len(recs))
+		}
+	})
+
+	t.Run("parked records do not come back and keep their cause", func(t *testing.T) {
+		t.Parallel()
+		s := outbox.NewMemoryStore()
+		ctx := context.Background()
+		_ = s.Append(ctx, outbox.Record{Topic: "t", Message: broker.Message{ID: "bad"}})
+		if err := s.MarkFailed(ctx, "bad", stderrors.New("message too large")); err != nil {
+			t.Fatalf("MarkFailed: %v", err)
+		}
+		if recs, _ := s.Pending(ctx, 10); len(recs) != 0 {
+			t.Errorf("pending = %d after parking, want 0", len(recs))
+		}
+	})
+
+	t.Run("it implements Waiter so the relay does not poll blindly", func(t *testing.T) {
+		t.Parallel()
+		s := outbox.NewMemoryStore()
+		w, ok := s.(outbox.Waiter)
+		if !ok {
+			t.Fatal("the memory store does not implement Waiter")
+		}
+		woke := make(chan struct{})
+		go func() { w.Wait(context.Background()); close(woke) }()
+		_ = s.Append(context.Background(), outbox.Record{Topic: "t"})
+		select {
+		case <-woke:
+		case <-time.After(5 * time.Second):
+			t.Error("Wait did not return after an Append — appending is the signal")
+		}
+	})
+}
+
+func TestRelayDrains(t *testing.T) {
+	t.Parallel()
+
+	store := outbox.NewMemoryStore()
+	pub := newCapture()
+	ctx := context.Background()
+	for _, id := range []string{"a", "b"} {
+		_ = store.Append(ctx, outbox.Record{Topic: "orders", Message: broker.Message{ID: id, Key: id}})
+	}
+
+	relay := outbox.NewRelay(store, pub)
+	n, err := relay.DrainOnce(ctx)
+	if err != nil {
+		t.Fatalf("DrainOnce: %v", err)
+	}
+	if n != 2 {
+		t.Errorf("drained %d, want 2", n)
+	}
+	got := pub.published("orders")
+	if len(got) != 2 || got[0].ID != "a" || got[1].ID != "b" {
+		t.Errorf("published %v, want a then b in order", got)
+	}
+	// Drained records are marked, so a second drain publishes nothing.
+	if n, _ := relay.DrainOnce(ctx); n != 0 {
+		t.Errorf("second drain published %d, want 0 — published records must not republish", n)
+	}
+}
+
+func TestRelayBatchesConsecutiveTopics(t *testing.T) {
+	t.Parallel()
+
+	store := outbox.NewMemoryStore()
+	pub := newCapture()
+	ctx := context.Background()
+	for _, r := range []outbox.Record{
+		{Topic: "orders", Message: broker.Message{ID: "1"}},
+		{Topic: "orders", Message: broker.Message{ID: "2"}},
+		{Topic: "billing", Message: broker.Message{ID: "3"}},
+	} {
+		_ = store.Append(ctx, r)
+	}
+
+	relay := outbox.NewRelay(store, pub)
+	if _, err := relay.DrainOnce(ctx); err != nil {
+		t.Fatalf("DrainOnce: %v", err)
+	}
+	// Consecutive same-topic records go in one Publish; the topic change
+	// forces a second.
+	if pub.callCount() != 2 {
+		t.Errorf("publish calls = %d, want 2 — consecutive records of one topic batch", pub.callCount())
+	}
+}
+
+func TestRelayFailureDispositions(t *testing.T) {
+	t.Parallel()
+
+	t.Run("a transient failure leaves the record for the next poll", func(t *testing.T) {
+		t.Parallel()
+		store := outbox.NewMemoryStore()
+		pub := newCapture()
+		pub.failWith = werrors.Unavailable("kafka", stderrors.New("no brokers"))
+		ctx := context.Background()
+		_ = store.Append(ctx, outbox.Record{Topic: "t", Message: broker.Message{ID: "1"}})
+
+		relay := outbox.NewRelay(store, pub)
+		if _, err := relay.DrainOnce(ctx); err == nil {
+			t.Fatal("DrainOnce returned nil for a failed publish")
+		}
+		// Still pending: the broker being down is not the record's fault.
+		recs, _ := store.Pending(ctx, 10)
+		if len(recs) != 1 {
+			t.Errorf("pending = %d, want the record left for the next poll", len(recs))
+		}
+	})
+
+	t.Run("a rejection parks the record immediately", func(t *testing.T) {
+		t.Parallel()
+		store := outbox.NewMemoryStore()
+		pub := newCapture()
+		pub.failWith = werrors.Invalid("message", stderrors.New("too large"))
+		ctx := context.Background()
+		_ = store.Append(ctx, outbox.Record{Topic: "t", Message: broker.Message{ID: "1"}})
+		_ = store.Append(ctx, outbox.Record{Topic: "t", Message: broker.Message{ID: "2"}})
+
+		relay := outbox.NewRelay(store, pub)
+		_, _ = relay.DrainOnce(ctx)
+		recs, _ := store.Pending(ctx, 10)
+		if len(recs) != 1 || recs[0].Message.ID != "2" {
+			t.Errorf("pending = %v, want only the record behind the parked one — retrying a deterministic rejection would stall the queue forever", recs)
+		}
+	})
+
+	t.Run("head-of-line: nothing behind a failure is published", func(t *testing.T) {
+		t.Parallel()
+		store := outbox.NewMemoryStore()
+		pub := newCapture()
+		pub.failWith = werrors.Unavailable("kafka", stderrors.New("down"))
+		ctx := context.Background()
+		for _, id := range []string{"1", "2", "3"} {
+			_ = store.Append(ctx, outbox.Record{Topic: "t", Message: broker.Message{ID: id}})
+		}
+		relay := outbox.NewRelay(store, pub)
+		_, _ = relay.DrainOnce(ctx)
+		if pub.callCount() != 1 {
+			t.Errorf("publish calls = %d, want 1 — global order means stopping at the first failure", pub.callCount())
+		}
+	})
+}
+
+func TestStandaloneElector(t *testing.T) {
+	t.Parallel()
+
+	led := false
+	err := outbox.Standalone().Lead(context.Background(), func(context.Context) error {
+		led = true
+		return nil
+	})
+	if err != nil || !led {
+		t.Errorf("Lead = %v, led = %v — the default always leads", err, led)
+	}
+}
+
+// TestEndToEnd is the whole pitch with zero infrastructure: an aggregate
+// raises an event, the unit of work commits state and outbox row together,
+// the relay drains to the broker, and a consumer receives it through the
+// full §3.4 chain.
+func TestEndToEnd(t *testing.T) {
+	t.Parallel()
+
+	store := outbox.NewMemoryStore()
+	pub := newCapture()
+	ctx := context.Background()
+
+	// The unit of work's commit sink writes the drained events as outbox
+	// records — what persistence/postgres will do inside the transaction.
+	enc := outbox.JSONEncoder()
+	write := func(ctx context.Context, events []domain.Event) error {
+		recs := make([]outbox.Record, 0, len(events))
+		for _, e := range events {
+			r, err := enc.Encode(e)
+			if err != nil {
+				return err
+			}
+			recs = append(recs, r)
+		}
+		return store.Append(ctx, recs...)
+	}
+
+	if err := write(ctx, []domain.Event{
+		placed{Order: "o-1", Total: 500, At: time.Unix(1, 0).UTC()},
+	}); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	relay := outbox.NewRelay(store, pub)
+	if _, err := relay.DrainOnce(ctx); err != nil {
+		t.Fatalf("DrainOnce: %v", err)
+	}
+
+	got := pub.published("order.placed")
+	if len(got) != 1 {
+		t.Fatalf("published %d messages, want 1", len(got))
+	}
+	if got[0].Key != "o-1" || got[0].Type != "order.placed" {
+		t.Errorf("message = %+v, want the event's key and type", got[0])
+	}
+}

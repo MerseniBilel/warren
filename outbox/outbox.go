@@ -1,0 +1,445 @@
+// Package outbox implements the transactional outbox: the pattern that makes
+// a state change and the events announcing it atomic without a distributed
+// transaction.
+//
+// A unit of work writes aggregate state and outbox rows in ONE database
+// transaction; a separate relay — a lifecycle participant, leader-elected —
+// drains those rows to the broker afterwards. If the transaction rolls back
+// the rows roll back with it, and if the process dies between commit and
+// publish the rows are still there for the next drain. The honest guarantee
+// is at-least-once publication, which is why the inbox dedupes on
+// Message.ID.
+package outbox
+
+import (
+	"context"
+	"encoding/json"
+	stderrors "errors"
+	"fmt"
+	"strconv"
+	"sync"
+	"time"
+
+	"github.com/MerseniBilel/warren/app"
+	"github.com/MerseniBilel/warren/broker"
+	"github.com/MerseniBilel/warren/domain"
+	"github.com/MerseniBilel/warren/errors"
+)
+
+// Record is one outbox row: a broker.Message plus the topic it publishes to.
+// broker.Message deliberately carries no topic — a subscription's topic is
+// boot-time state — but an outbox row is the one place the topic must travel
+// with the message.
+type Record struct {
+	Topic   string
+	Message broker.Message
+}
+
+// Store is the outbox's one port. Append is the writer: a role the unit of
+// work plays through this method, not a second type. Persistence adapters
+// implement it, because the rows live in their database.
+type Store interface {
+	// Append writes records in the caller's ambient transaction. It opens no
+	// connection of its own: if the transaction rolls back, the records roll
+	// back with it — that atomicity is the entire pattern. A record whose
+	// Message.ID is empty is assigned one by the store, stable across
+	// republishes, which is the key the inbox dedupes on.
+	Append(ctx context.Context, recs ...Record) error
+
+	// Pending returns up to limit undispatched records in insertion order,
+	// parked records excluded.
+	Pending(ctx context.Context, limit int) ([]Record, error)
+
+	// MarkPublished marks records dispatched.
+	MarkPublished(ctx context.Context, ids ...string) error
+
+	// MarkFailed parks a record: kept for inspection, never returned by
+	// Pending again.
+	MarkFailed(ctx context.Context, id string, cause error) error
+}
+
+// Waiter is the optional low-latency seam a Store may implement: Wait blocks
+// until a record is appended or ctx is done. The relay asserts for it once
+// and falls back to its poll interval, so a missed signal delays publication
+// and never loses it. Appending is the signal — Postgres delivers it with
+// LISTEN/NOTIFY, the memory store with a channel.
+type Waiter interface {
+	Wait(ctx context.Context)
+}
+
+// Encoder turns a domain event into the record the outbox stores.
+type Encoder interface {
+	Encode(e domain.Event) (Record, error)
+}
+
+// EncodeOption configures JSONEncoder.
+type EncodeOption func(*jsonEncoder)
+
+// Topic overrides the topic an event publishes to. The default is the
+// event's own name.
+func Topic(fn func(domain.Event) string) EncodeOption {
+	return func(e *jsonEncoder) { e.topic = fn }
+}
+
+// MessageID sets the message's idempotency key. The default leaves it to the
+// store, whose row identity is stable across republishes.
+func MessageID(fn func(domain.Event) string) EncodeOption {
+	return func(e *jsonEncoder) { e.id = fn }
+}
+
+// JSONEncoder encodes the concrete event value with encoding/json. The
+// message's Key is the event's AggregateID — the reason domain.Event
+// flattens identity to a string, and what preserves per-aggregate order
+// through a partitioned broker.
+func JSONEncoder(opts ...EncodeOption) Encoder {
+	e := &jsonEncoder{}
+	for _, opt := range opts {
+		opt(e)
+	}
+	return e
+}
+
+type jsonEncoder struct {
+	topic func(domain.Event) string
+	id    func(domain.Event) string
+}
+
+func (e *jsonEncoder) Encode(ev domain.Event) (Record, error) {
+	payload, err := json.Marshal(ev)
+	if err != nil {
+		return Record{}, errors.Internal(fmt.Errorf("outbox: encoding %s: %w", ev.EventName(), err))
+	}
+	topic := ev.EventName()
+	if e.topic != nil {
+		topic = e.topic(ev)
+	}
+	id := ""
+	if e.id != nil {
+		id = e.id(ev)
+	}
+	return Record{
+		Topic: topic,
+		Message: broker.Message{
+			ID:         id,
+			Type:       ev.EventName(),
+			Key:        ev.AggregateID(),
+			Payload:    payload,
+			OccurredAt: ev.OccurredAt(),
+		},
+	}, nil
+}
+
+// Elector grants the exclusive right to drain the outbox. Lead acquires
+// leadership, runs fn with a context cancelled when leadership is lost, and
+// returns when fn returns.
+type Elector interface {
+	Lead(ctx context.Context, fn func(context.Context) error) error
+}
+
+// Standalone is the default Elector: it always leads. Correct for a single
+// instance and for the modular monolith; with several replicas and a durable
+// store, every replica would drain, so the relay logs a warning naming the
+// risk and the fix (postgres.AdvisoryLock).
+func Standalone() Elector { return standalone{} }
+
+type standalone struct{}
+
+func (standalone) Lead(ctx context.Context, fn func(context.Context) error) error {
+	return fn(ctx)
+}
+
+// Relay drains the outbox to the broker. It is constructed by the module and
+// driven by the lifecycle; DrainOnce is exported so a test can drive one
+// pass deterministically, with no goroutine and no clock.
+type Relay struct {
+	store   Store
+	pub     broker.Publisher
+	batch   int
+	backoff app.RetryPolicy
+
+	mu       sync.Mutex
+	attempts map[string]int
+}
+
+// RelayOption configures a Relay.
+type RelayOption func(*Relay)
+
+// BatchSize caps how many records one drain publishes. Default 100.
+func BatchSize(n int) RelayOption {
+	if n <= 0 {
+		panic(fmt.Sprintf("outbox: BatchSize(%d) — a drain that publishes no records makes no progress", n))
+	}
+	return func(r *Relay) { r.batch = n }
+}
+
+// Backoff sets the retry policy for records whose publish failed
+// transiently; when it stops, the record is parked. Default
+// ExponentialBackoff(10).
+func Backoff(p app.RetryPolicy) RelayOption {
+	return func(r *Relay) { r.backoff = p }
+}
+
+// NewRelay returns a relay over store and pub.
+func NewRelay(store Store, pub broker.Publisher, opts ...RelayOption) *Relay {
+	if store == nil {
+		panic("outbox: NewRelay with a nil store")
+	}
+	if pub == nil {
+		panic("outbox: NewRelay with a nil publisher")
+	}
+	r := &Relay{
+		store:    store,
+		pub:      pub,
+		batch:    100,
+		backoff:  broker.ExponentialBackoff(10),
+		attempts: map[string]int{},
+	}
+	for _, opt := range opts {
+		opt(r)
+	}
+	return r
+}
+
+// DrainOnce publishes one batch and returns how many records were
+// dispatched. It publishes in insertion order, batching consecutive records
+// that share a topic into one call, and stops at the first failure without
+// publishing anything behind it: global order is a stronger guarantee than
+// per-aggregate order and it is what makes the promise one sentence long.
+//
+// Head-of-line blocking is the accepted cost — a publish failure is nearly
+// always broker-wide, so in the common case nothing is behind it — and the
+// disposition rules bound the pathological case: a transient failure leaves
+// the record for the next poll, a rejection parks it immediately, and an
+// unknown failure retries until the policy stops and then parks.
+func (r *Relay) DrainOnce(ctx context.Context) (int, error) {
+	recs, err := r.store.Pending(ctx, r.batch)
+	if err != nil {
+		return 0, fmt.Errorf("outbox: reading pending records: %w", err)
+	}
+	if len(recs) == 0 {
+		return 0, nil
+	}
+
+	published := 0
+	for i := 0; i < len(recs); {
+		topic := recs[i].Topic
+		j := i
+		for j < len(recs) && recs[j].Topic == topic {
+			j++
+		}
+		group := recs[i:j]
+
+		msgs := make([]broker.Message, len(group))
+		ids := make([]string, len(group))
+		for k, rec := range group {
+			msgs[k] = rec.Message
+			ids[k] = rec.Message.ID
+		}
+
+		if err := r.pub.Publish(ctx, topic, msgs...); err != nil {
+			return published, r.disposition(ctx, group, err)
+		}
+		if err := r.store.MarkPublished(ctx, ids...); err != nil {
+			// The messages are out; failing to mark them means the next
+			// drain republishes, which at-least-once already allows for.
+			return published, fmt.Errorf("outbox: marking %d records published: %w", len(ids), err)
+		}
+		r.forget(ids)
+		published += len(group)
+		i = j
+	}
+	return published, nil
+}
+
+// disposition decides what happens to the batch that failed, by the
+// outermost §2.6 code of the publish error.
+func (r *Relay) disposition(ctx context.Context, group []Record, cause error) error {
+	head := group[0]
+	switch codeOf(cause) {
+	case errors.CodeUnavailable:
+		// The broker is down. Not the record's fault: leave everything for
+		// the next poll and never park — a misconfigured broker should stall
+		// and alert, not discard.
+		return fmt.Errorf("outbox: publishing to %q: %w", head.Topic, cause)
+
+	case errors.CodeInvalid:
+		// The broker rejected the message itself. Retrying a deterministic
+		// rejection would stall the queue forever.
+		if err := r.store.MarkFailed(ctx, head.Message.ID, cause); err != nil {
+			return fmt.Errorf("outbox: parking record %s: %w", head.Message.ID, err)
+		}
+		return errParked(head, cause, 1)
+
+	default:
+		// Unknown: retry under the policy, then park — §2.6's
+		// "nack + retry, then DLQ", where the outbox's DLQ is a parked row.
+		attempts := r.bump(head.Message.ID)
+		if _, retry := r.backoff.Next(attempts); retry {
+			return fmt.Errorf("outbox: publishing to %q (attempt %d): %w", head.Topic, attempts, cause)
+		}
+		if err := r.store.MarkFailed(ctx, head.Message.ID, cause); err != nil {
+			return fmt.Errorf("outbox: parking record %s: %w", head.Message.ID, err)
+		}
+		r.forget([]string{head.Message.ID})
+		return errParked(head, cause, attempts)
+	}
+}
+
+// bump counts attempts in memory: the relay is the only drainer, so a
+// restart resetting the count is harmless and it saves a write per failure.
+func (r *Relay) bump(id string) int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.attempts[id]++
+	return r.attempts[id]
+}
+
+func (r *Relay) forget(ids []string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, id := range ids {
+		delete(r.attempts, id)
+	}
+}
+
+func codeOf(err error) errors.Code {
+	if e, ok := stderrors.AsType[*errors.Error](err); ok {
+		return e.Code()
+	}
+	return errors.CodeInternal
+}
+
+// errParked is loud on purpose: parking is the one operation that breaks
+// ordering for a key permanently.
+func errParked(rec Record, cause error, attempts int) error {
+	return diagnostic(fmt.Sprintf(
+		"✗ outbox record parked\n\n"+
+			"    record %s (topic %q, key %q) failed to publish after %s and was\n"+
+			"    parked: %v\n\n"+
+			"  It will not be retried, and records for key %q published after it are\n"+
+			"  now out of order. Inspect the row, fix the cause, and republish it by\n"+
+			"  hand — or delete it if the fact no longer matters.",
+		rec.Message.ID, rec.Topic, rec.Message.Key, attemptWord(attempts), cause, rec.Message.Key))
+}
+
+func attemptWord(n int) string {
+	if n == 1 {
+		return "1 attempt"
+	}
+	return strconv.Itoa(n) + " attempts"
+}
+
+type diagnostic string
+
+func (d diagnostic) Error() string { return string(d) }
+
+// --- the in-process store --------------------------------------------------
+
+// MemoryOption configures NewMemoryStore.
+type MemoryOption func(*memoryStore)
+
+// WithClock injects the time source — how tests drive the store without
+// sleeping.
+func WithClock(now func() time.Time) MemoryOption {
+	return func(s *memoryStore) { s.now = now }
+}
+
+// NewMemoryStore returns an in-process Store implementing Waiter: a slice, a
+// mutex, and a clock.
+//
+// Test and modular-monolith use only. Undispatched records do not survive a
+// restart, which is the one guarantee an outbox exists to give — a durable
+// store is the persistence adapters' business.
+func NewMemoryStore(opts ...MemoryOption) Store {
+	s := &memoryStore{now: time.Now, signal: make(chan struct{}, 1)}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
+}
+
+type row struct {
+	rec       Record
+	published bool
+	parked    bool
+	cause     error
+	at        time.Time
+}
+
+type memoryStore struct {
+	mu     sync.Mutex
+	rows   []*row
+	seq    int
+	now    func() time.Time
+	signal chan struct{}
+}
+
+func (s *memoryStore) Append(_ context.Context, recs ...Record) error {
+	s.mu.Lock()
+	for _, rec := range recs {
+		s.seq++
+		if rec.Message.ID == "" {
+			rec.Message.ID = "outbox-" + strconv.Itoa(s.seq)
+		}
+		s.rows = append(s.rows, &row{rec: rec, at: s.now()})
+	}
+	s.mu.Unlock()
+
+	// Appending is the signal; a full buffer means one is already pending.
+	select {
+	case s.signal <- struct{}{}:
+	default:
+	}
+	return nil
+}
+
+func (s *memoryStore) Pending(_ context.Context, limit int) ([]Record, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []Record
+	for _, r := range s.rows {
+		if r.published || r.parked {
+			continue
+		}
+		out = append(out, r.rec)
+		if len(out) == limit {
+			break
+		}
+	}
+	return out, nil
+}
+
+func (s *memoryStore) MarkPublished(_ context.Context, ids ...string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	want := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		want[id] = true
+	}
+	for _, r := range s.rows {
+		if want[r.rec.Message.ID] {
+			r.published = true
+		}
+	}
+	return nil
+}
+
+func (s *memoryStore) MarkFailed(_ context.Context, id string, cause error) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, r := range s.rows {
+		if r.rec.Message.ID == id {
+			r.parked = true
+			r.cause = cause
+			return nil
+		}
+	}
+	return errors.NotFound("outbox record", id)
+}
+
+func (s *memoryStore) Wait(ctx context.Context) {
+	select {
+	case <-s.signal:
+	case <-ctx.Done():
+	}
+}

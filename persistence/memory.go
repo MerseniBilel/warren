@@ -2,6 +2,7 @@ package persistence
 
 import (
 	"context"
+	"maps"
 	"reflect"
 	"sync"
 
@@ -94,9 +95,7 @@ func (u *MemoryUnitOfWork) Do(ctx context.Context, fn func(context.Context) erro
 		}
 	}
 	s.mu.Lock()
-	for k, v := range s.puts {
-		u.entities[k] = v
-	}
+	maps.Copy(u.entities, s.puts)
 	for k := range s.deletes {
 		delete(u.entities, k)
 	}

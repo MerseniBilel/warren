@@ -185,6 +185,7 @@ warren/                                 MODULE: core        (stdlib + dig)
 │   config/, log/, errors/, validate/, health/            ← kernel
 ├── inbox/                                                ← dedupe port + memory store
 ├── broker/memory/, broker/brokertest/                    ← in-process driver + contract suite
+├── outbox/                                               ← writer port, relay, memory store
 └── domain/, app/, persistence/, broker/, transport/      ← contracts (see §1.1's exception)
 
 warren/config/yaml/                     MODULE  yaml parser — library TBD, audit first
@@ -1190,22 +1191,58 @@ In-process pub/sub with the same interface. This is what makes `warren extract m
 
 ### 5.5 `warren/outbox`
 
-- **Mode** Build
+- **Path** `warren/outbox` · **Module** core · **Mode** Build
 
-Two components:
-
-- **Writer** — invoked by `UnitOfWork`, inserts events into `outbox` inside the business transaction
-- **Relay** — separate lifecycle component, leader-elected, drains outbox → broker
+The transactional outbox: a unit of work writes aggregate state and outbox
+rows in ONE transaction, and a separate relay — a lifecycle participant,
+leader-elected — drains them to the broker afterwards. If the transaction
+rolls back the rows roll back with it; if the process dies between commit and
+publish the rows are still there. The honest guarantee is **at-least-once
+publication**, which is why the inbox dedupes on `Message.ID`.
 
 ```go
-outbox.Relay(
-    outbox.PollInterval(200*time.Millisecond),
-    outbox.BatchSize(100),
-    outbox.LeaderElection(outbox.PostgresAdvisoryLock),
-)
+type Record struct { Topic string; Message broker.Message }
+
+type Store interface {          // implemented by the persistence adapters
+    Append(ctx, recs ...Record) error          // the writer — runs in the caller's transaction
+    Pending(ctx, limit int) ([]Record, error)  // insertion order, parked excluded
+    MarkPublished(ctx, ids ...string) error
+    MarkFailed(ctx, id string, cause error) error
+}
+type Waiter interface { Wait(ctx context.Context) }  // optional: appending is the signal
+
+func JSONEncoder(opts ...EncodeOption) Encoder       // Key = AggregateID
+type Elector interface { Lead(ctx, fn func(context.Context) error) error }
+func Standalone() Elector                            // always leads; warns with replicas
+func NewRelay(store Store, pub broker.Publisher, opts ...RelayOption) *Relay
+func (r *Relay) DrainOnce(ctx context.Context) (int, error)
+func NewMemoryStore(opts ...MemoryOption) Store      // test / modular-monolith only
 ```
 
-Modes: polling (portable) and CDC (Postgres logical replication, lower latency).
+**One port, not two.** §5.5's "writer" and §6.1's "outbox table + writer" are
+the same thing: `Store.Append`. The rows live in the database, so the
+implementation is necessarily the persistence adapter's, and a separate
+one-method `Writer` would be ring bureaucracy. `persistence` and `outbox` do
+not import each other — the driver imports both.
+
+**Ordering and failure.** The relay publishes in insertion order, batching
+consecutive same-topic records into one call, and stops at the first failure
+without publishing anything behind it: global order is stronger than
+per-aggregate order and makes the promise one sentence long. Dispositions by
+the publish error's outermost §2.6 code: `UNAVAILABLE` leaves the record for
+the next poll and **never parks** (a broker outage is not the record's
+fault); `INVALID` parks immediately (retrying a deterministic rejection would
+stall the queue forever); anything else retries under `Backoff` and then
+parks. Parking is loud — it breaks ordering for that key permanently.
+
+**Leader election** is a port. `outbox.LeaderElection(postgres.AdvisoryLock("outbox"))`
+in production; `Standalone()` by default, which is correct for one instance
+and for the modular monolith.
+
+**Kafka transactions do not make this exactly-once.** The outbox ack is in
+Postgres and the publish is in Kafka — two systems. At-least-once plus inbox
+dedupe is the guarantee; §5.1's stronger wording is corrected here.
+
 
 ### 5.6 `warren/inbox`
 

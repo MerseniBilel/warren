@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | Draft — not approved |
+| **Status** | **Approved and implemented (2026-08-02)** — one `Store` port whose `Append` is the writer, the `Waiter` low-latency seam, `JSONEncoder`, `Elector`/`Standalone`, `Relay.DrainOnce`, and the in-process store ship in core. The relay module wrapper, `postgres.AdvisoryLock`, the SQL store and its migration, and CDC wait for `persistence/postgres`. |
 | **Source** | [warren.md §5.5](../warren.md) |
 | **Module** | **undecided** — §1.6's module list omits this package. See Open questions. |
 | **Mode** | Build |
