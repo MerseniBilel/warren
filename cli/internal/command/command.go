@@ -2,12 +2,14 @@
 package command
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 
 	"github.com/spf13/cobra"
 
+	"github.com/MerseniBilel/warren/cli/internal/arch"
 	"github.com/MerseniBilel/warren/cli/internal/scaffold"
 )
 
@@ -26,7 +28,7 @@ func Root() *cobra.Command {
 		SilenceErrors: true, // diagnostics are rendered by main, as written
 		SilenceUsage:  true,
 	}
-	root.AddCommand(newCmd(), versionCmd())
+	root.AddCommand(newCmd(), lintCmd(), versionCmd())
 	return root
 }
 
@@ -39,6 +41,79 @@ func versionCmd() *cobra.Command {
 			return err
 		},
 	}
+}
+
+func lintCmd() *cobra.Command {
+	lint := &cobra.Command{
+		Use:   "lint",
+		Short: "Enforce the rules the architecture rests on",
+	}
+	lint.AddCommand(lintArchCmd())
+	return lint
+}
+
+func lintArchCmd() *cobra.Command {
+	var dir string
+	cmd := &cobra.Command{
+		Use:   "arch [dir]",
+		Short: "Check the layer and module rules against the import graph",
+		Long: "arch reads the import graph and reports every package that breaks the\n" +
+			"layer rule (domain imports nothing from the other three) or reaches\n" +
+			"into another feature module's internals.\n\n" +
+			"It reads imports syntactically, so it works on a project that does not\n" +
+			"compile — which is when it matters most, because the fix for a layer\n" +
+			"violation usually breaks the build first.\n\n" +
+			"Exit codes: 0 clean · 1 violations found · 2 could not run.",
+		Args: cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if len(args) == 1 {
+				dir = args[0]
+			}
+			if dir == "" {
+				dir = "."
+			}
+			report, err := arch.Check(dir, arch.Options{Rules: arch.Layers})
+			if err != nil {
+				// Exit 2: a CI that cannot tell "could not analyse" from
+				// "clean" quietly stops enforcing anything.
+				return &exitError{code: 2, err: err}
+			}
+			if _, werr := fmt.Fprint(cmd.OutOrStdout(), report.String()); werr != nil {
+				return werr
+			}
+			if len(report.Violations) > 0 {
+				return &exitError{code: 1}
+			}
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&dir, "dir", "", "the module to check (default: the current directory)")
+	return cmd
+}
+
+// exitError carries an exit code out of a command without printing twice.
+type exitError struct {
+	code int
+	err  error
+}
+
+func (e *exitError) Error() string {
+	if e.err != nil {
+		return e.err.Error()
+	}
+	return ""
+}
+
+// ExitCode reports the process exit code an error should produce.
+func ExitCode(err error) int {
+	if err == nil {
+		return 0
+	}
+	var ee *exitError
+	if errors.As(err, &ee) {
+		return ee.code
+	}
+	return 1
 }
 
 func newCmd() *cobra.Command {

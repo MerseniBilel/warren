@@ -76,3 +76,26 @@ func TestNewRefusesAnUnreleasedTransport(t *testing.T) {
 		t.Errorf("diagnostic:\n%v", err)
 	}
 }
+
+func TestLintArchExitCodes(t *testing.T) {
+	t.Parallel()
+
+	clean := t.TempDir()
+	if err := os.WriteFile(filepath.Join(clean, "go.mod"), []byte("module example.com/c\n\ngo 1.26.3\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out, err := run(t, "lint", "arch", clean)
+	if err != nil {
+		t.Fatalf("clean project: %v", err)
+	}
+	if command.ExitCode(err) != 0 || !strings.Contains(out, "No violations") {
+		t.Errorf("clean run: exit=%d out=%q", command.ExitCode(err), out)
+	}
+
+	// Violations exit 1; a project that cannot be analysed exits 2. A CI
+	// that cannot tell them apart treats "couldn't run" as "clean".
+	_, err = run(t, "lint", "arch", t.TempDir())
+	if command.ExitCode(err) != 2 {
+		t.Errorf("un-analysable project: exit=%d, want 2", command.ExitCode(err))
+	}
+}

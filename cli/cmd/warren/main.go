@@ -16,7 +16,9 @@ import (
 func main() {
 	if err := command.Root().Execute(); err != nil {
 		// Warren's diagnostics are multi-line blocks; print them as written.
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
+		if msg := err.Error(); msg != "" {
+			fmt.Fprintln(os.Stderr, msg)
+		}
+		os.Exit(command.ExitCode(err))
 	}
 }

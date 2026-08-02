@@ -21,6 +21,7 @@ lint:
 
 invariants:
 	@./scripts/invariants.sh
+	@cd cli && go run ./cmd/warren lint arch ..
 
 test:
 	@set -e; for m in $(MODULES); do echo "--- test $$m"; (cd $$m && go test -race ./...); done

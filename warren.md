@@ -1495,7 +1495,7 @@ All generators support `--dry-run` and `--force`.
 |---|---|---|---|
 | DI | `uber-go/dig` | Wrap | v1, strict SemVer, built to power frameworks · audited 2026-08-01: v1.19.0 (2025-05-13), MIT, not archived, 4.5k stars, 33 open issues |
 | Inbox dedupe | — | Build | port + stdlib memory store in core; durable stores ship with persistence adapters |
-| CLI | `spf13/cobra`, `golang.org/x/tools` | Vendor | build-time only, own module · audited 2026-08-02: cobra v1.10.2 (2025-12-04), Apache-2.0, 2 transitive; x/tools v0.48.0, BSD-3 |
+| CLI | `spf13/cobra` (+ `golang.org/x/tools`, for later analysis) | Vendor | build-time only, own module · audited 2026-08-02: cobra v1.10.2 (2025-12-04), Apache-2.0, 2 transitive; x/tools v0.48.0, BSD-3 |
 | CLI AST editing | — (stdlib `go/parser` + `go/format`) | Build | **`dave/dst` rejected 2026-08-02**: no published releases, untouched 2022-12→2026-04, pins x/tools 2022, `go 1.18` — the wrong dependency under a subsystem that edits every user's `module.go` on a project adopting Go 1.27. Splicing bytes located by the AST preserves comments *by construction*, and is the model `x/tools/go/analysis` itself uses |
 | Config | — | Build | Viper rejected: weight + global state |
 | Lifecycle | — | Build | fx rejected: imposes its own lifecycle |

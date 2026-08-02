@@ -159,8 +159,9 @@ contract now.
 - [ ] `warren g module|entity|command|repository|consumer` — golden-file
       tested, idempotent, stdlib AST editing (no `dst`: it has published no
       releases and sat untouched through Go 1.19–1.27)
-- [ ] `warren lint arch --rules=layers|rings` — subsumes two greps in
-      `scripts/invariants.sh`; runs on Warren's own repo, same binary
+- [x] `warren lint arch` — the layer rule and the cross-module rule, read
+      from the import graph; works on a project that does not compile; runs
+      in Warren's own CI over Warren, same binary *(`--rules=rings` next)*
 - [ ] v0.2+: `doctor`, `graph`, `explain di`, `templates eject`
 - [ ] v0.3+: `extract module`, `add <adapter>`, `migrate layout`
 
