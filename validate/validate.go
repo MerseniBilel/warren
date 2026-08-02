@@ -97,7 +97,17 @@ func (required) Plan(t reflect.Type) (Rule, error) {
 		}
 		var missing []string
 		for _, f := range fields {
-			if isZero(rv.FieldByIndex(f.index)) {
+			// FieldByIndexErr rather than FieldByIndex: a nil pointer
+			// anywhere along the path makes the latter PANIC, and nesting a
+			// required field under an optional *Address is ordinary. An
+			// unreachable field is not reported — the nil pointer above it
+			// either satisfies its own `required` or fails it, and one cause
+			// should produce one message.
+			fv, err := rv.FieldByIndexErr(f.index)
+			if err != nil {
+				continue
+			}
+			if isZero(fv) {
 				missing = append(missing, f.path)
 			}
 		}
@@ -113,12 +123,36 @@ func (required) Plan(t reflect.Type) (Rule, error) {
 func collect(t reflect.Type, path []string, index []int, out *[]field, unsupported *[]string) {
 	for i := range t.NumField() {
 		sf := t.Field(i)
-		if !sf.IsExported() {
+		findex := append(append([]int{}, index...), i)
+
+		// An EMBEDDED struct is flattened, exactly as encoding/json
+		// promotes its fields to the top level — so `Base.email` is not a
+		// key any client ever sends, and an unexported embed is not a hole
+		// in the validation. The path does not grow, and the field's own
+		// tag is not a leaf rule: `validate:"required"` on an embed is
+		// meaningless, since the embedded value is always present.
+		if sf.Anonymous {
+			et := sf.Type
+			if et.Kind() == reflect.Pointer {
+				et = et.Elem()
+			}
+			if et.Kind() == reflect.Struct && et.NumField() > 0 && hasTags(et) {
+				collect(et, path, findex, out, unsupported)
+			}
 			continue
 		}
+
+		if !sf.IsExported() {
+			// A tag on a field encoding/json cannot reach is a mistake, and
+			// silently ignoring it is the failure this package refuses.
+			if sf.Tag.Get("validate") != "" {
+				*unsupported = append(*unsupported, "on unexported field "+sf.Name)
+			}
+			continue
+		}
+
 		name := jsonName(sf)
 		fpath := append(append([]string{}, path...), name)
-		findex := append(append([]int{}, index...), i)
 
 		tag := sf.Tag.Get("validate")
 		req := false
@@ -134,12 +168,48 @@ func collect(t reflect.Type, path []string, index []int, out *[]field, unsupport
 		if req {
 			*out = append(*out, field{path: strings.Join(fpath, "."), index: findex})
 		}
+
+		// A slice or map of tagged elements cannot be validated: this
+		// implementation walks fields, not elements, and there is no token
+		// that could ask it to. REFUSING is the point — silently passing a
+		// []LineItem whose SKU is required is the exact failure this
+		// package exists to prevent.
+		if et, ok := taggedElement(sf.Type); ok {
+			*unsupported = append(*unsupported,
+				"element validation for "+strings.Join(fpath, ".")+" ("+et.String()+")")
+			continue
+		}
+
 		// Nested structs nest their path; time.Time and friends are leaves,
 		// so only structs with their own tagged fields are descended into.
-		if sf.Type.Kind() == reflect.Struct && sf.Type.NumField() > 0 && hasTags(sf.Type) {
-			collect(sf.Type, fpath, findex, out, unsupported)
+		// A POINTER to one is descended too — `required` on it proves the
+		// pointer is non-nil and says nothing about what is inside.
+		ft := sf.Type
+		if ft.Kind() == reflect.Pointer {
+			ft = ft.Elem()
+		}
+		if ft.Kind() == reflect.Struct && ft.NumField() > 0 && hasTags(ft) {
+			collect(ft, fpath, findex, out, unsupported)
 		}
 	}
+}
+
+// taggedElement reports the element type of a slice, array or map whose
+// elements carry validate tags.
+func taggedElement(t reflect.Type) (reflect.Type, bool) {
+	switch t.Kind() {
+	case reflect.Slice, reflect.Array, reflect.Map:
+	default:
+		return nil, false
+	}
+	et := t.Elem()
+	if et.Kind() == reflect.Pointer {
+		et = et.Elem()
+	}
+	if et.Kind() == reflect.Struct && et.NumField() > 0 && hasTags(et) {
+		return et, true
+	}
+	return nil, false
 }
 
 // hasTags reports whether t or anything beneath it carries a validate: tag —

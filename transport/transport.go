@@ -384,7 +384,7 @@ func OnEvent[Req, Res any](r Registrar, topic string, h app.Handler[Req, Res], o
 	name := handlerName(reg.moduleName(), h)
 	rule, err := planRule[Req](reg.b.cfg.validator)
 	if err != nil {
-		reg.fail(err)
+		reg.fail(errCannotValidate(topic, name, err))
 		return
 	}
 	setters, err := paramSetters(reflect.TypeFor[Req]())
@@ -432,7 +432,7 @@ func register[Req, Res any](r Registrar, p Protocol, verb, pattern string, h app
 	}
 	rule, err := planRule[Req](reg.b.cfg.validator)
 	if err != nil {
-		reg.fail(err)
+		reg.fail(errCannotValidate(pattern, name, err))
 		return
 	}
 	setters, err := paramSetters(reflect.TypeFor[Req]())
@@ -488,9 +488,16 @@ func buildInvoker[Req, Res any](c Codec, h app.Handler[Req, Res], rule func(*Req
 }
 
 func planRule[Req any](v validate.Validator) (func(*Req) error, error) {
-	if v == nil || reflect.TypeFor[Req]().Kind() != reflect.Struct {
+	if v == nil {
 		return nil, nil
 	}
+	// A non-struct request used to return (nil, nil) — registered with NO
+	// validation, and nothing said so. That is the silent skip
+	// validate.Required() refuses at plan time, and it belongs at boot with
+	// every other wiring mistake rather than in production.
+	//
+	// validate.PlanFor already refuses a non-struct with its own diagnostic,
+	// so this simply stops swallowing it.
 	return validate.PlanFor[Req](v)
 }
 
@@ -573,6 +580,19 @@ func errEmptyPattern(what string) error {
 		"✗ empty route pattern\n\n    %s was registered with an empty pattern.\n\n"+
 			"  Give it a path (\"/users\"), a full method name\n"+
 			"  (\"user.v1.UserService/Register\"), or a topic.", what))
+}
+
+// errCannotValidate names the route whose request type cannot be planned,
+// and the two ways out. Without the route, a project with fifty of them is
+// told only that "a" request type is wrong.
+func errCannotValidate(pattern, handler string, cause error) error {
+	return diagnostic(fmt.Sprintf(
+		"✗ cannot validate the request for %s\n\n    handler: %s\n    %v\n\n"+
+			"  Either give the handler a struct request type — which is what lets\n"+
+			"  a field carry `validate:\"required\"` and a param tag — or turn\n"+
+			"  validation off for this application with:\n\n"+
+			"      transport.WithValidator(validate.None())",
+		pattern, handler, cause))
 }
 
 func errRegistration(errs []error) error {

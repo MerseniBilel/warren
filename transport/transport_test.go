@@ -470,3 +470,28 @@ func TestChainedHandlerGetsAMeaningfulName(t *testing.T) {
 		t.Errorf("name = %q, want the request type as the stable fallback", got)
 	}
 }
+
+// TestNonStructRequestIsRefusedNotSkipped — planRule returned (nil, nil) for
+// any non-struct Req, so a route taking one was registered with NO
+// validation at all and nothing said so. That is the silent-skip failure
+// validate.Required() refuses at plan time; the route table has to refuse it
+// too, at boot, where every other wiring mistake surfaces.
+func TestNonStructRequestIsRefusedNotSkipped(t *testing.T) {
+	t.Parallel()
+
+	b := transport.NewBuilder()
+	r := b.For("catalogue")
+	transport.Post(r, "/tags", app.HandlerFunc[[]string, struct{}](
+		func(context.Context, []string) (struct{}, error) { return struct{}{}, nil },
+	))
+
+	_, err := b.Table()
+	if err == nil {
+		t.Fatal("a route with a non-struct request registered with no validation")
+	}
+	for _, want := range []string{"/tags", "None()"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the diagnostic is missing %q:\n%v", want, err)
+		}
+	}
+}

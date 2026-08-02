@@ -1,6 +1,7 @@
 package validate_test
 
 import (
+	stderrors "errors"
 	"reflect"
 	"strings"
 	"testing"
@@ -210,6 +211,110 @@ func TestNoneIsTheExplicitOptOut(t *testing.T) {
 	for _, want := range []string{"validate/playground", "validate.None()"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("the diagnostic does not offer %q:\n%s", want, err)
+		}
+	}
+}
+
+// TestEmbeddedFieldsFlattenLikeJSON — encoding/json PROMOTES the exported
+// fields of an embedded struct, exported or not, so a required field on one
+// is decoded from the top level. Skipping unexported embeds under-validated
+// silently; keying an exported embed as "Base.email" named a path no client
+// ever sends.
+func TestEmbeddedFieldsFlattenLikeJSON(t *testing.T) {
+	t.Parallel()
+
+	type base struct {
+		Email string `json:"email" validate:"required"`
+	}
+	type Exported struct {
+		Phone string `json:"phone" validate:"required"`
+	}
+	type req struct {
+		base
+		Exported
+		Name string `json:"name" validate:"required"`
+	}
+
+	rule, err := validate.PlanFor[req](validate.Required())
+	if err != nil {
+		t.Fatalf("PlanFor: %v", err)
+	}
+	err = rule(&req{})
+	if err == nil {
+		t.Fatal("an empty request passed validation")
+	}
+	var e *werrors.Error
+	if !stderrors.As(err, &e) {
+		t.Fatalf("err = %v", err)
+	}
+	got := e.Details()
+	for _, want := range []string{"email", "phone", "name"} {
+		if _, ok := got[want]; !ok {
+			t.Errorf("detail key %q is missing — got %v", want, got)
+		}
+	}
+	for bad := range got {
+		if strings.Contains(bad, ".") {
+			t.Errorf("embedded field keyed as %q; encoding/json promotes it to the top level", bad)
+		}
+	}
+}
+
+// TestPointerNestedStructsAreDescended — a *Address marked required was
+// checked for non-nil and its own required fields were never looked at.
+func TestPointerNestedStructsAreDescended(t *testing.T) {
+	t.Parallel()
+
+	type address struct {
+		Postcode string `json:"postcode" validate:"required"`
+	}
+	type req struct {
+		Address *address `json:"address" validate:"required"`
+	}
+
+	rule, err := validate.PlanFor[req](validate.Required())
+	if err != nil {
+		t.Fatalf("PlanFor: %v", err)
+	}
+	// Present but empty inside: the nil check passes, the contents must not.
+	err = rule(&req{Address: &address{}})
+	if err == nil {
+		t.Fatal("a present-but-empty nested struct passed validation")
+	}
+	var e *werrors.Error
+	if !stderrors.As(err, &e) {
+		t.Fatalf("err = %v", err)
+	}
+	if _, ok := e.Details()["address.postcode"]; !ok {
+		t.Errorf("details = %v, want a key for address.postcode", e.Details())
+	}
+	// A nil pointer is still caught by required, and does not panic.
+	if err := rule(&req{}); err == nil {
+		t.Error("a nil required pointer passed validation")
+	}
+}
+
+// TestElementValidationIsRefusedNotSkipped — a []LineItem whose element
+// type carries validate tags was passed over in silence. This package's own
+// doc comment sells refusal over silent under-validation; it has to hold
+// for the case it cannot yet handle.
+func TestElementValidationIsRefusedNotSkipped(t *testing.T) {
+	t.Parallel()
+
+	type item struct {
+		SKU string `json:"sku" validate:"required"`
+	}
+	type req struct {
+		Items []item `json:"items" validate:"required"`
+	}
+
+	_, err := validate.PlanFor[req](validate.Required())
+	if err == nil {
+		t.Fatal("a slice of tagged elements planned silently — its elements are never validated")
+	}
+	for _, want := range []string{"items", "None()"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the diagnostic is missing %q:\n%v", want, err)
 		}
 	}
 }
