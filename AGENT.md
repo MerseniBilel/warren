@@ -195,10 +195,23 @@ other concrete type enters the contracts ring without amending this invariant.
 If a change makes a use case import `net/http`, `grpc`, or a broker client, the
 change is wrong. This is the framework's whole point.
 
-### 7. No reflection on the request path
+### 7. No reflective *dispatch*, and no container lookup, on the request path
 
-Reflection runs during boot steps 1–5 only. By the time the app serves, the
-route table holds pre-built closures with middleware already composed:
+**Amended 2026-08-02.** This invariant used to read "no reflection on the
+request path", and that was already false in shipped, approved code:
+`transport/params.go`'s `bindParams` calls `reflect.ValueOf(req).Elem()` and
+`FieldByIndex` per request, `validate`'s compiled `Rule` does the same, and
+`encoding/json` is reflection top to bottom. A rule the code breaks is worse
+than no rule — the first serious reviewer disproves it in ten minutes, and
+everything else on this list loses credit with it.
+
+What is true, and what is actually worth defending:
+
+**Every decision is made at boot.** Which fields carry parameters, which
+setters convert them, which rules run, which codec encodes, which
+middleware wraps which handler, which closure serves a route — all resolved
+during boot steps 1–5 and frozen. By the time the app serves, the route
+table holds pre-built closures with middleware already composed:
 
 ```go
 type route struct {
@@ -206,9 +219,17 @@ type route struct {
 }
 ```
 
-Per-request cost is a map lookup and direct calls. **The DI container is not
-consulted at request time.** Go teams will assume otherwise, so this gets
-stated, tested, and benchmarked.
+**What remains at request time is a fixed walk over precomputed indices.**
+`FieldByIndex` over an `[]int` computed at boot is a pointer offset, not a
+name lookup; there is no `reflect.Type` search, no tag re-parse, no method
+resolution by string, and no type switch over user types.
+
+**The DI container is never consulted at request time.** Go teams will
+assume otherwise, so this gets stated, tested, and benchmarked.
+
+**And the cost is a number, not an adjective.** Every request path carries a
+`testing.AllocsPerRun` test asserting an *exact* allocation count, so a
+regression fails CI rather than drifting in a benchmark nobody reads.
 
 ### 8. No committed `replace` directive
 

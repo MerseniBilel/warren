@@ -460,6 +460,8 @@ func register[Req, Res any](r Registrar, p Protocol, verb, pattern string, h app
 // here, at boot, inside a generic function. What escapes is a closure over
 // bytes.
 func buildInvoker[Req, Res any](c Codec, h app.Handler[Req, Res], rule func(*Req) error, setters []setter, name string) Invoker {
+	// Boxed once, here, rather than on every request — see StampHandlerName.
+	stamp := app.StampHandlerName(name)
 	return func(ctx context.Context, raw []byte) ([]byte, error) {
 		var req Req
 		if len(raw) > 0 {
@@ -477,7 +479,7 @@ func buildInvoker[Req, Res any](c Codec, h app.Handler[Req, Res], rule func(*Req
 				return nil, err
 			}
 		}
-		res, err := h.Handle(app.WithHandlerName(ctx, name), req)
+		res, err := h.Handle(stamp(ctx), req)
 		if err != nil {
 			return nil, err
 		}

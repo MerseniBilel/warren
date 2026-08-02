@@ -447,3 +447,20 @@ func (c *countingUoW) Do(ctx context.Context, fn func(context.Context) error) er
 	c.opened++
 	return fn(ctx)
 }
+
+// TestStampHandlerNameAllocatesOnce pins the reason StampHandlerName exists.
+// A benchmark that drifts tells nobody; an exact count fails CI.
+func TestStampHandlerNameAllocatesOnce(t *testing.T) {
+	// Not t.Parallel: AllocsPerRun panics in a parallel test, and an
+	// allocation count measured against concurrent work would be noise.
+	stamp := app.StampHandlerName("user.RegisterUser")
+	ctx := context.Background()
+
+	if n := testing.AllocsPerRun(100, func() { _ = stamp(ctx) }); n != 1 {
+		t.Errorf("stamping the handler name allocates %v times, want 1", n)
+	}
+	// And the value still round-trips.
+	if got := app.HandlerName(stamp(ctx)); got != "user.RegisterUser" {
+		t.Errorf("HandlerName = %q", got)
+	}
+}

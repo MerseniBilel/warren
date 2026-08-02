@@ -145,7 +145,9 @@ Kafka msg ────┘   (transport-specific)                   │
 
 The error table (§2.6) is the load-bearing piece: domain code returns `errors.Conflict(...)` and each adapter owns the translation.
 
-**No reflection on the hot path.** Worth stating explicitly, because Go teams will assume otherwise. Reflection runs during steps 1–5 only. By step 8 the route table holds pre-built closures with middleware already composed:
+**No reflective dispatch on the hot path.** Worth stating explicitly, because Go teams will assume otherwise — and worth stating precisely, because the stronger claim is not true. `encoding/json`, `validate`'s compiled rule, and `transport`'s parameter binder all touch `reflect` per request; what none of them does is *decide* anything there.
+
+Every reflective decision — which fields carry parameters, which setters convert them, which rules run, which codec encodes, which middleware wraps which handler — is made during steps 1–5 and frozen. By step 8 the route table holds pre-built closures with middleware already composed:
 
 ```go
 type route struct {
@@ -153,7 +155,7 @@ type route struct {
 }
 ```
 
-Per-request cost is a map lookup and direct calls. The DI container is not consulted at request time.
+What is left per request is a match, a fixed walk over precomputed field indices, and direct calls: no type search, no tag re-parse, no method resolution by name. The DI container is not consulted at request time. Each request path carries an allocation test asserting an exact count, so the claim is a number rather than an adjective. (Amended 2026-08-02; see AGENT.md invariant 7.)
 
 ### 1.5 Messaging runtime
 

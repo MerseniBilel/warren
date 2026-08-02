@@ -44,8 +44,8 @@ The invariants that fail CI, in short — full versions in AGENT.md:
    implementations — single carve-out: §3.5's registrars are concrete structs
    with generic methods (Go 1.27), driver-free.
 5. Handlers import no transport package.
-6. No reflection on the request path — the container is not consulted per
-   request.
+6. No reflective *dispatch* on the request path — every reflective decision
+   is made at boot, and the container is not consulted per request.
 7. No committed `replace` directive.
 
 ---
