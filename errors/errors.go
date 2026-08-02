@@ -14,6 +14,7 @@ package errors
 import (
 	"fmt"
 	"maps"
+	"strings"
 )
 
 // Code is the semantic classification of a failure. The set is closed: these
@@ -77,11 +78,17 @@ type Error struct {
 // renders is a 400 nobody can act on, and it made hand-written validation
 // less informative than warren/validate's, which fills the same detail.
 //
+// The detail is skipped when field names SEVERAL fields at once — when it
+// contains a comma or a space. A details key of "customer, cents" is not a
+// field name, and a client mapping details onto form controls would render
+// an error against a control that does not exist. Callers reporting several
+// fields add a detail per field themselves, which is what validate does.
+//
 // A cause too sensitive to return is not a CodeInvalid: use Internal, which
 // renders nothing and logs everything.
 func Invalid(field string, err error) *Error {
 	e := &Error{code: CodeInvalid, msg: "field " + field + " is invalid", cause: err}
-	if err != nil {
+	if err != nil && !strings.ContainsAny(field, ", ") {
 		e.details = map[string]any{field: err.Error()}
 	}
 	return e

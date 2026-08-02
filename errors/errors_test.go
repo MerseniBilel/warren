@@ -274,3 +274,22 @@ func BenchmarkErrorRendering(b *testing.B) {
 		_ = err.Error()
 	}
 }
+
+// A field name that lists SEVERAL fields must not become a details key: a
+// client mapping details onto form controls would render an error against a
+// control that does not exist. Found by field-testing, 2026-08-02.
+func TestInvalidDoesNotFabricateAMultiFieldDetailKey(t *testing.T) {
+	t.Parallel()
+
+	err := werrors.Invalid("customer, cents", stderrors.New("required"))
+	if _, bogus := err.Details()["customer, cents"]; bogus {
+		t.Errorf("a joined field list became a details key: %v", err.Details())
+	}
+
+	// The single-field case still carries its reason, which is the whole
+	// point of recording it.
+	single := werrors.Invalid("email", stderrors.New("must be an address"))
+	if got := single.Details()["email"]; got != "must be an address" {
+		t.Errorf("details[email] = %v, want the reason", got)
+	}
+}

@@ -172,7 +172,7 @@ func errUnreleased(flag, value string) error {
 		"✗ %s adapter not released\n\n    --%s %s  →  that adapter does not exist yet.\n\n"+
 			"  Released today: %s\n\n"+
 			"  Scaffold without it and drive your handlers through App.Invoke —\n"+
-			"  cmd/<name>/main.go shows where the adapter goes when it ships.\n"+
+			"  cmd/<name>/main.go shows where the HTTP server goes.\n"+
 			"  (transport/http, transport/grpc, persistence/postgres and\n"+
 			"  broker/kafka are the adapters still to come.)",
 		flag, flag, value, have))

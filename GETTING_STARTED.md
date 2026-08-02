@@ -301,6 +301,131 @@ decision.
 
 ---
 
+## 8. Swapping the map for Postgres
+
+The in-memory repository above is a real implementation of the port, and
+replacing it changes **no use case and no controller** — only the module's
+provider list. Add two requires:
+
+```go
+require github.com/MerseniBilel/warren/persistence/postgres v0.1.0
+```
+
+### The repository
+
+Three rules. The first two are what stop events being silently lost:
+
+```go
+type postgresNotes struct{ db postgres.DB }
+
+func NewPostgresNotes(db postgres.DB) domain.Repository { return &postgresNotes{db: db} }
+
+func (r *postgresNotes) Save(ctx context.Context, n domain.Note) error {
+	// 1. RequireTx FIRST. Outside a unit of work the row would autocommit
+	//    while the aggregate's events stayed pending on an object about to go
+	//    out of scope — lost silently, with no error and no outbox row.
+	if err := postgres.RequireTx(ctx, "save note"); err != nil {
+		return err
+	}
+	_, err := r.db(ctx).Exec(ctx,
+		`INSERT INTO notes (id, text) VALUES ($1, $2)
+		 ON CONFLICT (id) DO UPDATE SET text = EXCLUDED.text`, n.ID, n.Text)
+	return err
+	// 2. If Note were an aggregate raising events, persistence.Track(ctx, n)
+	//    goes here — that is what puts its events in the outbox at commit.
+}
+
+func (r *postgresNotes) Find(ctx context.Context, id string) (domain.Note, error) {
+	var n domain.Note
+	err := r.db(ctx).QueryRow(ctx, `SELECT id, text FROM notes WHERE id = $1`, id).Scan(&n.ID, &n.Text)
+	if err != nil {
+		if errors.Is(err, postgres.ErrNoRows) {   // re-exported: no pgx import
+			return domain.Note{}, werrors.NotFound("note", id)
+		}
+		return domain.Note{}, err
+	}
+	return n, nil
+}
+```
+
+`r.db(ctx)` is the only piece of framework machinery here, and it does one
+thing: return the transaction if `UnitOfWork.Do` put one on the context, and
+the pool otherwise. **Reads work outside a transaction; writes are refused** —
+with a diagnostic that explains why.
+
+3. A `Delete` must check rows-affected and return `NOT_FOUND` when it matched
+   nothing. A bare `DELETE ... WHERE id = $1` returns nil for a missing row,
+   and silent success hides bugs.
+
+### The wiring
+
+```go
+warren.NewModule("notes",
+	warren.Imports(pg),                       // pg is the postgres module value
+	warren.Providers(NewPostgresNotes, ...),
+	warren.Controllers(NewController),
+)
+```
+
+A module that wants `postgres.DB` must **import** the postgres module — a
+provider is private to its module unless exported. In `main`:
+
+```go
+pg := postgres.Module(
+	postgres.DSN(os.Getenv("DATABASE_URL")),
+	postgres.WithOutbox(),        // events land in warren_outbox, same commit
+)
+warren.New(pg, notes.Module(pg), whttp.Server(whttp.Port(8080))).Run()
+```
+
+### The schema — a deploy step, never a boot step
+
+**Warren never migrates at boot, and there is no option to make it.** Under a
+rolling deploy that races every replica: N−1 block and miss their readiness
+deadline, the winner applies DDL the still-serving old replicas were not
+written against, and one bad file crash-loops every replica at once.
+
+So it is two calls — Warren's tables and yours — from your deploy job:
+
+```go
+// cmd/migrate/main.go
+ctx := context.Background()
+dsn := os.Getenv("DATABASE_URL")
+if err := postgres.Migrate(ctx, dsn, postgres.Schema); err != nil { log.Fatal(err) }
+if err := postgres.Migrate(ctx, dsn, schema.FS);       err != nil { log.Fatal(err) }
+```
+
+`schema.FS` is your own `embed.FS` of numbered `.sql` files. Two things to
+know:
+
+- Files apply in **name order**, so zero-pad them: `00010` sorts after
+  `00009`, `10` does not.
+- Both filesystems record into the **same** `warren_schema_migrations` table,
+  keyed by bare filename. Name yours so they cannot collide with Warren's —
+  `00001_notes.sql`, never `00001_warren_outbox.sql`, which would be recorded
+  as applied without running.
+
+The markers are goose's, so the same files work unchanged if your project
+already runs goose, atlas or dbmate:
+
+```sql
+-- +goose Up
+CREATE TABLE IF NOT EXISTS notes (id TEXT PRIMARY KEY, text TEXT NOT NULL);
+```
+
+Forget to run it and the boot tells you exactly that, naming the table and the
+call.
+
+### What `WithOutbox()` does and does not do
+
+It writes an outbox row for every event your aggregates raise, **in the same
+transaction as the state** — that atomicity is the whole pattern. It does not
+publish them: draining the outbox to a broker is `outbox.NewRelay`, which you
+wire when you have a broker. Until then the rows accumulate, which is the
+correct behaviour but worth knowing.
+
+---
+
 ## 8. What to reach for next
 
 | You want | Use |
@@ -311,6 +436,7 @@ decision.
 | File upload, download, SSE, WebSocket | `transport.Raw(r, transport.ProtocolHTTP, "POST /uploads", h)` from your controller — note the pattern carries the method here |
 | `pprof`, static assets, a webhook receiver | `whttp.Handle("GET /debug/pprof/", h)` — for handlers needing no module dependency |
 | A test that boots the app | `warren/testing` — `NewModuleTest`, `Replace`, `Invoke` |
+| A fast test suite | `whttp.DrainDelay(0)` — the 5s default is correct in production and costs 5s per test |
 | Scaffolding the next feature | `warren new` and `warren g` — see the CLI's skills |
 
 ---

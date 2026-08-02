@@ -31,17 +31,24 @@ func redact(dsn string) string {
 	if out == "" {
 		return ""
 	}
-	// URL form: scheme://user:password@host/db. Cut the authority by hand.
+	// URL form: scheme://user:password@host/db.
+	//
+	// Find the "@" FIRST, and use the LAST one. Cutting the authority at the
+	// first "/" or "?" — the obvious reading — is wrong, because both
+	// characters occur inside passwords: `openssl rand -base64` emits "/"
+	// routinely, so RDS-generated credentials trip it. Cut there and the "@"
+	// falls outside the slice, nothing matches, and the password prints in
+	// full on the one path guaranteed to print it. That shipped, and a field
+	// test caught it.
+	//
+	// Using the last "@" can over-redact a path that contains one. That is
+	// the right way to be wrong: over-redacting costs legibility, and
+	// under-redacting costs a credential.
 	if i := strings.Index(out, "://"); i >= 0 {
 		rest := out[i+3:]
-		end := len(rest)
-		if j := strings.IndexAny(rest, "/?"); j >= 0 {
-			end = j
-		}
-		authority := rest[:end]
-		if at := strings.LastIndex(authority, "@"); at >= 0 {
-			if colon := strings.IndexByte(authority[:at], ':'); colon >= 0 {
-				out = out[:i+3] + authority[:colon] + ":xxxxx" + authority[at:] + rest[end:]
+		if at := strings.LastIndex(rest, "@"); at >= 0 {
+			if colon := strings.IndexByte(rest[:at], ':'); colon >= 0 {
+				out = out[:i+3] + rest[:colon] + ":xxxxx" + rest[at:]
 			}
 		}
 	}

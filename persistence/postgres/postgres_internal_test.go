@@ -53,6 +53,13 @@ func TestPasswordIsNeverRendered(t *testing.T) {
 		"postgres://app:" + secret + "@:not-a-port/app",
 		"postgres://app:" + secret + "@host:99999999/app",
 		"postgres://app:" + secret + "@host/app?password=" + secret,
+		// A "/" or "?" INSIDE the password. `openssl rand -base64` emits "/"
+		// routinely, so this is ordinary generated-credential territory, not
+		// an exotic edge case — and cutting the authority at the first "/"
+		// put the "@" outside the slice and leaked the whole password.
+		"postgres://app:" + secret + "/x@localhost:5432/db",
+		"postgres://app:" + secret + "?x@localhost:5432/db",
+		"postgres://app:a/b?c" + secret + "@localhost:5432/db",
 	} {
 		t.Run(dsn[:min(24, len(dsn))], func(t *testing.T) {
 			if got := redact(dsn); strings.Contains(got, secret) {

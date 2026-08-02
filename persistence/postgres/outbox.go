@@ -3,6 +3,7 @@ package postgres
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -77,6 +78,7 @@ func newOutboxStore(p *pool, uow *UnitOfWork, lc lifecycle.Lifecycle, cfg outbox
 				return err
 			}
 			s.stopSweep = startSweeper(cfg.retention, s.sweep)
+			s.warnIfUndrained(ctx)
 			return nil
 		},
 		OnStop: func(context.Context) error {
@@ -242,6 +244,31 @@ func (s *store) Wait(ctx context.Context) {
 		return
 	}
 	_, _ = conn.Conn().WaitForNotification(ctx)
+}
+
+// warnIfUndrained says so when rows are already waiting and nothing appears
+// to be draining them.
+//
+// WithOutbox turns on half a pattern: it writes rows in the business
+// transaction, and publishing them is outbox.NewRelay, which the user wires
+// when they have a broker. Without one the table grows forever — and
+// Retention cannot help, because it only sweeps rows that were PUBLISHED. A
+// silent, unbounded, unpublishable backlog under an option whose
+// documentation promises bounded growth is the one failure the outbox pattern
+// exists to prevent, so it is said out loud.
+//
+// It warns rather than fails: a service may legitimately start before its
+// relay, and refusing to boot would be worse than a log line.
+func (s *store) warnIfUndrained(ctx context.Context) {
+	pending, err := s.Pending(ctx, 1)
+	if err != nil || len(pending) == 0 {
+		return
+	}
+	slog.Warn("outbox rows are waiting and no relay has drained them",
+		"module", ModuleName+"/outbox",
+		"table", s.cfg.table,
+		"fix", "wire outbox.NewRelay(store, publisher, ...) — WithOutbox() writes rows, it does not publish them",
+		"note", "Retention only sweeps PUBLISHED rows, so an undrained table grows without bound")
 }
 
 // sweep deletes published rows older than the retention window. It is driven

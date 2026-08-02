@@ -7,9 +7,11 @@
 > module system, boot step 5, the consumer chain, the transactional outbox,
 > the persistence and transport ports, health, validation, the CLI, and
 > **`transport/http`**, which serves a real HTTP service over
-> `net/http.ServeMux` and adds nothing to your `go.mod` but itself. What is
+> `net/http.ServeMux` and adds nothing to your `go.mod` but itself, and
+> **`persistence/postgres`**, whose unit of work commits aggregate state and
+> the outbox rows for that aggregate's events in one transaction. What is
 > *not* built yet are the driver adapters that need third-party libraries:
-> `transport/grpc`, `persistence/postgres`, `broker/kafka`.
+> `transport/grpc`, `broker/kafka`.
 > The repository is being rebuilt spec-first: every
 > package gets an approved `SPEC.md` before its first line of Go, retired once
 > the package is implemented and reviewed. [warren.md](warren.md) is the
@@ -143,7 +145,12 @@ contract now.
 
 - [x] `persistence` (port) — `Repository`, `UnitOfWork`, the Track/Collect
       enlistment seam, in-process driver + contract suite *(implemented)*
-- [ ] `persistence/postgres` — pool, `UnitOfWork`, outbox table, migrations
+- [x] `persistence/postgres` — the `UnitOfWork`, `postgres.DB`, the outbox
+      store with `LISTEN`/`NOTIFY`, an advisory-lock elector, a durable inbox,
+      and plain-SQL migrations *(implemented; passes `persistence.RunContract`
+      unmodified against a real Postgres. **Never migrates at boot** — that
+      races every replica of a rolling deploy. One third-party dependency:
+      `pgx`; goose rejected)*
 - [ ] `persistence/mongo`, `persistence/redis` — after their manifest entries
       are written *(`mysql`: deferred — exists only in a heading)*
 

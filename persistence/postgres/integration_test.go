@@ -11,6 +11,7 @@ package postgres_test
 
 import (
 	"context"
+	stderrors "errors"
 	"fmt"
 	"os"
 	"strings"
@@ -459,5 +460,76 @@ func TestOutboxWithoutItsTableFailsTheBoot(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "does not exist") || !strings.Contains(err.Error(), "postgres.Migrate") {
 		t.Errorf("diagnostic must name the fix:\n%v", err)
+	}
+}
+
+// --- regressions found by field-testing, 2026-08-02 ------------------------
+
+// QueryRow returned the pgx row bare, so Scan's error was never classified:
+// a duplicate key from "INSERT … RETURNING id" was a 500 instead of a 409,
+// and a serialization failure never became CodeUnavailable — which made
+// Isolation(Serializable) unusable, because app.Retrying never saw a
+// retryable code.
+func TestQueryRowClassifiesItsErrors(t *testing.T) {
+	_, db, uow, _ := bootApp(t)
+	ctx := context.Background()
+
+	if err := uow.Do(ctx, func(ctx context.Context) error {
+		_, err := db(ctx).Exec(ctx, `INSERT INTO users (id, email) VALUES ('dup', 'a@example.com')`)
+		return err
+	}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	// The same violation through both handles must classify the same way.
+	execErr := uow.Do(ctx, func(ctx context.Context) error {
+		_, err := db(ctx).Exec(ctx, `INSERT INTO users (id, email) VALUES ('dup', 'b@example.com')`)
+		return err
+	})
+	rowErr := uow.Do(ctx, func(ctx context.Context) error {
+		var id string
+		return db(ctx).QueryRow(ctx,
+			`INSERT INTO users (id, email) VALUES ('dup', 'b@example.com') RETURNING id`).Scan(&id)
+	})
+
+	if !werrors.Is(execErr, werrors.CodeConflict) {
+		t.Errorf("Exec duplicate = %v, want CONFLICT", execErr)
+	}
+	if !werrors.Is(rowErr, werrors.CodeConflict) {
+		t.Errorf("QueryRow duplicate = %v, want CONFLICT — a 500 instead of a 409", rowErr)
+	}
+}
+
+// ErrNoRows must survive mapError: only the repository knows which resource
+// was missing, so classifying it here would take that away.
+func TestQueryRowStillReportsNoRows(t *testing.T) {
+	_, db, _, _ := bootApp(t)
+	ctx := context.Background()
+
+	var email string
+	err := db(ctx).QueryRow(ctx, `SELECT email FROM users WHERE id = 'nobody'`).Scan(&email)
+	if !stderrors.Is(err, postgres.ErrNoRows) {
+		t.Errorf("Scan on no rows = %v, want ErrNoRows", err)
+	}
+}
+
+// A read during an outage was a 500 while the write beside it was correctly a
+// 503, for the same outage: mapError only inspected *pgconn.PgError, and a
+// dial failure is not one.
+func TestConnectionFailureIsUnavailableOnReadsToo(t *testing.T) {
+	_, _, _, _ = bootApp(t) // ensures a database is present, so the skip is honest
+
+	// A pool pointed at a port nothing listens on: the failure is a dial, not
+	// a statement the server rejected.
+	dead := postgres.Module(postgres.DSN("postgres://postgres:warren@127.0.0.1:1/x?sslmode=disable"),
+		postgres.ConnectTimeout(2*time.Second))
+	a := warren.New(dead)
+	err := a.Start(context.Background())
+	if err == nil {
+		_ = a.Stop(context.Background())
+		t.Fatal("booting against a dead address succeeded")
+	}
+	if !strings.Contains(err.Error(), "cannot connect to postgres") {
+		t.Errorf("diagnostic:\n%v", err)
 	}
 }

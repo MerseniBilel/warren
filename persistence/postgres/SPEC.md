@@ -369,10 +369,60 @@ suite deletes twice and requires the second to be `NOT_FOUND`; a bare
 repository in the integration suite carries the check, and the CLI's Postgres
 template must too.
 
+## Field-test round — 2026-08-02
+
+An engineer who had never seen Warren built an orders service on this package
+and tried to break it. Three code bugs, all fixed with regression tests that
+run against a real database:
+
+**1. `QueryRow` never classified its errors.** `Query` and `Exec` routed
+through `mapError`; `QueryRow` returned the pgx row bare, so `Scan`'s error was
+never classified. Two proven consequences: a duplicate key from
+`INSERT … RETURNING id` was a **500 instead of a 409**, and a serialization
+failure never became `CodeUnavailable` — so `app.Retrying` never re-ran it and
+**`Isolation(Serializable)` was unusable by this package's own stated
+standard**. `mapError` now also classifies connection failures, so a read
+during an outage is a 503 like the write beside it, instead of a 500.
+
+**2. The password redaction leaked, on exactly the path it was written for.**
+`redact` cut the URL authority at the first `/` or `?` — and both occur inside
+passwords, because `openssl rand -base64` emits `/` routinely. The `@` then
+fell outside the slice and nothing was redacted. pgx's own error redacted it
+correctly while Warren's line printed it in full: the wrapper was less safe
+than the thing it wraps. It now finds the last `@` first, which can
+over-redact a path containing one — the right way to be wrong.
+
+**3. Validation `details` carried a fabricated field.** Two missing fields
+produced `"customer, cents": "required"` beside the real per-field entries — a
+key no client can map to a form control. Caused by `errors.Invalid` recording
+its reason under the field name (added the iteration before, to fix a real
+gap), meeting `validate`'s comma-joined field list. `Invalid` now skips the
+auto-detail when the field names several fields at once.
+
+Also from that round: `WithOutbox()` writes rows nothing publishes unless a
+relay is wired, and `Retention` only sweeps PUBLISHED rows — so an undrained
+table grows forever under an option promising bounded growth. The store now
+warns at boot when rows are already waiting. And warren.md §6.1 documented a
+deleted migration API and a repository example missing `RequireTx` and
+`persistence.Track` — the two calls without which events are silently lost.
+Both corrected, and `GETTING_STARTED.md` gained the Postgres path it never had.
+
 ## Open questions
 
-1. **A `warren/inbox/inboxtest` contract suite is owed.** It belongs to the
+1. **`warren g repository --driver postgres` does not exist**, and warren.md
+   advertised it. The three rules a Postgres repository must follow —
+   `RequireTx` first, `db(ctx)` for the handle, `persistence.Track` to enlist —
+   are enforced by no compiler and taught only by example. That generator is
+   the highest-value item left in the CLI.
+2. **No `postgres.Connect(ctx, dsn)` for tooling.** A deploy job or a test
+   harness that must reach the database without a booted `App` currently
+   imports `pgx` directly — the exact driver dependency the architecture keeps
+   out of application code.
+3. **A `warren/testing` seam for a real database.** The schema-per-test
+   harness in this package's integration suite is the right shape and is not
+   exported, so every project reimplements it.
+4. **A `warren/inbox/inboxtest` contract suite is owed.** It belongs to the
    port package, and it blocks a Redis driver as much as this one.
-2. **pgbouncer beyond `StatementCacheDescribe`.** `LISTEN`/`NOTIFY` and
+5. **pgbouncer beyond `StatementCacheDescribe`.** `LISTEN`/`NOTIFY` and
    session-level advisory locks both need session pooling; that is a
    documentation section, but it is not written yet.

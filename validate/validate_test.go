@@ -318,3 +318,37 @@ func TestElementValidationIsRefusedNotSkipped(t *testing.T) {
 		}
 	}
 }
+
+// The rendered details must contain exactly the missing fields — no key
+// invented from the joined list. Found by field-testing, 2026-08-02.
+func TestMissingFieldsDetailsAreOnlyRealFields(t *testing.T) {
+	t.Parallel()
+
+	type order struct {
+		ID       string `json:"id"       validate:"required"`
+		Customer string `json:"customer" validate:"required"`
+		Cents    int    `json:"cents"    validate:"required"`
+	}
+	rule, err := validate.PlanFor[order](validate.Required())
+	if err != nil {
+		t.Fatalf("PlanFor: %v", err)
+	}
+	o := order{ID: "o2"}
+	verr := rule(&o)
+	if verr == nil {
+		t.Fatal("two missing required fields passed validation")
+	}
+	var werr *werrors.Error
+	if !stderrors.As(verr, &werr) {
+		t.Fatalf("not a warren error: %T", verr)
+	}
+	details := werr.Details()
+	if len(details) != 2 {
+		t.Errorf("details = %v, want exactly the two missing fields", details)
+	}
+	for k := range details {
+		if k != "customer" && k != "cents" {
+			t.Errorf("details has key %q, which is not a field a client can match", k)
+		}
+	}
+}

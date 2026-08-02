@@ -25,7 +25,9 @@ through the outbox relay. No Docker, no network, no sleeps.
 
 ## What is not here yet
 
-**No HTTP or gRPC server.** Those adapters have not shipped. Everything else
+**No HTTP server wired yet.** `warren/transport/http` has shipped — uncomment
+the `http.Server(...)` line in `cmd/{{.Name}}/main.go` and add the module to
+your go.mod to serve requests. `transport/grpc` has not shipped. Everything else
 works: use cases, the module graph, config, persistence, the transactional
 outbox, the consumer chain, health.
 

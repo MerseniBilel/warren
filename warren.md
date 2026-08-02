@@ -1498,35 +1498,90 @@ The outbox, inbox and elector are OPTIONS of `Module` — `WithOutbox()`, `WithI
 postgres.Module(
     postgres.DSN(cfg.Postgres.DSN),
     postgres.MaxConns(cfg.Postgres.MaxConns),
-    postgres.Migrations(embeddedFS, postgres.RunOnStart()),
+    postgres.WithOutbox(),
+    postgres.WithAdvisoryLock(),
 )
 ```
 
-**Generated repository** — `warren g repository user/User --driver postgres`:
+**Applying the schema is a deploy step, and it is two calls** — Warren's own
+tables and yours. Both record into `warren_schema_migrations`, keyed by bare
+filename, so give your files names that cannot collide with Warren's
+(`00001_orders.sql`, not `00001_warren_outbox.sql`):
+
+```go
+// cmd/migrate/main.go — run by your deploy job, never by the service.
+if err := postgres.Migrate(ctx, dsn, postgres.Schema); err != nil { ... }
+if err := postgres.Migrate(ctx, dsn, schema.FS);      err != nil { ... }
+```
+
+**A repository, by hand or generated.** Three rules, and the first two are
+what stop events being silently lost:
 
 ```go
 type UserRepository struct{ db postgres.DB }   // DB resolves tx-from-context or pool
 
+func (r *UserRepository) Save(ctx context.Context, u *domain.User) error {
+    // 1. RequireTx FIRST. Outside a unit of work the row would autocommit
+    //    while the aggregate's events stayed pending on an object about to
+    //    go out of scope — lost silently, with no outbox row.
+    if err := postgres.RequireTx(ctx, "save user"); err != nil {
+        return err
+    }
+    if _, err := r.db(ctx).Exec(ctx,
+        `INSERT INTO users (id, email) VALUES ($1, $2)
+         ON CONFLICT (id) DO UPDATE SET email = EXCLUDED.email`,
+        u.ID(), u.Email); err != nil {
+        return err
+    }
+    // 2. Track enlists the aggregate, so its events reach the outbox at
+    //    commit. persistence.Repository's own doc: a Save that does not
+    //    Track loses them, and the contract suite asserts it.
+    persistence.Track(ctx, u)
+    return nil
+}
+
 func (r *UserRepository) FindByID(ctx context.Context, id domain.UserID) (*domain.User, error) {
-    row := r.db(ctx).QueryRow(ctx,
-        `SELECT id, email, name, status FROM users WHERE id = $1`, id)
+    row := r.db(ctx).QueryRow(ctx, `SELECT id, email FROM users WHERE id = $1`, id)
     var u domain.User
-    if err := row.Scan(&u.ID, &u.Email, &u.Name, &u.Status); err != nil {
-        if errors.Is(err, pgx.ErrNoRows) {
+    if err := row.Scan(&u.ID, &u.Email); err != nil {
+        if errors.Is(err, postgres.ErrNoRows) {   // re-exported: no pgx import
             return nil, werrors.NotFound("user", id)
         }
         return nil, err
     }
     return &u, nil
 }
+
+func (r *UserRepository) Delete(ctx context.Context, id domain.UserID) error {
+    if err := postgres.RequireTx(ctx, "delete user"); err != nil {
+        return err
+    }
+    // 3. Check rows-affected: a DELETE that matched nothing is NOT_FOUND.
+    //    The contract suite deletes twice and requires the second to fail.
+    n, err := r.db(ctx).Exec(ctx, `DELETE FROM users WHERE id = $1`, id)
+    if err != nil {
+        return err
+    }
+    if n == 0 {
+        return werrors.NotFound("user", id)
+    }
+    return nil
+}
 ```
 
-Plain pgx, plain SQL, fully readable, yours to edit. `r.db(ctx)` is the only piece of framework magic and it does one thing: return the ambient transaction if one exists, else the pool.
+Plain pgx-backed SQL, fully readable, yours to edit. `r.db(ctx)` is the only
+piece of framework machinery and it does one thing: return the ambient
+transaction if one exists, else the pool.
 
-Generated repositories import the standard library's `errors` bare and Warren's
-under an alias — `werrors "github.com/MerseniBilel/warren/errors"` — so
-`errors.Is(err, pgx.ErrNoRows)` and `werrors.NotFound("user", id)` coexist in
-one file.
+Repositories import the standard library's `errors` bare and Warren's under an
+alias — `werrors "github.com/MerseniBilel/warren/errors"` — so
+`errors.Is(err, postgres.ErrNoRows)` and `werrors.NotFound("user", id)` coexist
+in one file. `postgres.ErrNoRows` is re-exported precisely so a repository
+never imports `pgx` itself.
+
+**`warren g repository --driver postgres` does not exist yet.** The three
+rules above are unenforced by any compiler, which makes that generator the
+highest-value item left in the CLI.
 
 ### 6.2–6.4 `mysql` / `mongo` / `redis`
 

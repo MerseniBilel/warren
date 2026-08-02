@@ -22,6 +22,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net"
 	"strings"
 	"time"
 
@@ -421,8 +422,26 @@ func (w queryer) Query(ctx context.Context, sql string, args ...any) (Rows, erro
 	return rows, nil
 }
 
+// QueryRow returns a Row whose Scan classifies its error, exactly as Query
+// and Exec do.
+//
+// Returning the pgx row bare — which this did — meant every failure on the
+// single-row path escaped unclassified: a duplicate key from
+// "INSERT … RETURNING id" was a 500 instead of a 409, and a serialization
+// failure never became CodeUnavailable, so app.Retrying never re-ran it and
+// Isolation(Serializable) was unusable by this package's own definition. The
+// wrapper costs one allocation on the error path and none on the happy one.
 func (w queryer) QueryRow(ctx context.Context, sql string, args ...any) Row {
-	return w.q.QueryRow(ctx, sql, args...)
+	return mappedRow{w.q.QueryRow(ctx, sql, args...)}
+}
+
+type mappedRow struct{ r pgx.Row }
+
+func (m mappedRow) Scan(dest ...any) error {
+	if err := m.r.Scan(dest...); err != nil {
+		return mapError(err)
+	}
+	return nil
 }
 
 func (w queryer) Exec(ctx context.Context, sql string, args ...any) (int64, error) {
@@ -439,8 +458,23 @@ func (w queryer) Exec(ctx context.Context, sql string, args ...any) (int64, erro
 // re-run the transaction — and without that, Isolation(Serializable) is
 // unusable.
 func mapError(err error) error {
+	if err == nil {
+		return nil
+	}
+	// ErrNoRows is the caller's to interpret: only the repository knows which
+	// resource was missing, so it maps to errors.NotFound and this does not.
+	if errorsAs2(err, ErrNoRows) {
+		return err
+	}
 	var pgErr *pgconn.PgError
 	if !errorsAs(err, &pgErr) {
+		// Not a server error: a dial failure, a dead connection, a closed
+		// pool. Those are UNAVAILABLE — retryable — and leaving them
+		// unclassified meant a read during an outage was a 500 while the
+		// write beside it was correctly a 503, for the same outage.
+		if isConnectionError(err) {
+			return errors.Unavailable("postgres", err)
+		}
 		return err
 	}
 	switch pgErr.Code {
@@ -490,4 +524,24 @@ func startSweeper(retention time.Duration, fn func(context.Context) error) func(
 		cancel()
 		<-done
 	}
+}
+
+// isConnectionError reports whether err is a transport-level failure rather
+// than a statement the server rejected — a refused dial, a connection closed
+// under us, a timeout.
+//
+// It matches on pgx's own types and net.Error, never on message text: text
+// matching would break silently on a driver upgrade, and app.Retrying has to
+// be able to trust this classification.
+func isConnectionError(err error) bool {
+	var connErr *pgconn.ConnectError
+	if errorsAs(err, &connErr) {
+		return true
+	}
+	var netErr net.Error
+	if errorsAs(err, &netErr) {
+		return true
+	}
+	var opErr *net.OpError
+	return errorsAs(err, &opErr)
 }
