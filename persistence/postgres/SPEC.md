@@ -438,10 +438,28 @@ Per AGENT.md § Testing.
     failed after the outbox rows were written. AGENT.md requires each to be
     stated here and golden-file tested, and requires each to tell the user how to
     fix it.
-15. **Does this package own the inbox dedupe store for Postgres?** §5.6 says the
-    inbox dedupe store is "Postgres or Redis" keyed on `Message.ID` with TTL, and
-    is enabled by default. Neither §6.1 nor §1.6 mentions an inbox table here, and
-    `warren/inbox` has no module row in §1.6 at all.
+15. **This package owns the Postgres inbox dedupe store — decided 2026-08-02,
+    rehomed here when `inbox/SPEC.md` was retired.** `warren/inbox` holds the
+    port and a memory store only; the durable one ships beside the outbox
+    table, in this package's migration set. What is still open is the schema
+    and the migration, and four constraints bind it:
+
+    - **The key is `"<subscription>\x00<Message.ID>"`, not the bare message
+      id** — `broker.Pipeline` builds it. A stored key format is a migration,
+      so this cannot be changed later without one.
+    - **The dedupe row is written inside the handler's own `UnitOfWork`
+      transaction.** That is the whole reason a Postgres store is worth
+      having: it makes handler-success and mark-seen atomic, closing the
+      crash-after-success duplicate window the memory store cannot. `ctx` is
+      on both `Store` methods precisely to carry the transaction.
+    - **Re-marking must refresh the TTL** — core's memory store does
+      (`inbox_test.go`), Redis `SET … EX` does natively, and Postgres needs
+      an explicit `ON CONFLICT … DO UPDATE`. A `warren/inbox/inboxtest`
+      contract suite is owed so every driver is held to this rather than
+      re-deriving it; §5.6 records the obligation.
+    - **Expiry needs a reclaim strategy.** A row per message for 24h at any
+      real rate is a large table; decide between a partial index plus a
+      periodic `DELETE`, and native partitioning by day.
 16. **`Repository[T domain.Root[ID], ID domain.ID]` (§3.3) constrains `T` to
     `domain.Root`, but §3.1 declares `AggregateRoot[T ID]` and no `Root`.** The
     port package owns the fix; flagged here because generated repositories have to

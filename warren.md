@@ -677,17 +677,65 @@ the table.
 
 ### 2.7 `warren/validate`
 
-- **Path** `warren/validate` · **Module** core · **Wraps** `go-playground/validator/v10` · **Mode** Wrap
+- **Path** `warren/validate` · **Module** core · **Mode** Build
+- **Amended 2026-08-02.** This section used to say *Wraps
+  `go-playground/validator/v10` · Mode Wrap*, in the core module. That
+  cannot be: invariant 1 makes core stdlib + `dig`, permanently. Core holds
+  the **port** and one stdlib implementation; the wrap is §2.7a.
 
-Wrapped so failures surface as `*errors.Error` with `CodeInvalid` and per-field details, rather than leaking `validator.ValidationErrors` into handlers. Transport adapters call it automatically after decode; handlers never invoke it.
+Core owns `Validator` (a boot-time compiler), the compiled `Rule`, and
+`Required()` — which enforces `required` and **refuses every other token at
+boot**, naming it. Failures surface as `*errors.Error` with `CodeInvalid`
+and per-field details, so no library's error type reaches a handler.
+Transport adapters call the compiled rule automatically after decode;
+handlers never invoke it.
+
+```go
+type Validator interface{ Plan(t reflect.Type) (Rule, error) }
+type Rule func(v any) error
+
+func PlanFor[T any](v Validator) (func(*T) error, error)  // boot step 5
+func Required() Validator                                  // stdlib, core
+func None() Validator                                      // the deliberate opt-out
+```
+
+**Detail keys are the JSON wire name, dotted for nesting** —
+`address.postcode` — and **embedded structs flatten**, exactly as
+`encoding/json` promotes their fields, so `Base.email` is never a key.
+Nested pointers are descended; a slice or map of tagged elements is
+**refused at boot**, because this implementation walks fields and not
+elements, and silently passing a `[]LineItem` whose SKU is required is the
+failure the package exists to prevent.
+
+`None()` turns validation off for the whole application and is permanent —
+it is the "I validate in the handler" answer, and the test-path validator.
+Until §2.7a ships it is also the escape hatch for a DTO carrying a token
+core cannot enforce, and that is a real cost: `validate:"required,email"`
+cannot boot without it.
 
 ```go
 type RegisterUser struct {
-    Email string `json:"email" validate:"required,email"`
-    Name  string `json:"name"  validate:"required,min=2,max=64"`
+    Email string `json:"email" validate:"required"`
+    Name  string `json:"name"  validate:"required"`
 }
 // A bad request never reaches Handle().
 ```
+
+---
+
+### 2.7a `warren/validate/playground`
+
+- **Path** `warren/validate/playground` · **Module** `warren/validate/playground` · **Wraps** `go-playground/validator/v10` · **Mode** Wrap
+- **Not built.** Its dependency audit is not written, and AGENT.md forbids
+  adopting a package before someone has read its repository and recorded
+  what they found.
+
+A `Validator` implementing the full tag vocabulary — `email`, `min`, `max`,
+`oneof`, `dive` — compiled once per type at boot, with
+`validator.ValidationErrors` normalised into `errors.Invalid` details before
+anything leaves the module. Custom constraints, tag renaming and
+translations are its business, not core's. Installed with
+`transport.WithValidator(playground.New())`.
 
 ---
 
@@ -1340,6 +1388,12 @@ its own duplicate — and store failures fail closed. TTL is per call because
 the window is per *subscription* (it must exceed that subscription's
 redelivery window), while one `Store` serves them all.
 
+**A `warren/inbox/inboxtest` contract suite is owed** before a second store
+exists, as `broker/brokertest` is for the broker port — otherwise Postgres and
+Redis each re-derive the semantics, and the one that catches people is that
+**re-marking refreshes the TTL** (Redis `SET … EX` does it natively; Postgres
+needs an explicit `ON CONFLICT … DO UPDATE`).
+
 **The memory store is bounded** (200k records by default) and evicts the
 earliest deadline first: the sweep can only reclaim what has already expired,
 so an unbounded map under a default-on middleware is throughput × TTL — tens
@@ -1534,7 +1588,8 @@ All generators support `--dry-run` and `--force`.
 | Config | — | Build | Viper rejected: weight + global state |
 | Lifecycle | — | Build | fx rejected: imposes its own lifecycle |
 | Logging | `log/slog` | Vendor | stdlib |
-| Validation | `go-playground/validator/v10` | Wrap | errors normalised to `errors.Error` |
+| Validation (core) | — (stdlib `reflect`) | Build | port + `Required()` + `None()` in core; every unenforceable token is **refused at boot**, never ignored. Invariant 1 makes any library here impossible |
+| Validation (full tags) | `go-playground/validator/v10` | Wrap | own module `warren/validate/playground` (§2.7a) · errors normalised to `errors.Error` before leaving it · **audit not yet written — blocks the module** |
 | HTTP | `net/http.ServeMux` | Vendor | stdlib. **`go-chi/chi/v5` rejected 2026-08-02** — healthy (MIT, zero deps, released 2026-07-06) and still wrong here: measured 4 allocs / 704 B per request vs ServeMux's 2 / 48, because `Mux.ServeHTTP` clones the request; and behind the sealed Registrar none of what chi is bought for is reachable. gin rejected (29 indirect requires, incl. a mongo driver and a JIT JSON encoder); httprouter rejected (v1.3.0, 2019-09; no commit since 2024-07 — the rule-9 case in all but the flag); fasthttp/fiber rejected (no `func(http.Handler) http.Handler`, no Flusher/Hijacker, no HTTP/2) |
 | gRPC | `google.golang.org/grpc` | Wrap | shared middleware chain |
 | Proto | `buf` | Vendor | tooling only |
