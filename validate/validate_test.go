@@ -184,3 +184,32 @@ func BenchmarkRuleFail(b *testing.B) {
 		_ = rule(v)
 	}
 }
+
+// TestNoneIsTheExplicitOptOut pins the escape hatch the 2026-08-02 review
+// found missing: before validate/playground ships, a project using a common
+// tag like validate:"email" could not boot at all.
+func TestNoneIsTheExplicitOptOut(t *testing.T) {
+	t.Parallel()
+
+	type richer struct {
+		Email string `json:"email" validate:"required,email"`
+	}
+	rule, err := validate.PlanFor[richer](validate.None())
+	if err != nil {
+		t.Fatalf("None() refused a plan: %v", err)
+	}
+	if err := rule(&richer{}); err != nil {
+		t.Errorf("None() enforced something: %v — opting out means opting out", err)
+	}
+
+	// And the refusal names both ways forward.
+	_, err = validate.PlanFor[richer](validate.Required())
+	if err == nil {
+		t.Fatal("Required() accepted a tag it cannot enforce")
+	}
+	for _, want := range []string{"validate/playground", "validate.None()"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the diagnostic does not offer %q:\n%s", want, err)
+		}
+	}
+}

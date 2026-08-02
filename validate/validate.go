@@ -53,6 +53,19 @@ func PlanFor[T any](v Validator) (func(*T) error, error) {
 // token.
 func Required() Validator { return required{} }
 
+// None returns a Validator that enforces nothing and accepts every tag. It
+// is the explicit opt-out for a project using constraints core cannot
+// enforce before warren/validate/playground ships: validation becomes the
+// handler's business, stated in one visible line of wiring rather than
+// silently skipped.
+func None() Validator { return none{} }
+
+type none struct{}
+
+func (none) Plan(reflect.Type) (Rule, error) {
+	return func(any) error { return nil }, nil
+}
+
 type required struct{}
 
 // field is one planned presence check.
@@ -198,8 +211,9 @@ func errUnsupported(t reflect.Type, tokens []string) error {
 			"    %s uses constraints the standard-library validator cannot enforce:\n"+
 			"    %s\n\n"+
 			"  Core enforces validate:\"required\" only — refusing the rest rather than\n"+
-			"  silently under-validating. For the full vocabulary install\n"+
-			"  github.com/MerseniBilel/warren/validate/playground and pass\n"+
-			"  playground.New() where the validator is configured.",
+			"  silently under-validating. Two ways forward:\n"+
+			"    • install github.com/MerseniBilel/warren/validate/playground and pass\n"+
+			"      playground.New() where the validator is configured, or\n"+
+			"    • opt out explicitly with validate.None() and validate in the handler.",
 		t, strings.Join(tokens, ", ")))
 }

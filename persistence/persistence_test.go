@@ -276,3 +276,44 @@ func BenchmarkTrackCollect(b *testing.B) {
 		_ = drain()
 	}
 }
+
+// TestCommitSinkMayUseTheUnitOfWork pins the deadlock the 2026-08-02 review
+// reproduced: the outbox writer is a commit sink that writes through this
+// same unit of work, so the commit must not hold its lock across the
+// callback.
+func TestCommitSinkMayUseTheUnitOfWork(t *testing.T) {
+	t.Parallel()
+
+	uow := persistence.NewMemoryUnitOfWork()
+	repo := persistence.NewMemoryRepository[*order, orderID](uow)
+	sinkSaw := 0
+	uow.OnCommit(func(ctx context.Context, events []domain.Event) error {
+		// Reads and writes through the same uow — what an outbox sink does.
+		if _, err := repo.FindByID(ctx, "a"); err == nil {
+			sinkSaw++
+		}
+		return repo.Save(ctx, newOrder("audit", 0))
+	})
+
+	done := make(chan error, 1)
+	go func() {
+		done <- uow.Do(context.Background(), func(ctx context.Context) error {
+			return repo.Save(ctx, newOrder("a", 1))
+		})
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Do: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("a commit sink touching the repository deadlocked the commit")
+	}
+	if sinkSaw != 1 {
+		t.Error("the sink could not see the transaction's own writes — it must run inside the transaction")
+	}
+	// The sink's own write committed with everything else.
+	if _, err := repo.FindByID(context.Background(), "audit"); err != nil {
+		t.Errorf("the sink's write did not commit: %v", err)
+	}
+}

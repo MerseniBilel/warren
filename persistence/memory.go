@@ -87,19 +87,31 @@ func (u *MemoryUnitOfWork) Do(ctx context.Context, fn func(context.Context) erro
 
 	events := drain()
 
+	// Snapshot the sinks and RELEASE the lock before running them: a sink
+	// legitimately reads or writes through this same unit of work — the
+	// outbox writer is exactly that — and holding u.mu across the callback
+	// would deadlock the commit against itself.
 	u.mu.Lock()
-	defer u.mu.Unlock()
-	for _, sink := range u.commit {
-		if err := sink(ctx, events); err != nil {
+	sinks := append([]func(context.Context, []domain.Event) error(nil), u.commit...)
+	u.mu.Unlock()
+
+	// The sinks run inside the transaction: txCtx, not ctx, so a sink's own
+	// writes join it, and a failing sink fails the whole transaction — that
+	// atomicity is what the outbox depends on.
+	for _, sink := range sinks {
+		if err := sink(txCtx, events); err != nil {
 			return errors.Unavailable("unit of work commit", err)
 		}
 	}
+
+	u.mu.Lock()
 	s.mu.Lock()
 	maps.Copy(u.entities, s.puts)
 	for k := range s.deletes {
 		delete(u.entities, k)
 	}
 	s.mu.Unlock()
+	u.mu.Unlock()
 	committed = true
 	return nil
 }

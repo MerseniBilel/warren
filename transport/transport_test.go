@@ -10,6 +10,7 @@ import (
 	"github.com/MerseniBilel/warren/broker"
 	werrors "github.com/MerseniBilel/warren/errors"
 	"github.com/MerseniBilel/warren/transport"
+	"github.com/MerseniBilel/warren/validate"
 )
 
 // --- the §3.5 fixture: one handler, three protocols -----------------------
@@ -390,3 +391,49 @@ func BenchmarkInvoker(b *testing.B) {
 }
 
 var _ = stderrors.New
+
+func TestNestedParamTagIsARegistrationError(t *testing.T) {
+	t.Parallel()
+
+	type nested struct {
+		Inner struct {
+			ID string `param:"id"`
+		}
+	}
+	b := transport.NewBuilder()
+	transport.Get(b.For("m"), "/x/{id}", app.Handler[nested, userDTO](app.HandlerFunc[nested, userDTO](
+		func(context.Context, nested) (userDTO, error) { return userDTO{}, nil })))
+	_, err := b.Table()
+	if err == nil {
+		t.Fatal("a nested param tag registered silently — it would surface as a zero value on request 1")
+	}
+	if !strings.Contains(err.Error(), "nested parameter tag") {
+		t.Errorf("diagnostic:\n%s", err)
+	}
+}
+
+func TestValidatorIsConfigurable(t *testing.T) {
+	t.Parallel()
+
+	type richer struct {
+		Email string `json:"email" validate:"required,email"`
+	}
+	reg := func(b *transport.Builder) {
+		transport.Post(b.For("user"), "/users", app.Handler[richer, userDTO](app.HandlerFunc[richer, userDTO](
+			func(context.Context, richer) (userDTO, error) { return userDTO{}, nil })))
+	}
+
+	// The default refuses a tag it cannot enforce...
+	b := transport.NewBuilder()
+	reg(b)
+	if _, err := b.Table(); err == nil {
+		t.Error("the default validator accepted a constraint it cannot enforce")
+	}
+
+	// ...and the explicit opt-out lets the project boot.
+	b = transport.NewBuilder(transport.WithValidator(validate.None()))
+	reg(b)
+	if _, err := b.Table(); err != nil {
+		t.Errorf("validate.None() did not unblock registration: %v", err)
+	}
+}

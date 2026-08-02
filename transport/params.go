@@ -41,6 +41,14 @@ func paramSetters(t reflect.Type) ([]setter, error) {
 			}
 		}
 		if name == "" {
+			// A tag nested inside a struct field would never be bound, and
+			// silently ignoring it is the failure this package refuses
+			// everywhere else: it would surface as a zero value on request 1.
+			if sf.Type.Kind() == reflect.Struct && hasParamTag(sf.Type) {
+				errs = append(errs, diagnostic(fmt.Sprintf(
+					"✗ nested parameter tag\n\n    field %s (%s) contains param:/query: tags, but parameters bind to\n    top-level fields only.\n\n  Move the tagged field up to the request struct, or drop the tag.",
+					sf.Name, sf.Type)))
+			}
 			continue
 		}
 		set, err := setterFor(sf.Type)
@@ -56,6 +64,24 @@ func paramSetters(t reflect.Type) ([]setter, error) {
 		return nil, errRegistration(errs)
 	}
 	return out, nil
+}
+
+// hasParamTag reports whether t or anything beneath it carries a param: or
+// query: tag.
+func hasParamTag(t reflect.Type) bool {
+	for i := range t.NumField() {
+		sf := t.Field(i)
+		if !sf.IsExported() {
+			continue
+		}
+		if sf.Tag.Get("param") != "" || sf.Tag.Get("query") != "" {
+			return true
+		}
+		if sf.Type.Kind() == reflect.Struct && sf.Type != t && hasParamTag(sf.Type) {
+			return true
+		}
+	}
+	return false
 }
 
 func setterFor(t reflect.Type) (func(reflect.Value, string) error, error) {

@@ -253,6 +253,13 @@ func (r *Relay) DrainOnce(ctx context.Context) (int, error) {
 
 // disposition decides what happens to the batch that failed, by the
 // outermost §2.6 code of the publish error.
+//
+// A rejection parks the batch's HEAD only, not the whole batch: the broker
+// rejected one message and the batch is how they were sent, not what they
+// are. Parking head-first converges — each drain retries the batch minus the
+// parked record, so a rejection caused by the third message parks the first
+// two only if they are rejected in turn, and every record gets its own
+// verdict.
 func (r *Relay) disposition(ctx context.Context, group []Record, cause error) error {
 	head := group[0]
 	switch codeOf(cause) {
@@ -268,6 +275,7 @@ func (r *Relay) disposition(ctx context.Context, group []Record, cause error) er
 		if err := r.store.MarkFailed(ctx, head.Message.ID, cause); err != nil {
 			return fmt.Errorf("outbox: parking record %s: %w", head.Message.ID, err)
 		}
+		r.forget([]string{head.Message.ID})
 		return errParked(head, cause, 1)
 
 	default:
