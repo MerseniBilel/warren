@@ -150,11 +150,19 @@ contract now.
       type, AssertPublished, Golden *(implemented; stdlib + core only)*
 - [ ] `auth`, `resilience`, `jobs`, `openapi`
 
-### Phase 6 — the CLI
+### Phase 6 — the CLI *(the discovery engine: scaffolding real apps is how
+### weaknesses get found)*
 
-- [ ] Analyzer (works on any Go project) → `lint arch` → `doctor` → `graph`
-- [ ] Generators with golden-file tests, `--dry-run`/`--force`
-- [ ] `warren new`, `explain di`, `extract module`
+- [ ] `warren new` — a scaffold that compiles and tests against today's
+      framework, with the CI gate that builds it (the anti-rot mechanism)
+- [ ] `warren g module|entity|command|repository|consumer` — golden-file
+      tested, idempotent, stdlib AST editing (no `dst`: it has published no
+      releases and sat untouched through Go 1.19–1.27)
+- [ ] `warren lint arch --rules=layers|rings` — subsumes two greps in
+      `scripts/invariants.sh`; runs on Warren's own repo, same binary
+- [ ] `warren version`; tag core v0.1.0 so a scaffold's go.mod resolves
+- [ ] v0.2+: `doctor`, `graph`, `explain di`, `templates eject`
+- [ ] v0.3+: `extract module`, `add <adapter>`, `migrate layout`
 
 ---
 

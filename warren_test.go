@@ -649,3 +649,61 @@ func TestHealthReadinessFollowsTheLifecycle(t *testing.T) {
 		t.Errorf("Ready() after Stop = %+v, want down/draining — readiness closes first", rep)
 	}
 }
+
+// TestBindShadowsAndNamesItself covers two findings the scaffold surfaced:
+// a harness binding a fake over an application's real provider must shadow
+// it rather than collide, and a synthetic provider must never appear in a
+// diagnostic as reflect.makeFuncStub at asm_arm64.s — the leak class
+// invariant 2 exists to prevent, in Warren's own code.
+func TestBindShadowsAndNamesItself(t *testing.T) {
+	t.Parallel()
+
+	t.Run("bind replaces an existing provider", func(t *testing.T) {
+		t.Parallel()
+		real := &pool{}
+		fake := &pool{}
+		var got *pool
+		m := warren.NewModule("platformB",
+			warren.Providers(func() *pool { return real }),
+			warren.Consumers(func(p *pool) *userService { got = p; return &userService{} }),
+		)
+		app := warren.New(m)
+		if err := app.Substitute(warren.Bind[*pool](fake)); err != nil {
+			t.Fatalf("Substitute: %v", err)
+		}
+		if err := app.Start(context.Background()); err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+		defer func() { _ = app.Stop(context.Background()) }()
+		if got != fake {
+			t.Error("Bind did not shadow the module's own provider — a harness binding a fake over a real one is the normal case")
+		}
+	})
+
+	t.Run("a substituted binding names itself in diagnostics", func(t *testing.T) {
+		t.Parallel()
+		// Two bindings of one type collide; the diagnostic must name them,
+		// not a runtime stub.
+		m := warren.NewModule("ambig",
+			warren.Providers(func() *pool { return &pool{} }),
+			warren.Consumers(func(*pool) *userService { return &userService{} }),
+		)
+		app := warren.New(m)
+		_ = app.Substitute(warren.Bind[*pool](&pool{}))
+		// Force an ambiguity by also providing it in the root via a second
+		// module that exports the same type.
+		other := warren.NewModule("ambig2",
+			warren.Providers(func() *pool { return &pool{} }),
+			warren.Exports[*pool](),
+		)
+		app2 := warren.New(m, other)
+		_ = app2.Substitute(warren.Bind[*pool](&pool{}))
+		err := app2.Start(context.Background())
+		if err != nil && strings.Contains(err.Error(), "makeFuncStub") {
+			t.Errorf("a diagnostic names a runtime stub instead of the binding:\n%v", err)
+		}
+		if err != nil && strings.Contains(err.Error(), "asm_") {
+			t.Errorf("a diagnostic points at assembly instead of the caller:\n%v", err)
+		}
+	})
+}

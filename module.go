@@ -47,6 +47,16 @@ type ModuleOption func(*Module)
 // Nothing is registered and no container is touched. The call site is
 // recorded: it is the "declared in module.go:14" line of the missing-provider
 // diagnostic.
+//
+// Declare each module ONCE. Modules are deduplicated by identity, so the
+// natural `func Module() warren.Module` factory produces two distinct
+// modules the moment two features import it, and two modules sharing a name
+// is a boot error. The idiom that reads like a function and yields one
+// identity:
+//
+//	var Module = sync.OnceValue(func() warren.Module {
+//	    return warren.NewModule("platform", ...)
+//	})
 func NewModule(name string, opts ...ModuleOption) Module {
 	m := Module{name: name, declared: callerSite(), id: new(int)}
 	for _, opt := range opts {
@@ -138,19 +148,25 @@ type Substitution struct {
 	t       reflect.Type
 	value   any
 	replace bool
+	site    string
 }
 
 // Substitute replaces every provider of T with v. An unmatched substitution
 // is a boot error naming T — a typo'd fake is never silently ignored, which
 // is the failure mode that makes test doubles untrustworthy.
 func Substitute[T any](v T) Substitution {
-	return Substitution{t: reflect.TypeFor[T](), value: v, replace: true}
+	return Substitution{t: reflect.TypeFor[T](), value: v, replace: true, site: callerSite()}
 }
 
 // Bind provides v as T in the root scope, where every module can see it.
-// A conflict with an existing provider is a boot error.
+//
+// If the graph already provides T, Bind REPLACES that provider rather than
+// colliding with it: a harness binding a fake broker into an application
+// whose platform module provides a real one is the normal case, and an
+// ambiguous-binding failure there would be useless. Use Substitute when the
+// replacement is required — it fails the boot if nothing matched.
 func Bind[T any](v T) Substitution {
-	return Substitution{t: reflect.TypeFor[T](), value: v}
+	return Substitution{t: reflect.TypeFor[T](), value: v, site: callerSite()}
 }
 
 // callerSite records where the module was really declared, trimmed to the

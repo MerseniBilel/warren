@@ -420,3 +420,32 @@ func TestLeaderElectionGatesTheLoop(t *testing.T) {
 type neverLeads struct{}
 
 func (neverLeads) Lead(context.Context, func(context.Context) error) error { return nil }
+
+func TestSinkBridgesPersistenceToTheOutbox(t *testing.T) {
+	t.Parallel()
+
+	store := outbox.NewMemoryStore()
+	sink := outbox.Sink(store, outbox.JSONEncoder())
+
+	err := sink(context.Background(), []domain.Event{
+		placed{Order: "o-1", Total: 100, At: time.Unix(1, 0)},
+		placed{Order: "o-2", Total: 200, At: time.Unix(2, 0)},
+	})
+	if err != nil {
+		t.Fatalf("Sink: %v", err)
+	}
+	recs, _ := store.Pending(context.Background(), 10)
+	if len(recs) != 2 {
+		t.Fatalf("appended %d records, want 2", len(recs))
+	}
+	if recs[0].Topic != "order.placed" || recs[0].Message.Key != "o-1" {
+		t.Errorf("record = %+v", recs[0])
+	}
+	// No events is not an append.
+	if err := sink(context.Background(), nil); err != nil {
+		t.Fatalf("Sink(nil): %v", err)
+	}
+	if recs, _ := store.Pending(context.Background(), 10); len(recs) != 2 {
+		t.Error("an empty drain appended something")
+	}
+}

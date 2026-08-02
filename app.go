@@ -124,10 +124,14 @@ func (a *App) Start(ctx context.Context) error {
 				exported := false
 				outs := outputsOf(ctor)
 				if sub, ok := a.replacementFor(outs); ok {
-					// A substituted provider is replaced wholesale: the fake
-					// is provided instead, and the real constructor never
-					// runs (so its own dependencies need not resolve).
+					// A substituted provider is replaced wholesale: the
+					// value is provided instead, and the real constructor
+					// never runs (so its own dependencies need not resolve).
 					ctor = constantProvider(sub.t, sub.value)
+					opts = append(opts, di.Named(sub.name()))
+					if sub.site != "" {
+						opts = append(opts, di.DeclaredAt(splitSite(sub.site)))
+					}
 					outs = []reflect.Type{sub.t}
 					matched[sub.t] = true
 				}
@@ -176,13 +180,18 @@ func (a *App) Start(ctx context.Context) error {
 	// them; a Substitute that matched no provider is a boot error, because a
 	// fake that was silently ignored is worse than no fake.
 	for _, sub := range a.subs {
-		if sub.replace {
-			if !matched[sub.t] {
-				return errUnmatchedSubstitution(sub.t)
-			}
+		if sub.replace && !matched[sub.t] {
+			return errUnmatchedSubstitution(sub.t)
+		}
+		if matched[sub.t] {
+			// Already applied in place of the provider it replaced.
 			continue
 		}
-		if err := root.Provide(constantProvider(sub.t, sub.value)); err != nil {
+		opts := []di.ProvideOption{di.Named(sub.name())}
+		if sub.site != "" {
+			opts = append(opts, di.DeclaredAt(splitSite(sub.site)))
+		}
+		if err := root.Provide(constantProvider(sub.t, sub.value), opts...); err != nil {
 			return err
 		}
 	}
@@ -280,13 +289,21 @@ func (a *App) Stop(ctx context.Context) error {
 	return lc.Stop(ctx)
 }
 
+// name renders a substitution the way diagnostics should print it — never
+// as reflect.makeFuncStub, which is what a synthetic provider is called
+// unless it is given a name.
+func (s Substitution) name() string {
+	if s.replace {
+		return fmt.Sprintf("warren.Substitute[%s]", s.t)
+	}
+	return fmt.Sprintf("warren.Bind[%s]", s.t)
+}
+
 // replacementFor reports the substitution matching any of these output
 // types.
 func (a *App) replacementFor(outs []reflect.Type) (Substitution, bool) {
 	for _, sub := range a.subs {
-		if !sub.replace {
-			continue
-		}
+		// Bind shadows an existing provider too — see its doc comment.
 		if slices.Contains(outs, sub.t) {
 			return sub, true
 		}

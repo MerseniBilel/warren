@@ -129,6 +129,38 @@ func (e *jsonEncoder) Encode(ev domain.Event) (Record, error) {
 	}, nil
 }
 
+// Sink returns the commit hook that turns an aggregate's drained events
+// into outbox records: encode each one, append them all in the caller's
+// transaction. It is the bridge between persistence and outbox, and every
+// application was writing it by hand.
+//
+//	uow.OnCommit(outbox.Sink(store, outbox.JSONEncoder()))
+//
+// Appending inside the transaction is the whole pattern: the aggregate's
+// new state and the rows announcing it commit together or not at all.
+func Sink(store Store, enc Encoder) func(context.Context, []domain.Event) error {
+	if store == nil {
+		panic("outbox: Sink with a nil store")
+	}
+	if enc == nil {
+		enc = JSONEncoder()
+	}
+	return func(ctx context.Context, events []domain.Event) error {
+		if len(events) == 0 {
+			return nil
+		}
+		recs := make([]Record, 0, len(events))
+		for _, e := range events {
+			rec, err := enc.Encode(e)
+			if err != nil {
+				return err
+			}
+			recs = append(recs, rec)
+		}
+		return store.Append(ctx, recs...)
+	}
+}
+
 // Elector grants the exclusive right to drain the outbox. Lead acquires
 // leadership, runs fn with a context cancelled when leadership is lost, and
 // returns when fn returns.
@@ -241,11 +273,17 @@ func NewRelay(store Store, pub broker.Publisher, opts ...RelayOption) *Relay {
 //
 // Register it from a constructor that injects lifecycle.Lifecycle:
 //
+//	ctx, cancel := context.WithCancel(context.Background())
 //	lc.Append(lifecycle.Hook{
 //	    Name:    "outbox relay",
-//	    OnStart: func(ctx context.Context) error { go relay.Run(ctx); return nil },
-//	    OnStop:  relay.Flush,
+//	    OnStart: func(context.Context) error { go relay.Run(ctx); return nil },
+//	    OnStop:  func(c context.Context) error { cancel(); return relay.Flush(c) },
 //	})
+//
+// The loop's context must NOT be OnStart's: that one is the boot context,
+// which outlives boot only under Run and is cancelled immediately under
+// Start/Stop — so a relay started on it would leak the goroutine in every
+// test.
 //
 // A drain error does not end the loop — a broker outage is transient by
 // definition, and the disposition rules already decide what happens to the
