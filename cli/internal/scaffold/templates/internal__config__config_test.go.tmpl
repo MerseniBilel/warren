@@ -1,0 +1,34 @@
+package config_test
+
+import (
+	"strings"
+	"testing"
+	"time"
+
+	wconfig "github.com/MerseniBilel/warren/config"
+
+	"{{.Module}}/internal/config"
+)
+
+func TestDefaults(t *testing.T) {
+	t.Setenv("{{.EnvPrefix}}_NAME", "{{.Name}}")
+
+	cfg, err := wconfig.Load[config.Config](wconfig.WithEnvPrefix("{{.EnvPrefix}}"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Env != "development" || cfg.Outbox.PollInterval != time.Second || cfg.Outbox.BatchSize != 100 {
+		t.Errorf("defaults not applied: %+v", cfg)
+	}
+}
+
+func TestNameIsRequired(t *testing.T) {
+	_, err := wconfig.Load[config.Config](wconfig.WithEnvPrefix("{{.EnvPrefix}}"))
+	if err == nil {
+		t.Fatal("Load succeeded without {{.EnvPrefix}}_NAME")
+	}
+	// The diagnostic names the exact variable to set.
+	if !strings.Contains(err.Error(), "{{.EnvPrefix}}_NAME") {
+		t.Errorf("error does not name the variable: %v", err)
+	}
+}

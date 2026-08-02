@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | Draft — not approved |
+| **Status** | **Approved (2026-08-02); `warren new` + `version` implemented** — the scaffold compiles, vets, and passes its own tests against the framework, gated by a CI test that builds it. Decisions: cobra (contributor familiarity beat urfave/cli's better dependency numbers); **`dave/dst` REJECTED** — no published releases, untouched 2022-12→2026-04, pins x/tools from 2022 — the AST editor is stdlib splicing, which preserves comments by construction. Generators, `lint arch`, and the rest follow in the recorded order. |
 | **Source** | [warren.md §8](../warren.md) |
 | **Module** | own module (`warren/cli`) — build-time only, never in a service go.mod |
 | **Mode** | Vendor |

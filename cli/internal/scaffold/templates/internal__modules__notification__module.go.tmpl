@@ -1,0 +1,70 @@
+// Package notification consumes the events other features raise.
+package notification
+
+import (
+	"context"
+	"encoding/json"
+	"sync"
+
+	"github.com/MerseniBilel/warren"
+	"github.com/MerseniBilel/warren/app"
+	"github.com/MerseniBilel/warren/broker"
+	"github.com/MerseniBilel/warren/errors"
+	"github.com/MerseniBilel/warren/inbox"
+	"github.com/MerseniBilel/warren/lifecycle"
+
+	"{{.Module}}/internal/modules/notification/application"
+	"{{.Module}}/internal/platform"
+)
+
+// Module declares the feature. Declared once — see platform.Module.
+var Module = sync.OnceValue(func() warren.Module {
+	return warren.NewModule("notification",
+		warren.Imports(platform.Module()),
+		warren.Providers(application.NewOnUserRegisteredHandler),
+		warren.Consumers(newSubscription),
+	)
+})
+
+type subscription struct{}
+
+// newSubscription wires the handler into the consumer chain and starts it
+// as a lifecycle component.
+//
+// When the transport adapters ship, this becomes one line in a Register
+// method — transport.OnEvent(r, "user.registered", h) — and the pipeline is
+// assembled for you.
+func newSubscription(
+	h app.Handler[application.UserRegistered, application.Sent],
+	pub broker.Publisher,
+	sub broker.Subscriber,
+	store inbox.Store,
+	lc lifecycle.Lifecycle,
+) *subscription {
+	const topic = "user.registered"
+
+	// Decode the payload into the typed event; a malformed message is
+	// INVALID, which dead-letters without retrying.
+	handle := func(ctx context.Context, msg broker.Message) error {
+		var e application.UserRegistered
+		if err := json.Unmarshal(msg.Payload, &e); err != nil {
+			return errors.Invalid("payload", err)
+		}
+		_, err := h.Handle(ctx, e)
+		return err
+	}
+
+	// The chain: recover, drain, trace, dedupe, dead-letter, retry, limit.
+	pipeline, wait := broker.Pipeline(topic, handle, store, pub)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	lc.Append(lifecycle.Hook{
+		Name:    "notification consumer",
+		OnStart: func(context.Context) error { go func() { _ = sub.Subscribe(ctx, topic, pipeline) }(); return nil },
+		OnStop: func(c context.Context) error {
+			cancel()
+			return wait(c)
+		},
+	})
+	return &subscription{}
+}

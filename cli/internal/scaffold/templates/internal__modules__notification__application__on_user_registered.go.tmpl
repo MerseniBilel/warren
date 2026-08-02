@@ -1,0 +1,43 @@
+// Package application holds the notification feature's use cases.
+package application
+
+import (
+	"context"
+	"log/slog"
+	"time"
+
+	"github.com/MerseniBilel/warren/app"
+	"github.com/MerseniBilel/warren/log"
+)
+
+// UserRegistered is this module's OWN view of the fact, declared locally
+// and decoded from the wire.
+//
+// It deliberately does not import the user module's Go type: the contract
+// between modules is the wire format, which is what makes extracting a
+// module into its own service a wiring change rather than a rewrite.
+type UserRegistered struct {
+	UserID string    `json:"user_id"`
+	Email  string    `json:"email"`
+	At     time.Time `json:"at"`
+}
+
+// Sent is the (empty) result — a consumer's response is discarded; its
+// error is the disposition.
+type Sent struct{}
+
+type onUserRegistered struct{}
+
+// NewOnUserRegisteredHandler returns the handler for the event.
+func NewOnUserRegisteredHandler() app.Handler[UserRegistered, Sent] {
+	return &onUserRegistered{}
+}
+
+func (h *onUserRegistered) Handle(ctx context.Context, e UserRegistered) (Sent, error) {
+	// Returning nil acks. Returning an error hands the message to the retry
+	// and dead-letter middleware, which decide by the error's code.
+	log.FromContext(ctx).Info("would send a welcome email",
+		slog.String("user_id", e.UserID),
+		slog.String("email", e.Email))
+	return Sent{}, nil
+}

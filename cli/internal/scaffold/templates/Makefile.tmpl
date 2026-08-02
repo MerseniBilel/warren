@@ -1,0 +1,13 @@
+.PHONY: run test fmt vet
+
+run:
+	{{.EnvPrefix}}_NAME={{.Name}} go run ./cmd/{{.Name}}
+
+test:
+	go test -race ./...
+
+fmt:
+	gofmt -l -w .
+
+vet:
+	go vet ./...

@@ -1,0 +1,61 @@
+package application_test
+
+import (
+	"context"
+	"testing"
+
+	werrors "github.com/MerseniBilel/warren/errors"
+
+	"{{.Module}}/internal/modules/user/application"
+	"{{.Module}}/internal/modules/user/domain"
+)
+
+// fakeRepo is a hand-written double — no mocking framework, by design: a
+// fake you can read is a fake you can trust.
+type fakeRepo struct {
+	existing map[domain.Email]*domain.User
+	saved    *domain.User
+}
+
+func (f *fakeRepo) FindByID(context.Context, domain.UserID) (*domain.User, error) {
+	return nil, werrors.NotFound("user", "")
+}
+
+func (f *fakeRepo) FindByEmail(_ context.Context, e domain.Email) (*domain.User, error) {
+	if u, ok := f.existing[e]; ok {
+		return u, nil
+	}
+	return nil, werrors.NotFound("user", e)
+}
+
+func (f *fakeRepo) Save(_ context.Context, u *domain.User) error { f.saved = u; return nil }
+
+// noopUoW runs the function without a transaction — enough to unit-test the
+// handler in isolation.
+type noopUoW struct{}
+
+func (noopUoW) Do(ctx context.Context, fn func(context.Context) error) error { return fn(ctx) }
+
+func TestRegisterUserSavesAndRaises(t *testing.T) {
+	t.Parallel()
+
+	repo := &fakeRepo{existing: map[domain.Email]*domain.User{}}
+	h := application.NewRegisterUserHandler(repo, noopUoW{})
+
+	view, err := h.Handle(context.Background(), application.RegisterUser{
+		Email: "bob@example.com", Name: "Bob",
+	})
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if view.Email != "bob@example.com" {
+		t.Errorf("view = %+v", view)
+	}
+	if repo.saved == nil {
+		t.Fatal("the user was never saved")
+	}
+	// The aggregate raised its fact; the unit of work is what publishes it.
+	if events := repo.saved.PullEvents(); len(events) != 1 {
+		t.Errorf("raised %d events, want 1", len(events))
+	}
+}

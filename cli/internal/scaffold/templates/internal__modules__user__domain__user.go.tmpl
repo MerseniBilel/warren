@@ -1,0 +1,85 @@
+// Package domain is the user feature's domain layer. It imports nothing
+// from application, infrastructure, or interfaces — that rule is why it can
+// be tested, versioned, and extracted on its own.
+package domain
+
+import (
+	"context"
+	"errors"
+	"strings"
+	"time"
+
+	wdomain "github.com/MerseniBilel/warren/domain"
+	werrors "github.com/MerseniBilel/warren/errors"
+)
+
+// UserID identifies a user. It is comparable and renders itself, which is
+// what domain.ID requires: identifiers become map keys, URL segments, and
+// message keys.
+type UserID string
+
+func (id UserID) String() string { return string(id) }
+
+// Email is a validated address — a value object, so an invalid one cannot
+// be constructed.
+type Email string
+
+func (e Email) String() string { return string(e) }
+
+// NewEmail validates and returns an address.
+func NewEmail(s string) (Email, error) {
+	if !strings.Contains(s, "@") || strings.HasPrefix(s, "@") || strings.HasSuffix(s, "@") {
+		return "", werrors.Invalid("email", errInvalidEmail)
+	}
+	return Email(strings.ToLower(s)), nil
+}
+
+var errInvalidEmail = errors.New("must contain a local part and a domain")
+
+// User is the aggregate: the consistency boundary a repository loads and
+// saves whole.
+type User struct {
+	wdomain.AggregateRoot[UserID]
+	Email Email
+	Name  string
+}
+
+// NewUser mints the identity, then raises the fact. Raise records; it
+// publishes nothing — the unit of work drains the events into the outbox
+// inside the transaction, which is what makes the state change and its
+// announcement atomic.
+func NewUser(id UserID, email Email, name string, now time.Time) *User {
+	u := &User{
+		AggregateRoot: wdomain.NewAggregateRoot(id),
+		Email:         email,
+		Name:          name,
+	}
+	u.Raise(UserRegistered{UserID: id, Email: email.String(), At: now})
+	return u
+}
+
+// UserRegistered is a fact that has already happened.
+type UserRegistered struct {
+	UserID UserID    `json:"user_id"`
+	Email  string    `json:"email"`
+	At     time.Time `json:"at"`
+}
+
+// EventName is the topic and type key for messaging.
+func (e UserRegistered) EventName() string { return "user.registered" }
+
+// OccurredAt is when the fact happened, not when it was published.
+func (e UserRegistered) OccurredAt() time.Time { return e.At }
+
+// AggregateID ties the fact to its aggregate — and, as the message key,
+// preserves per-aggregate order through a partitioned broker.
+func (e UserRegistered) AggregateID() string { return e.UserID.String() }
+
+// UserRepository is the port the application layer depends on. It lives
+// here, in the domain, so infrastructure depends on the domain and never
+// the other way round.
+type UserRepository interface {
+	FindByID(ctx context.Context, id UserID) (*User, error)
+	FindByEmail(ctx context.Context, email Email) (*User, error)
+	Save(ctx context.Context, u *User) error
+}

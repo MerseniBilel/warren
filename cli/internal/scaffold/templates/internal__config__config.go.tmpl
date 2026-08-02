@@ -1,0 +1,22 @@
+// Package config is the application's configuration.
+package config
+
+import "time"
+
+// Config is loaded at boot from defaults, then the environment. A missing
+// required value fails the boot naming the variable — never a nil-pointer
+// panic on the first request.
+type Config struct {
+	// Name is required: run with {{.EnvPrefix}}_NAME set.
+	Name string `config:"name" validate:"required"`
+
+	// Env is the deployment environment.
+	Env string `config:"env" default:"development"`
+
+	Outbox struct {
+		// PollInterval is the relay's safety net; the store signals it
+		// directly when a record is appended.
+		PollInterval time.Duration `config:"poll_interval" default:"1s"`
+		BatchSize    int           `config:"batch_size" default:"100"`
+	} `config:"outbox"`
+}

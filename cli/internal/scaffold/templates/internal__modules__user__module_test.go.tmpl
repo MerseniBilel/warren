@@ -1,0 +1,98 @@
+package user_test
+
+import (
+	"context"
+	"testing"
+	"time"
+
+	"github.com/MerseniBilel/warren/broker"
+	werrors "github.com/MerseniBilel/warren/errors"
+	warrentest "github.com/MerseniBilel/warren/testing"
+
+	"{{.Module}}/internal/modules/user"
+	"{{.Module}}/internal/modules/user/application"
+	"{{.Module}}/internal/modules/user/domain"
+)
+
+// TestRegisterUser boots the real graph and drives the use case through it,
+// then asserts the event reached the broker — the whole path, with no
+// Docker, no network, and no sleeps.
+func TestRegisterUser(t *testing.T) {
+	t.Setenv("{{.EnvPrefix}}_NAME", "{{.Name}}")
+
+	app := boot(t)
+
+	view, err := warrentest.Invoke[application.RegisterUser, application.UserView](
+		context.Background(), app,
+		application.RegisterUser{Email: "bob@example.com", Name: "Bob"},
+	)
+	if err != nil {
+		t.Fatalf("Invoke: %v", err)
+	}
+	if view.Email != "bob@example.com" {
+		t.Errorf("view = %+v", view)
+	}
+
+	// The outbox relay publishes asynchronously; the message's Key is the
+	// aggregate id, which is what preserves per-aggregate order.
+	waitFor(t, func() bool {
+		return len(warrentest.Published(app, "user.registered")) == 1
+	}, "the registration event never reached the broker")
+
+	msg := warrentest.Published(app, "user.registered")[0]
+	if msg.Key != view.ID {
+		t.Errorf("message key = %q, want the aggregate id %q", msg.Key, view.ID)
+	}
+	if msg.Type != "user.registered" {
+		t.Errorf("message type = %q", msg.Type)
+	}
+	_ = broker.Message{}
+}
+
+func TestDuplicateEmailIsAConflict(t *testing.T) {
+	t.Setenv("{{.EnvPrefix}}_NAME", "{{.Name}}")
+
+	app := boot(t)
+	cmd := application.RegisterUser{Email: "bob@example.com", Name: "Bob"}
+
+	if _, err := warrentest.Invoke[application.RegisterUser, application.UserView](context.Background(), app, cmd); err != nil {
+		t.Fatalf("first registration: %v", err)
+	}
+	_, err := warrentest.Invoke[application.RegisterUser, application.UserView](context.Background(), app, cmd)
+	if !werrors.Is(err, werrors.CodeConflict) {
+		t.Errorf("err = %v, want CONFLICT — an adapter maps it to 409, and a consumer acks it", err)
+	}
+}
+
+func TestInvalidEmailIsRejected(t *testing.T) {
+	t.Setenv("{{.EnvPrefix}}_NAME", "{{.Name}}")
+
+	app := boot(t)
+	_, err := warrentest.Invoke[application.RegisterUser, application.UserView](
+		context.Background(), app,
+		application.RegisterUser{Email: "not-an-address", Name: "Bob"},
+	)
+	if !werrors.Is(err, werrors.CodeInvalid) {
+		t.Errorf("err = %v, want INVALID", err)
+	}
+	_ = domain.UserID("")
+}
+
+// boot starts the feature. Its imports come with it — user imports
+// platform, which imports config — so the test names one module and the
+// harness swaps in the recording broker.
+func boot(t *testing.T) *warrentest.App {
+	t.Helper()
+	return warrentest.NewModuleTest(t, user.Module(), warrentest.WithMemoryBroker())
+}
+
+// waitFor spins on an observable condition — never a sleep.
+func waitFor(t *testing.T, cond func() bool, msg string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatal(msg)
+		}
+	}
+}

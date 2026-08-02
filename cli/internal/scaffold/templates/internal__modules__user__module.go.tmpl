@@ -1,0 +1,28 @@
+// Package user is the user feature. This file is the only one permitted to
+// see all four layers.
+package user
+
+import (
+	"sync"
+
+	"github.com/MerseniBilel/warren"
+
+	"{{.Module}}/internal/modules/user/application"
+	"{{.Module}}/internal/modules/user/domain"
+	"{{.Module}}/internal/modules/user/infrastructure"
+	"{{.Module}}/internal/platform"
+)
+
+// Module declares the feature. Declared once — see platform.Module for why.
+var Module = sync.OnceValue(func() warren.Module {
+	return warren.NewModule("user",
+		warren.Imports(platform.Module()),
+		warren.Providers(
+			infrastructure.NewUserRepository,
+			application.NewRegisterUserHandler,
+		),
+		// Only this leaves the module: another feature can depend on the
+		// port, never on this feature's internals.
+		warren.Exports[domain.UserRepository](),
+	)
+})

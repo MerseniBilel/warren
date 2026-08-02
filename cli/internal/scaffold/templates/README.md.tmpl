@@ -1,0 +1,48 @@
+# {{.Name}}
+
+A [Warren](https://github.com/MerseniBilel/warren) service.
+
+## Run it
+
+```bash
+{{.EnvPrefix}}_NAME={{.Name}} go run ./cmd/{{.Name}}
+```
+
+It boots the module graph, starts the outbox relay and the notification
+consumer, opens readiness, and drains cleanly on SIGTERM. Without
+`{{.EnvPrefix}}_NAME` it fails at boot naming the variable — every error the
+framework can detect surfaces at boot, never on request 1.
+
+## Test it
+
+```bash
+go test -race ./...
+```
+
+`internal/modules/user/module_test.go` boots the whole graph and drives the
+handler through `App.Invoke`, then asserts the event reached the broker
+through the outbox relay. No Docker, no network, no sleeps.
+
+## What is not here yet
+
+**No HTTP or gRPC server.** Those adapters have not shipped. Everything else
+works: use cases, the module graph, config, persistence, the transactional
+outbox, the consumer chain, health.
+
+When `transport/http` ships, uncomment one line in `cmd/{{.Name}}/main.go` —
+the controllers are already written and registered.
+
+## Layout
+
+```
+cmd/{{.Name}}/            main: the module graph and Run()
+internal/config/          the app's Config struct
+internal/platform/        broker, outbox, unit of work, relay, health
+internal/modules/user/    a feature: domain, application, infrastructure
+internal/modules/notification/
+                          a second feature, consuming the first's events
+```
+
+`internal/modules/<name>/module.go` is the only file permitted to see all
+four layers. `domain` imports nothing from the others — that rule is why the
+domain can be tested, versioned, and extracted on its own.

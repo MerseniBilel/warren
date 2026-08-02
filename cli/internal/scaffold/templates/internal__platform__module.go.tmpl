@@ -1,0 +1,134 @@
+// Package platform wires the infrastructure every feature module shares:
+// the broker, the unit of work, the outbox and its relay, and health.
+//
+// Swapping an in-process driver for a real one is a change to this file and
+// nothing else — which is the point of the ports the rest of the app is
+// written against.
+package platform
+
+import (
+	"context"
+	"sync"
+
+	"github.com/MerseniBilel/warren"
+	"github.com/MerseniBilel/warren/app"
+	"github.com/MerseniBilel/warren/broker"
+	wconfig "github.com/MerseniBilel/warren/config"
+	"github.com/MerseniBilel/warren/broker/memory"
+	"github.com/MerseniBilel/warren/health"
+	"github.com/MerseniBilel/warren/inbox"
+	"github.com/MerseniBilel/warren/lifecycle"
+	"github.com/MerseniBilel/warren/outbox"
+	"github.com/MerseniBilel/warren/persistence"
+
+	appconfig "{{.Module}}/internal/config"
+)
+
+// ConfigModule loads the application's configuration. It is declared here,
+// beside the code that reads it, so every feature module reaches it through
+// one import of platform rather than each wiring it themselves.
+var ConfigModule = sync.OnceValue(func() warren.Module {
+	return wconfig.Module[appconfig.Config](wconfig.WithEnvPrefix("{{.EnvPrefix}}"))
+})
+
+// Module is declared once: modules are deduplicated by identity, so a plain
+// factory called by two importers would be two modules sharing a name — a
+// boot error. sync.OnceValue reads like a function and yields one identity.
+var Module = sync.OnceValue(func() warren.Module {
+	return warren.NewModule("platform",
+		warren.Imports(ConfigModule()),
+		warren.Providers(
+			newBroker,
+			publisher,
+			subscriber,
+			newInbox,
+			newOutboxStore,
+			newUnitOfWork,
+			unitOfWork,
+			appUnitOfWork,
+			newRelay,
+		),
+		warren.Exports[broker.Publisher](),
+		warren.Exports[broker.Subscriber](),
+		warren.Exports[inbox.Store](),
+		warren.Exports[persistence.UnitOfWork](),
+		// The concrete unit of work too: the memory repository is built on
+		// it, and a real driver would export its own pool the same way.
+		warren.Exports[*persistence.MemoryUnitOfWork](),
+		warren.Exports[app.UnitOfWork](),
+		// Nothing consumes the relay, so without Eager it would never be
+		// built — and the outbox would never drain.
+		warren.Eager[*outbox.Relay](),
+	)
+})
+
+// broker returns one in-process broker as both ports. Two constructors would
+// build two brokers, and the publisher's messages would never reach the
+// subscriber.
+type brokerPorts struct {
+	pub broker.Publisher
+	sub broker.Subscriber
+}
+
+func newBroker() brokerPorts {
+	b := memory.New()
+	return brokerPorts{pub: b, sub: b}
+}
+
+func newInbox() inbox.Store { return inbox.NewMemoryStore() }
+
+func newOutboxStore() outbox.Store { return outbox.NewMemoryStore() }
+
+// newUnitOfWork attaches the outbox to the transaction: the aggregate's new
+// state and the rows announcing it commit together or not at all.
+func newUnitOfWork(store outbox.Store) *persistence.MemoryUnitOfWork {
+	uow := persistence.NewMemoryUnitOfWork()
+	uow.OnCommit(outbox.Sink(store, outbox.JSONEncoder()))
+	return uow
+}
+
+// newRelay drains the outbox to the broker. It registers its own lifecycle
+// hook and its own health check — the documented pattern for anything
+// created at boot, since warren.OnStart takes a closure fixed at
+// declaration time.
+func newRelay(
+	store outbox.Store,
+	pub broker.Publisher,
+	cfg appconfig.Config,
+	lc lifecycle.Lifecycle,
+	hr health.Registry,
+) (*outbox.Relay, error) {
+	// It takes the PORT, not platform's own broker value: a test that
+	// substitutes a recording publisher must see what the relay publishes.
+	relay := outbox.NewRelay(store, pub,
+		outbox.PollInterval(cfg.Outbox.PollInterval),
+		outbox.BatchSize(cfg.Outbox.BatchSize),
+	)
+
+	// The loop's context must not be OnStart's: that one is the boot
+	// context, cancelled as soon as boot finishes under Start/Stop.
+	ctx, cancel := context.WithCancel(context.Background())
+	lc.Append(lifecycle.Hook{
+		Name:    "outbox relay",
+		OnStart: func(context.Context) error { go func() { _ = relay.Run(ctx) }(); return nil },
+		OnStop: func(c context.Context) error {
+			cancel()
+			return relay.Flush(c)
+		},
+	})
+
+	if err := hr.Register(health.NewCheck("outbox", func(context.Context) error { return nil })); err != nil {
+		return nil, err
+	}
+	return relay, nil
+}
+
+// The ports the feature modules actually inject.
+func publisher(p brokerPorts) broker.Publisher   { return p.pub }
+func subscriber(p brokerPorts) broker.Subscriber { return p.sub }
+func unitOfWork(u *persistence.MemoryUnitOfWork) persistence.UnitOfWork { return u }
+
+// appUnitOfWork is the seam app.Transactional takes: the two interfaces
+// differ only in Do's transaction options, which app deliberately does not
+// know about.
+func appUnitOfWork(u persistence.UnitOfWork) app.UnitOfWork { return persistence.ForApp(u) }

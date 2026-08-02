@@ -1,0 +1,34 @@
+// Command {{.Name}} is a Warren service.
+package main
+
+import (
+	"fmt"
+	"os"
+
+	"github.com/MerseniBilel/warren"
+
+	"{{.Module}}/internal/modules/notification"
+	"{{.Module}}/internal/modules/user"
+	"{{.Module}}/internal/platform"
+)
+
+func main() {
+	err := warren.New(
+		// platform imports the config module, so every feature reaches
+		// Config through one import.
+		platform.Module(),
+		user.Module(),
+		notification.Module(),
+
+		// When the HTTP adapter ships, uncomment this — the controllers are
+		// already written and registered:
+		//   http.Server(http.Port(8080)),
+	).Run()
+
+	if err != nil {
+		// Print, don't log: Warren's diagnostics are multi-line blocks, and a
+		// structured logger would escape every newline into \n.
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+}

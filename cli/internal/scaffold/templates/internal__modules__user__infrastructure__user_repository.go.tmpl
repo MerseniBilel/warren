@@ -1,0 +1,62 @@
+// Package infrastructure holds the user feature's driver-facing code.
+package infrastructure
+
+import (
+	"context"
+	"sync"
+
+	"github.com/MerseniBilel/warren/errors"
+	"github.com/MerseniBilel/warren/persistence"
+
+	"{{.Module}}/internal/modules/user/domain"
+)
+
+// UserRepository is the in-process implementation of the domain's port.
+//
+// Postgres would do the email lookup with UNIQUE (email); the in-process
+// driver has no indexes, so this keeps one. It is deliberately NOT
+// transactional — a rolled-back Save leaves the index entry behind — which
+// is the honest limit of the memory driver, not a pattern to copy.
+type UserRepository struct {
+	inner *persistence.MemoryRepository[*domain.User, domain.UserID]
+
+	mu      sync.RWMutex
+	byEmail map[domain.Email]domain.UserID
+}
+
+// NewUserRepository returns the repository.
+func NewUserRepository(uow *persistence.MemoryUnitOfWork) domain.UserRepository {
+	return &UserRepository{
+		inner:   persistence.NewMemoryRepository[*domain.User, domain.UserID](uow),
+		byEmail: map[domain.Email]domain.UserID{},
+	}
+}
+
+// FindByID returns the user, or an error carrying CodeNotFound.
+func (r *UserRepository) FindByID(ctx context.Context, id domain.UserID) (*domain.User, error) {
+	return r.inner.FindByID(ctx, id)
+}
+
+// FindByEmail returns the user with this address.
+func (r *UserRepository) FindByEmail(ctx context.Context, email domain.Email) (*domain.User, error) {
+	r.mu.RLock()
+	id, ok := r.byEmail[email]
+	r.mu.RUnlock()
+	if !ok {
+		return nil, errors.NotFound("user", email)
+	}
+	return r.inner.FindByID(ctx, id)
+}
+
+// Save persists the user. The embedded repository calls persistence.Track,
+// which is what enlists the aggregate so its events reach the outbox when
+// the transaction commits.
+func (r *UserRepository) Save(ctx context.Context, u *domain.User) error {
+	if err := r.inner.Save(ctx, u); err != nil {
+		return err
+	}
+	r.mu.Lock()
+	r.byEmail[u.Email] = u.ID()
+	r.mu.Unlock()
+	return nil
+}

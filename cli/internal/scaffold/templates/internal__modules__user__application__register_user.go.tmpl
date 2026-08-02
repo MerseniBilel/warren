@@ -1,0 +1,66 @@
+// Package application holds the user feature's use cases. A use case is an
+// app.Handler: one request in, one response out, and an error from the
+// warren/errors vocabulary. It imports no transport package — that is the
+// entire point.
+package application
+
+import (
+	"context"
+	"time"
+
+	"github.com/MerseniBilel/warren/app"
+	"github.com/MerseniBilel/warren/errors"
+
+	"{{.Module}}/internal/modules/user/domain"
+)
+
+// RegisterUser is the command.
+type RegisterUser struct {
+	Email string `json:"email" validate:"required"`
+	Name  string `json:"name"  validate:"required"`
+}
+
+// UserView is what the caller gets back — never the aggregate itself.
+type UserView struct {
+	ID    string `json:"id"`
+	Email string `json:"email"`
+	Name  string `json:"name"`
+}
+
+type registerUser struct {
+	users domain.UserRepository
+	now   func() time.Time
+}
+
+// NewRegisterUserHandler returns the use case wrapped in its core
+// middleware. It returns the PORT, not the concrete type, so the container
+// resolves it by the type every adapter and test looks for.
+//
+// Transactional wraps the handler in the unit of work, so the user row and
+// the outbox row for UserRegistered commit together or not at all.
+func NewRegisterUserHandler(users domain.UserRepository, uow app.UnitOfWork) app.Handler[RegisterUser, UserView] {
+	return app.Chain[RegisterUser, UserView](
+		&registerUser{users: users, now: time.Now},
+		app.Transactional[RegisterUser, UserView](uow),
+	)
+}
+
+func (h *registerUser) Handle(ctx context.Context, cmd RegisterUser) (UserView, error) {
+	email, err := domain.NewEmail(cmd.Email)
+	if err != nil {
+		return UserView{}, err
+	}
+
+	switch _, err := h.users.FindByEmail(ctx, email); {
+	case err == nil:
+		return UserView{}, errors.Conflict("a user with that email already exists")
+	case !errors.Is(err, errors.CodeNotFound):
+		return UserView{}, err
+	}
+
+	u := domain.NewUser(domain.UserID(email.String()), email, cmd.Name, h.now())
+	if err := h.users.Save(ctx, u); err != nil {
+		return UserView{}, err
+	}
+	return UserView{ID: u.ID().String(), Email: u.Email.String(), Name: u.Name}, nil
+}
