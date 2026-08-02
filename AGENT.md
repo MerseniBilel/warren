@@ -80,7 +80,7 @@ TOOLING     warren/cli                                build-time only
             templates · AST editor · analyzer         never in a service go.mod
 ─────────────────────────────────────────────────────────────────────────
 ADAPTERS    transport/http   transport/grpc           separate go modules
-            broker/kafka     broker/rabbitmq          never import each other
+            broker/kafka     broker/memory            never import each other
             persistence/postgres   observability
 ─────────────────────────────────────────────────────────────────────────
 CONTRACTS   app.Handler   broker.Publisher/Subscriber ports & shared types

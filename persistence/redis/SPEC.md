@@ -2,11 +2,23 @@
 
 | | |
 |---|---|
-| **Status** | Draft — not approved. **Not specifiable yet: warren.md describes this package in one clause.** |
+| **Status** | **DEFERRED to v0.2, and ENTANGLED (decided 2026-08-02)** — see **Why it is deferred** below. Nothing in shipped code depends on it. |
 | **Source** | [warren.md §6.2–6.4](../../warren.md) |
 | **Module** | own module (`warren/persistence/redis`) |
 | **Mode** | Wrap (warren.md §9) |
 | **Wraps** | `redis/go-redis/v9` (warren.md §9) — no audit |
+
+
+## Why it is deferred
+
+warren.md describes this in one clause. More usefully: it is entangled with
+`jobs`, whose open question 4 asks what backs `LeaderOnly()` when there is no
+Postgres and points here for the answer.
+
+**Decide `jobs` and `redis` together, or the wrong lock gets built.** The
+advisory-lock elector already exists in `persistence/postgres`; where a shared
+one lives, given invariant 4 forbids adapters importing each other, is the
+question that unblocks both.
 
 ## Problem
 

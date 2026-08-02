@@ -48,7 +48,7 @@ This section describes the internal design of the framework itself — not the l
 └─────────────────────────────────────────────────────────┘
 ┌─────────────────────────────────────────────────────────┐
 │  ADAPTERS   transport/http   transport/grpc             │  separate go modules
-│             broker/kafka     broker/rabbitmq            │  never import each other
+│             broker/kafka     broker/memory              │  never import each other
 │             persistence/postgres    observability       │
 └─────────────────────────────────────────────────────────┘
 ┌─────────────────────────────────────────────────────────┐
@@ -194,22 +194,28 @@ warren/                                 MODULE: core        (stdlib + dig)
 ├── outbox/                                               ← writer port, relay, memory store
 └── domain/, app/, persistence/, broker/, transport/      ← contracts (see §1.1's exception)
 
-warren/config/yaml/                     MODULE  yaml parser — library TBD, audit first
+SHIPPED in v0.1
 warren/transport/http/                  MODULE  net/http only
-warren/transport/grpc/                  MODULE  google.golang.org/grpc
-warren/openapi/                         MODULE  —
 warren/broker/kafka/                    MODULE  twmb/franz-go
-warren/broker/rabbitmq/                 MODULE  rabbitmq/amqp091-go
-warren/broker/nats/                     MODULE  nats-io/nats.go
+warren/broker/memory/                   (core)  in-process, passes brokertest
 warren/persistence/postgres/            MODULE  jackc/pgx
-warren/persistence/mongo/               MODULE  mongo-driver
-warren/persistence/redis/               MODULE  redis/go-redis
 warren/observability/                   MODULE  OpenTelemetry SDK
-warren/auth/                            MODULE  golang-jwt + go-oidc
-warren/resilience/                      MODULE  gobreaker + backoff
-warren/jobs/                            MODULE  robfig/cron
-warren/testing/                         MODULE  testcontainers + testify
+warren/validate/playground/             MODULE  go-playground/validator
+warren/testing/                         (core)  stdlib only — no testify
 warren/cli/                             MODULE  cobra                   (build-time only)
+
+DEFERRED to v0.2 — each spec records why
+warren/openapi/                         MODULE  —                       first for v0.2
+warren/auth/                            MODULE  golang-jwt + go-oidc    identity type is a core decision
+warren/transport/grpc/                  MODULE  google.golang.org/grpc  needs `warren g proto`
+warren/jobs/                            MODULE  robfig/cron             amends the boot/shutdown orders
+warren/resilience/                      MODULE  gobreaker + x/time/rate narrowed: breaker + limiter only
+warren/persistence/mongo/               MODULE  mongo-driver            design round on the UnitOfWork port
+warren/persistence/redis/               MODULE  redis/go-redis          entangled with jobs' elector
+warren/broker/rabbitmq/                 MODULE  rabbitmq/amqp091-go     memory already proves the swap
+warren/broker/nats/                     MODULE  nats-io/nats.go         §5.3 is seven words
+warren/persistence/mysql/               —                               not in this table by design
+warren/config/yaml/                     MODULE  yaml parser             audit first
 ```
 
 **Rule:** adapters never import each other. `broker/kafka` and `persistence/postgres` are mutually invisible. Both depend only on the core module's contract packages.
@@ -730,10 +736,10 @@ elements, and silently passing a `[]LineItem` whose SKU is required is the
 failure the package exists to prevent.
 
 `None()` turns validation off for the whole application and is permanent —
-it is the "I validate in the handler" answer, and the test-path validator.
-Until §2.7a ships it is also the escape hatch for a DTO carrying a token
-core cannot enforce, and that is a real cost: `validate:"required,email"`
-cannot boot without it.
+it is the "I validate in the handler" answer, and the test-path validator. It
+is no longer the escape hatch for a tag core cannot enforce: §2.7a ships, so
+`validate:"required,email"` boots by installing that module rather than by
+disabling validation everywhere.
 
 ```go
 type RegisterUser struct {
@@ -748,9 +754,14 @@ type RegisterUser struct {
 ### 2.7a `warren/validate/playground`
 
 - **Path** `warren/validate/playground` · **Module** `warren/validate/playground` · **Wraps** `go-playground/validator/v10` · **Mode** Wrap
-- **Not built.** Its dependency audit is not written, and AGENT.md forbids
-  adopting a package before someone has read its repository and recorded
-  what they found.
+- **Shipped in v0.1 (2026-08-02).** Audited: v10.30.3, MIT, 20 091 stars,
+  pushed 2026-07-29, not archived, 8 third-party modules — none of which a
+  service keeping `validate.Required()` pays for.
+- It also checks every tag AT BOOT: go-playground panics on an unknown
+  constraint when it VALIDATES, so a typo in a field nobody has exercised
+  would take the process down on the first request that touched it. `Plan`
+  walks the type and probes each token, turning that into a boot diagnostic
+  naming the field and the typo.
 
 A `Validator` implementing the full tag vocabulary — `email`, `min`, `max`,
 `oneof`, `dive` — compiled once per type at boot, with
@@ -1357,7 +1368,9 @@ func Transactional(bool) Option
 **Usage**
 
 ```go
-// main.go — swapping to RabbitMQ changes only this block.
+// main.go — swapping to another driver changes only this block.
+// broker/memory ships and passes the same brokertest suite, so the claim
+// is demonstrated rather than asserted.
 kafka.Broker(
     kafka.Brokers(cfg.Kafka.Brokers...),
     kafka.ConsumerGroup(cfg.Kafka.Group),
@@ -1791,7 +1804,7 @@ All generators support `--dry-run` and `--force`.
 | Lifecycle | — | Build | fx rejected: imposes its own lifecycle |
 | Logging | `log/slog` | Vendor | stdlib |
 | Validation (core) | — (stdlib `reflect`) | Build | port + `Required()` + `None()` in core; every unenforceable token is **refused at boot**, never ignored. Invariant 1 makes any library here impossible |
-| Validation (full tags) | `go-playground/validator/v10` | Wrap | own module `warren/validate/playground` (§2.7a) · errors normalised to `errors.Error` before leaving it · **audit not yet written — blocks the module** |
+| Validation (full tags) | `go-playground/validator/v10` | Wrap | own module `warren/validate/playground` (§2.7a) · errors normalised to `errors.Error` before leaving it · **Audited 2026-08-02**: v10.30.3 (2026-05-29), MIT, 20 091 stars, pushed 2026-07-29, not archived, **8 third-party modules** compiled in (mimetype, locales, universal-translator, validator, leodido/go-urn, x/crypto, x/sys, x/text). Shipped as `warren/validate/playground`; a service that keeps `validate.Required()` pays none of them |
 | HTTP | `net/http.ServeMux` | Vendor | stdlib. **`go-chi/chi/v5` rejected 2026-08-02** — healthy (MIT, zero deps, released 2026-07-06) and still wrong here: measured 4 allocs / 704 B per request vs ServeMux's 2 / 48, because `Mux.ServeHTTP` clones the request; and behind the sealed Registrar none of what chi is bought for is reachable. gin rejected (29 indirect requires, incl. a mongo driver and a JIT JSON encoder); httprouter rejected (v1.3.0, 2019-09; no commit since 2024-07 — the rule-9 case in all but the flag); fasthttp/fiber rejected (no `func(http.Handler) http.Handler`, no Flusher/Hijacker, no HTTP/2) |
 | gRPC | `google.golang.org/grpc` | Wrap | shared middleware chain |
 | Proto | `buf` | Vendor | tooling only |

@@ -2,11 +2,29 @@
 
 | | |
 |---|---|
-| **Status** | Draft — not approved |
+| **Status** | **DEFERRED to v0.2 (decided 2026-08-02)** — see **Why it is deferred** below. Nothing in shipped code depends on it. |
 | **Source** | [warren.md §5.2](../../warren.md) |
 | **Module** | own module (`warren/broker/rabbitmq`) — [warren.md §1.6](../../warren.md) |
 | **Mode** | Wrap |
 | **Wraps** | `rabbitmq/amqp091-go` |
+
+
+## Why it is deferred
+
+**The job a second driver does is already done by a shipped module.**
+`broker/memory` implements the same port and passes the same exported
+`broker/brokertest` contract suite that `broker/kafka` passes — so
+"the broker port swaps" is demonstrated, by two implementations, with a
+contract suite as the evidence. A third driver buys a bullet point and costs a
+module, an audit, and a maintained integration suite.
+
+It is also not settled. §5.2 gives four sentences, and among its eight open
+questions is a **direct contradiction**: §3.4 calls `Message.Key` the routing
+key, §5.2 says the TOPIC becomes the routing key. Both cannot be true, and that
+is a port-semantics question worth resolving on its own merits — which is why
+v0.2 fixes the manifest before it writes the driver.
+
+`amqp091-go` has zero transitive dependencies.
 
 ## Problem
 

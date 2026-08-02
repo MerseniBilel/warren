@@ -2,11 +2,30 @@
 
 | | |
 |---|---|
-| **Status** | Draft — not approved |
+| **Status** | **DEFERRED to v0.2 (decided 2026-08-02)** — see **Why it is deferred** below. Nothing in shipped code depends on it. |
 | **Source** | [warren.md §7.2](../warren.md) |
 | **Module** | own module (`github.com/MerseniBilel/warren/auth`) |
 | **Mode** | Wrap (warren.md §9) |
 | **Wraps** | `golang-jwt/jwt/v5`, `coreos/go-oidc` |
+
+
+## Why it is deferred
+
+The authorization half **already ships and is usable**: `app.AuthorizationPolicy`
+is a real port, `transport.Guard(policy)` is a real `RouteOption` carried on
+every route, and `app.Authorized` composes it. A user writes a twenty-line
+policy today and it works over HTTP and consumers alike.
+
+What is missing is smaller than a module and bigger than a decision: **there is
+no `Identity` type anywhere in core** — grep returns zero hits — so every
+service invents its own context key. Where that type lives is a manifest
+amendment, not an implementation detail, and an adapter cannot declare it
+because handlers must not import an adapter. warren.md §7.2 is one paragraph
+and one line of code; five of eight open questions are structural.
+
+Dependencies are not the blocker: `golang-jwt/jwt/v5` has none and
+`coreos/go-oidc` about three. **The identity decision is.** It is v0.2's first
+item precisely because core gets more expensive to change after v0.1 tags.
 
 ## Problem
 

@@ -2,11 +2,33 @@
 
 | | |
 |---|---|
-| **Status** | Draft — not approved |
+| **Status** | **DEFERRED to v0.2, and narrowed (decided 2026-08-02)** — see **Why it is deferred** below. Nothing in shipped code depends on it. |
 | **Source** | [warren.md §7.3](../warren.md) |
 | **Module** | own module (`github.com/MerseniBilel/warren/resilience`) |
 | **Mode** | Wrap (warren.md §9) |
 | **Wraps** | `sony/gobreaker`, `cenkalti/backoff/v4`, `x/time/rate` |
+
+
+## Why it is deferred
+
+**Most of this already ships.** `app.Retrying(policy)` is core middleware, and
+`broker.ExponentialBackoff(attempts)` is a concrete `app.RetryPolicy` in the
+core module — so retry-with-exponential-backoff is done, and `Timeout` is
+`context.WithTimeout`. What is genuinely absent is the circuit breaker and the
+rate limiter: roughly 30% of this spec.
+
+It is also the least ready. Its own open question 1 asks *"is `Policy` a type
+or a function?"* — warren.md §7.3 uses the same identifier both ways, and Go
+will not allow it. Open question 4 admits that whether `Timeout` bounds each
+attempt or the sequence, and whether the breaker sees pre- or post-retry
+failures, "produce materially different systems". Open question 6 asks whether
+`resilience.Policy` and `broker.WithRetry` are the same concept — which is now
+a live redundancy in SHIPPED code, not a hypothesis.
+
+**When it returns it is narrowed to the breaker and the rate limiter**, folding
+retry into the shipped `app.RetryPolicy` rather than minting a second
+vocabulary for it. `gobreaker` + `x/time/rate` have no transitive
+dependencies.
 
 ## Problem
 

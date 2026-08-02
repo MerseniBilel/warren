@@ -53,11 +53,14 @@ func PlanFor[T any](v Validator) (func(*T) error, error) {
 // token.
 func Required() Validator { return required{} }
 
-// None returns a Validator that enforces nothing and accepts every tag. It
-// is the explicit opt-out for a project using constraints core cannot
-// enforce before warren/validate/playground ships: validation becomes the
-// handler's business, stated in one visible line of wiring rather than
-// silently skipped.
+// None returns a Validator that enforces nothing and accepts every tag:
+// validation becomes the handler's business, stated in one visible line of
+// wiring rather than silently skipped.
+//
+// It is the permanent "I validate in the handler" answer and the test-path
+// validator — NOT the way to reach a constraint core does not enforce. For
+// that, install warren/validate/playground, which enforces the full tag
+// vocabulary instead of disabling validation for the whole application.
 func None() Validator { return none{} }
 
 type none struct{}

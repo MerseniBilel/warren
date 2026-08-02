@@ -2,11 +2,19 @@
 
 | | |
 |---|---|
-| **Status** | Draft — not approved. **Not specifiable yet: warren.md does not describe this package.** |
+| **Status** | **DEFERRED to v0.2 (decided 2026-08-02)** — see **Why it is deferred** below. Nothing in shipped code depends on it. |
 | **Source** | [warren.md §6.2–6.4](../../warren.md) |
 | **Module** | own module (`warren/persistence/mysql`) — **not listed in warren.md §1.6** |
 | **Mode** | undecided — no mode recorded |
 | **Wraps** | undecided — no driver chosen |
+
+
+## Why it is deferred
+
+**warren.md does not describe this package at all** — it is absent from §1.6's
+module table, which lists postgres, mongo and redis. Building it would mean
+writing the manifest entry first, and that is an architecture decision to be
+agreed rather than an implementation to be started (CLAUDE.md).
 
 ## Problem
 

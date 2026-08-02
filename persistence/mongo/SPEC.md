@@ -2,11 +2,26 @@
 
 | | |
 |---|---|
-| **Status** | Draft — not approved. **Not specifiable yet: warren.md describes this package in one clause.** |
+| **Status** | **DEFERRED to v0.2 — as a DESIGN ROUND, not a build (decided 2026-08-02)** — see **Why it is deferred** below. Nothing in shipped code depends on it. |
 | **Source** | [warren.md §6.2–6.4](../../warren.md) |
 | **Module** | own module (`warren/persistence/mongo`) |
 | **Mode** | undecided — **no §9 ledger row** |
 | **Wraps** | `mongo-driver` (warren.md §1.6) — no version, no audit |
+
+
+## Why it is deferred
+
+warren.md describes this in one clause, so there is nothing to implement
+against. But it is the most interesting of the deferrals and should not be
+treated as a routine one.
+
+**Mongo is the only remaining candidate that would genuinely stress the
+`Repository`/`UnitOfWork` port**: no SQL, transactions that need a replica set,
+and no advisory lock for the outbox elector. If the port is wrong, that is
+where it shows — and it is worth knowing before three more adapters depend on
+it. So v0.2 opens this as a design conversation about whether the port is
+right, which is exactly what CLAUDE.md says to bring to the human rather than
+discover by writing code.
 
 ## Problem
 

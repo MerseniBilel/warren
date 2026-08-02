@@ -1,0 +1,23 @@
+── unknown constraint
+✗ unknown validation constraint
+
+    playground_test.typo field "email" uses constraints go-playground does not know:
+    emai
+
+  This is almost always a typo — "emai" for "email", "uuid5" for
+  "uuid4". The library panics on an unknown tag when it VALIDATES, so
+  catching it here is the difference between a boot failure and a
+  production crash on the first request that touches this field.
+
+  Register your own with:
+
+      playground.New(playground.Register("emai", func(v any) bool { ... }))
+
+── not a struct
+✗ cannot validate string
+
+    A request type must be a struct: constraints live on fields, and a
+    string has none.
+
+  Wrap it — type Req struct { Value string `validate:"required"` } — or
+  turn validation off for this application with validate.None().

@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | Draft — not approved |
+| **Status** | **DEFERRED to v0.2, ranked FIRST for v0.2 (decided 2026-08-02)** — see **Why it is deferred** below. Nothing in shipped code depends on it. |
 | **Source** | [warren.md §4.3](../warren.md) |
 | **Module** | own module (`warren/openapi`) |
 | **Mode** | Build |
@@ -12,6 +12,28 @@
 > surface. Everything below either quotes it or marks the gap as a question.
 > Padding it into something that looks complete would be inventing the design,
 > which is the human's call (AGENT.md § When you are unsure).
+
+
+## Why it is deferred
+
+**Its input is ready and frozen; its architecture is not decided.**
+`transport.Table` ships with `HTTPRoute{Verb, Pattern, Request/Response
+reflect.Type, Guards}` — exactly the data an emitter needs — and it cannot rot
+while this waits, which is why waiting is safe.
+
+Open question 2 is the whole package: how does it obtain the registrations
+without importing an adapter (invariant 4)? At runtime, which means core grows
+a documentation-shaped API; or through the CLI's analyzer, which cannot serve
+`/docs` from a live process. §4.3 asks for both and decides neither. Then:
+which ring it is in (§1.1 does not list it), who mounts `/docs`, Scalar versus
+Swagger — the module's first dependency decision, an embedded JS bundle needing
+its own audit — and the `validate:` tag → JSON Schema mapping, which is
+unowned.
+
+It is ranked first for v0.2 because it is the biggest ecosystem lever with no
+shipped substitute. First move when it resumes: answer open question 2, then
+ship the pure `Table → OpenAPI 3.1` emitter BEFORE the UI, so the bundle audit
+does not gate the useful half.
 
 ## Problem
 

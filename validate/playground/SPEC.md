@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | Draft — not approved. **Blocked on its dependency audit**, which is the reason this file exists. |
+| **Status** | **APPROVED (2026-08-02)** — the audit that blocked it is done, and it is the ONE remaining draft built for v0.1. Core `validate` refuses every tag but `required`, and its boot diagnostic tells the user to install THIS MODULE, which did not exist — a promise made in shipped runtime output and regression-locked by two tests asserting on the string. |
 | **Source** | [warren.md §2.7a](../../warren.md) |
 | **Module** | own module (`warren/validate/playground`) |
 | **Mode** | Wrap |
@@ -84,6 +84,40 @@ Required, recorded here with the observation date and reconciled with the
 - [ ] Benchmark with allocation counts on the compiled rule, and a
       `testing.AllocsPerRun` assertion of an exact count (invariant 7).
 - [ ] `warren.md` §2.7a amended in the same change if anything diverges.
+
+## Dependency audit — 2026-08-02
+
+| Package | Version | Licence | Stars | Last push | Archived | Modules compiled in |
+|---|---|---|---|---|---|---|
+| `go-playground/validator/v10` | v10.30.3 (2026-05-29) | MIT | 20 091 | 2026-07-29 | no | **8** |
+
+Measured with `go list -deps`: `gabriel-vasile/mimetype`,
+`go-playground/locales`, `go-playground/universal-translator`,
+`go-playground/validator`, `leodido/go-urn`, `golang.org/x/crypto`,
+`golang.org/x/sys`, `golang.org/x/text`.
+
+Eight is more than `persistence/postgres`'s six and far less than
+`observability`'s 24, and the containment argument is the same one that
+settled OTel: **a service that keeps `validate.Required()` pays nothing.**
+This is its own module precisely so the choice is the user's.
+
+## Why it is in v0.1 when nine other drafts are not
+
+Core `validate` ships `Required()` and **refuses every other token at boot,
+naming it** — deliberately, so nothing silently under-validates. The
+consequence is that `validate:"required,email"`, the single most common tag in
+a Go backend, **cannot boot a Warren application**, and the only escape is
+`validate.None()`, which disables validation for the entire service.
+
+Worse, `errUnsupported` tells the user, at boot:
+
+    • install github.com/MerseniBilel/warren/validate/playground and pass
+      playground.New() where the validator is configured
+
+That module did not exist, and `validate_test.go` asserts on that string —
+so CI actively defended a false promise. Every other deferred package leaves
+at most a stale sentence in a doc; this one left a broken instruction in
+shipped runtime output.
 
 ## Open questions
 

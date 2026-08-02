@@ -1,7 +1,7 @@
 # Warren — multi-module repository. `go test ./...` from the root tests one
 # module and exits zero (CLAUDE.md); every target iterates MODULES explicitly.
 # Adapter modules are appended here as they are created.
-MODULES := . cli transport/http persistence/postgres observability broker/kafka
+MODULES := . cli transport/http persistence/postgres observability broker/kafka validate/playground
 
 .PHONY: ci fmt vet lint invariants test bench workspace
 

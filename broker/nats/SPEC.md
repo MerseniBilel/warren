@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | Draft — not approved. **Substantially unspecified — see Open questions.** |
+| **Status** | **DEFERRED to v0.2 (decided 2026-08-02)** — see **Why it is deferred** below. Nothing in shipped code depends on it. |
 | **Source** | [warren.md §5.3](../../warren.md) |
 | **Module** | own module (`warren/broker/nats`) — [warren.md §1.6](../../warren.md) |
 | **Mode** | Wrap |
@@ -17,6 +17,16 @@
 > reviewed as if it were agreed is exactly the "confident lie" AGENT.md § Spec-
 > driven development warns about. This spec is not implementable as written;
 > the questions below have to be answered by a human first.
+
+
+## Why it is deferred
+
+warren.md §5.3 is seven words — *"JetStream. Same ports."* — so this spec's
+own "substantially unspecified" is a fair self-assessment, and building it
+would mean inventing the manifest entry first.
+
+It is also a THIRD broker driver, when the second one's value is already
+delivered by `broker/memory` plus the shared `brokertest` contract suite.
 
 ## Problem
 

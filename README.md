@@ -10,8 +10,13 @@
 > `net/http.ServeMux` and adds nothing to your `go.mod` but itself, and
 > **`persistence/postgres`**, whose unit of work commits aggregate state and
 > the outbox rows for that aggregate's events in one transaction. What is
-> *not* built yet: `transport/grpc`, deferred to v0.2 with its design decided
-> — see [its spec](transport/grpc/SPEC.md).
+> **not** in v0.1: `openapi`, `auth`, `transport/grpc`, `jobs`, `resilience`,
+> `broker/rabbitmq`, `broker/nats`, and the Mongo/Redis/MySQL drivers — each
+> deferred to v0.2 **with the reason recorded in its own spec**, not left as
+> an open question. The short version: `openapi` and `auth` are undecided
+> architecture, `jobs` would amend the boot and shutdown orders, `resilience`
+> is mostly shipped already, and a third broker driver answers nothing that
+> `broker/memory` plus the shared contract suite does not.
 > The repository is being rebuilt spec-first: every
 > package gets an approved `SPEC.md` before its first line of Go, retired once
 > the package is implemented and reviewed. [warren.md](warren.md) is the
@@ -95,8 +100,13 @@ contract now.
       *(implemented; spec retired)*
 - [x] `config` (core) — Source-split loading: Load, Source, env, flags
       *(implemented; spec retired — `Module[T]` lands with the root package)*
-- [ ] `config/yaml` — the first file Source *(needs its own spec + YAML
+- [ ] `config/yaml` — the first file Source *(v0.2; needs its own spec + YAML
       library audit before the module exists)*
+- [x] `validate/playground` — the full tag vocabulary (`email`, `min`, `oneof`,
+      …) as its own module, with every tag checked AT BOOT so a typo is a
+      diagnostic rather than a production panic *(implemented. Core refuses
+      those tags by design and its diagnostic told users to install this —
+      a promise in shipped runtime output that CI was asserting on)*
 - [x] `warren` (root) — module system, boot sequence, run loop
       *(implemented with `config.Module[T]`; adversarially reviewed — 8
       findings fixed — spec retired)*

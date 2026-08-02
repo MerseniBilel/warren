@@ -10,8 +10,12 @@ import (
 )
 
 // RetryPolicy decides whether a failed attempt is retried and how long to
-// wait first. It is the port warren/resilience implements (wrapping backoff
-// and circuit-breaker libraries); the kernel never sees those libraries.
+// wait first. The kernel never sees a backoff library.
+//
+// A concrete one already ships in the core module: broker.ExponentialBackoff.
+// warren/resilience is v0.2 and narrowed to the circuit breaker and rate
+// limiter when it lands — retry is done, and a second vocabulary for it would
+// only compete with this port.
 type RetryPolicy interface {
 	// Next reports whether a retry should follow the given completed attempt
 	// (1-based) and how long to wait before it. Returning retry == false
@@ -25,8 +29,13 @@ type RetryPolicy interface {
 }
 
 // AuthorizationPolicy decides whether the identity on the context may
-// proceed. It is the port warren/auth implements; the edge ring
-// authenticates and puts identity on the context, this policy authorizes.
+// proceed. The edge ring authenticates and puts identity on the context; this
+// policy authorizes.
+//
+// It is the port an authentication adapter implements — warren/auth, in v0.2 —
+// and it is fully usable without one today: write the policy yourself and
+// attach it per route with transport.Guard, which runs before decode so an
+// unauthorized caller's malformed body is a 403 and not a 400.
 //
 // The contract: return nil to allow. Return an error from the warren/errors
 // vocabulary to deny — errors.PermissionDenied(action) for a known caller

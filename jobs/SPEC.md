@@ -2,11 +2,28 @@
 
 | | |
 |---|---|
-| **Status** | Draft — not approved |
+| **Status** | **DEFERRED to v0.2 (decided 2026-08-02)** — see **Why it is deferred** below. Nothing in shipped code depends on it. |
 | **Source** | [warren.md §7.4](../warren.md) |
 | **Module** | own module (`github.com/MerseniBilel/warren/jobs`) |
 | **Mode** | Wrap (warren.md §9) |
 | **Wraps** | `robfig/cron/v3` |
+
+
+## Why it is deferred
+
+Nothing in shipped code references `warren/jobs`, and it cannot be built
+without amending two orderings AGENT.md forbids changing silently: §1.3's boot
+step 6 (`pool → repos → consumers → servers`) and §2.3's six-step shutdown both
+omit jobs entirely.
+
+All eight open questions are structural, and two are load-bearing. What a job
+handler even IS: `app.Handler[Req, Res]` is request-shaped, and a tick has
+neither a request nor a response. And whether `jobs.LeaderOnly()` shares the
+elector `outbox` already has — `postgres.AdvisoryLock` ships — which, if it
+does, has to move somewhere both adapters reach without importing each other
+(invariant 4).
+
+`robfig/cron/v3` has zero transitive dependencies. Again, not the blocker.
 
 ## Problem
 
