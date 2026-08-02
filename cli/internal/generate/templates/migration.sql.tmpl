@@ -1,0 +1,15 @@
+-- +goose Up
+-- The {{.Lower}} aggregate. Warren NEVER applies this for you: migrating
+-- from a lifecycle hook races every replica of a rolling deploy, applies DDL
+-- the still-serving old replicas were not written against, and turns one bad
+-- file into a simultaneous crash-loop. Apply it as a deploy step with
+-- postgres.Migrate, or with whatever migration tool the project already
+-- runs — these are goose-format files, so goose, atlas and dbmate all read
+-- them unchanged.
+CREATE TABLE IF NOT EXISTS {{.Plural}} (
+    id         TEXT        PRIMARY KEY,
+    created_at TIMESTAMPTZ NOT NULL
+);
+
+-- +goose Down
+DROP TABLE IF EXISTS {{.Plural}};

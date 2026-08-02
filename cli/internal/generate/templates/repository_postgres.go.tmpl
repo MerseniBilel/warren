@@ -1,0 +1,95 @@
+package infrastructure
+
+import (
+	"context"
+	"errors"
+	"time"
+
+	werrors "github.com/MerseniBilel/warren/errors"
+	"github.com/MerseniBilel/warren/persistence"
+	"github.com/MerseniBilel/warren/persistence/postgres"
+
+	"{{.Module}}/internal/modules/{{.Feature}}/domain"
+)
+
+// {{.Name}}Repository is plain SQL over Postgres. There is no ORM, by
+// design: this file is yours to edit, and the only framework machinery in it
+// is postgres.DB.
+//
+// Three rules hold it together, and NONE of them is enforced by the
+// compiler — which is why this file is generated rather than described:
+//
+//  1. RequireTx first on every write. Outside a unit of work the row would
+//     autocommit while the aggregate's events stayed pending on an object
+//     about to go out of scope, and they would be lost silently.
+//  2. r.db(ctx) for the handle — never a stored pool. It returns the ambient
+//     transaction if one is in scope, and the pool otherwise, so a read works
+//     outside a unit of work and a write does not.
+//  3. persistence.Track after a successful write. That is what enlists the
+//     aggregate so its events reach the outbox in the same commit.
+type {{.Name}}Repository struct{ db postgres.DB }
+
+// New{{.Name}}Repository returns the repository as its PORT, so the
+// container resolves it by the type the application layer asks for.
+func New{{.Name}}Repository(db postgres.DB) domain.{{.Name}}Repository {
+	return &{{.Name}}Repository{db: db}
+}
+
+// FindByID returns the {{.Lower}}, or an error carrying CodeNotFound.
+//
+// A read needs no transaction: outside a unit of work it goes to the pool,
+// and inside one it sees that transaction's own uncommitted writes.
+func (r *{{.Name}}Repository) FindByID(ctx context.Context, id domain.{{.Name}}ID) (*domain.{{.Name}}, error) {
+	var createdAt time.Time
+	err := r.db(ctx).QueryRow(ctx,
+		`SELECT created_at FROM {{.Plural}} WHERE id = $1`, id.String(),
+	).Scan(&createdAt)
+	if err != nil {
+		// postgres.ErrNoRows is re-exported precisely so a repository never
+		// imports pgx itself.
+		if errors.Is(err, postgres.ErrNoRows) {
+			return nil, werrors.NotFound("{{.Lower}}", id)
+		}
+		return nil, err
+	}
+	return domain.New{{.Name}}(id, createdAt), nil
+}
+
+// Save writes the {{.Lower}} and enlists it.
+func (r *{{.Name}}Repository) Save(ctx context.Context, {{.Lower}} *domain.{{.Name}}) error {
+	// RULE 1. Without this the INSERT autocommits and the aggregate's events
+	// are lost with no error anywhere.
+	if err := postgres.RequireTx(ctx, "save {{.Lower}}"); err != nil {
+		return err
+	}
+	if _, err := r.db(ctx).Exec(ctx, `
+		INSERT INTO {{.Plural}} (id, created_at)
+		VALUES ($1, $2)
+		ON CONFLICT (id) DO UPDATE SET created_at = EXCLUDED.created_at`,
+		{{.Lower}}.ID().String(), {{.Lower}}.CreatedAt,
+	); err != nil {
+		return err
+	}
+	// RULE 3. The unit of work drains the enlisted aggregates at commit and
+	// writes their events to the outbox in the same transaction.
+	persistence.Track(ctx, {{.Lower}})
+	return nil
+}
+
+// Delete removes it.
+func (r *{{.Name}}Repository) Delete(ctx context.Context, id domain.{{.Name}}ID) error {
+	if err := postgres.RequireTx(ctx, "delete {{.Lower}}"); err != nil {
+		return err
+	}
+	// Exec returns the rows affected, and a DELETE that matched nothing is a
+	// NOT_FOUND — the persistence contract suite deletes twice and requires
+	// the second to fail. Silent success hides bugs.
+	n, err := r.db(ctx).Exec(ctx, `DELETE FROM {{.Plural}} WHERE id = $1`, id.String())
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return werrors.NotFound("{{.Lower}}", id)
+	}
+	return nil
+}

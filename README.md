@@ -119,6 +119,10 @@ contract now.
       shape; the 1.27 method form is a mechanical call-site rewrite)*
 - [ ] Bump toolchain to Go 1.27; verify generic methods compile as designed
       *(and that inference works — explicit type arguments are needed today)*
+- [x] `warren g repository --driver postgres` — plain SQL over `postgres.DB`
+      carrying the three rules no compiler enforces, plus the table's
+      migration and a `cmd/migrate` binary *(CI compiles the generated
+      repository; the migrate path was run against a real Postgres)*
 - [x] `warren new` scaffolds a service that **serves**: a controller
       registering `POST /users`, `whttp.Server` wired in `main.go`, health
       probes, and `log.Handler` installed so every record carries the

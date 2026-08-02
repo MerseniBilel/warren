@@ -108,3 +108,51 @@ command` that is not wiring you get for free.
 **The pattern is the PATH ALONE.** `transport.Post` already names the method;
 `transport.Post(r, "POST /x", h)` fails the boot. Only `transport.Raw` takes
 `"METHOD /path"`, because it names no method of its own.
+
+## `warren g repository --driver postgres`
+
+Writes plain SQL over `postgres.DB`, the table's migration, and
+`cmd/migrate/main.go`. It exists because a Postgres repository has three
+rules **no compiler enforces**, and getting any of them wrong loses data
+silently:
+
+1. **`postgres.RequireTx(ctx, "save x")` first on every write.** Outside a
+   unit of work the row autocommits while the aggregate's events stay pending
+   on an object about to go out of scope — lost, with no error anywhere.
+2. **`r.db(ctx)` for the handle**, never a stored pool. It returns the
+   ambient transaction if one is in scope and the pool otherwise, which is
+   what lets a read work outside a unit of work while a write does not.
+3. **`persistence.Track(ctx, agg)` after a successful write.** That enlists
+   the aggregate so its events reach the outbox in the same commit.
+
+A `Delete` must also check rows-affected and return `NOT_FOUND` when it
+matched nothing: a bare `DELETE … WHERE id = $1` returns nil for a missing
+row, and the persistence contract suite deletes twice and requires the second
+to fail.
+
+**It generates, it does not wire.** The repository needs `postgres.DB`, which
+means `main.go` must add `postgres.Module(postgres.DSN(...))` and the feature
+module must `warren.Imports` it — a provider is private to its module. The
+generator prints those steps; it cannot perform them.
+
+## Migrations are a deploy step
+
+`cmd/migrate` is generated alongside, and applies Warren's tables then the
+project's:
+
+```
+DATABASE_URL=... go run ./cmd/migrate
+applied  warren       (warren_outbox, warren_inbox)
+applied  db/migrations
+```
+
+**Warren never migrates at boot and offers no option to.** Under a rolling
+deploy that races every replica: all but one block past their readiness
+deadline and get killed, the winner applies DDL the still-serving old
+replicas were not written against, and one bad file crash-loops everything at
+once.
+
+**Name migration files for your own aggregates.** Yours and Warren's record
+into one `warren_schema_migrations` table keyed by bare filename, so a file
+of yours called `00001_warren_outbox.sql` would be marked applied without
+ever running. `00001_orders.sql` cannot collide.

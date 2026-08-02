@@ -43,6 +43,9 @@ type Options struct {
 	// Main is the main.go a new module is registered in, relative to Dir.
 	// Empty finds it, and errors when a project has more than one.
 	Main string
+	// Driver selects a repository implementation: "memory" (the default) or
+	// "postgres".
+	Driver string
 }
 
 // Module creates a feature module, its three layers, and wires it into main.
@@ -184,7 +187,15 @@ func Repository(opts Options) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	content, err := render("repository.go.tmpl", data)
+	driver := opts.Driver
+	if driver == "" {
+		driver = "memory"
+	}
+	tmpl, ok := repositoryTemplates[driver]
+	if !ok {
+		return "", errUnknownDriver(driver)
+	}
+	content, err := render(tmpl, data)
 	if err != nil {
 		return "", err
 	}
@@ -196,7 +207,81 @@ func Repository(opts Options) (string, error) {
 			opts.Name + "Repository", "New" + opts.Name + "Repository",
 		}}},
 	}
+	if driver == "postgres" {
+		// The table is the user's to own, so it goes in the project's own
+		// migration directory rather than being invented at boot — Warren
+		// never migrates from a lifecycle hook.
+		migration, merr := render("migration.sql.tmpl", data)
+		if merr != nil {
+			return "", merr
+		}
+		p.files["db/migrations/00001_"+data["Plural"]+".sql"] = migration
+
+		// The migrate binary lives in the PROJECT, not in the warren CLI.
+		// The CLI takes no dependency on the framework — it is build-time
+		// tooling that never enters a service's go.mod — and a `warren
+		// migrate` would have to import persistence/postgres and pgx to
+		// exist. Generating it here also puts it where a deploy job can run
+		// it: `go run ./cmd/migrate`.
+		migrateMain, mmerr := render("migrate_main.go.tmpl", data)
+		if mmerr != nil {
+			return "", mmerr
+		}
+		p.files["cmd/migrate/main.go"] = migrateMain
+		p.next = fmt.Sprintf(`  Still to do — the repository needs a pool and a table.
+
+  1. In cmd/<app>/main.go, add the Postgres module and import its module
+     into the feature that uses it:
+
+         pg := postgres.Module(postgres.DSN(os.Getenv("DATABASE_URL")))
+         warren.New(pg, %s.Module(pg), ...)
+
+     A module that wants postgres.DB must IMPORT the postgres module: a
+     provider is private to its module unless exported.
+
+  2. Apply the schema as a DEPLOY STEP — Warren never migrates at boot.
+     cmd/migrate was generated for you:
+
+         DATABASE_URL=... go run ./cmd/migrate
+
+     Name your migration files for your own aggregates: yours and Warren's
+     record into one warren_schema_migrations table, keyed by bare filename,
+     so 00001_warren_outbox.sql would be marked applied without running.
+
+  3. Check db/migrations/00001_%s.sql — it has the aggregate's id and
+     created_at, and nothing else. Add your columns and the Save/FindByID
+     statements that read them.
+`, data["Feature"], data["Plural"])
+	}
 	return p.apply()
+}
+
+// repositoryTemplates maps a driver to the file it generates. Adding a
+// driver is adding a row and a template — the port is the same.
+var repositoryTemplates = map[string]string{
+	"memory":   "repository.go.tmpl",
+	"postgres": "repository_postgres.go.tmpl",
+}
+
+// plural is the table name for an aggregate. Two rules cover almost every
+// name; the rest is a line the user edits, which beats a dependency.
+func plural(s string) string {
+	switch {
+	case strings.HasSuffix(s, "s"), strings.HasSuffix(s, "x"), strings.HasSuffix(s, "ch"), strings.HasSuffix(s, "sh"):
+		return s + "es"
+	case strings.HasSuffix(s, "y") && len(s) > 1 && !strings.ContainsRune("aeiou", rune(s[len(s)-2])):
+		return s[:len(s)-1] + "ies"
+	default:
+		return s + "s"
+	}
+}
+
+func errUnknownDriver(driver string) error {
+	return diagnostic(fmt.Sprintf(
+		"✗ unknown repository driver %q\n\n    --driver %s\n\n"+
+			"  Available: memory (the default), postgres.\n\n"+
+			"  A driver is one template and one row in repositoryTemplates —\n"+
+			"  the port every driver implements is the same.", driver, driver))
 }
 
 // Consumer creates an event handler and the subscription that feeds it.
@@ -486,6 +571,11 @@ func featureData(opts Options) (map[string]string, string, error) {
 		"Lower":   lowerFirst(opts.Name),
 		"Snake":   snake(opts.Name),
 		"Article": article(opts.Name),
+		// Plural is the table name. English pluralisation is a rabbit hole,
+		// so this handles the two cases that cover almost every aggregate
+		// name and leaves the rest to the user editing one generated line —
+		// which is preferable to a dependency, or to "orderss".
+		"Plural": plural(snake(opts.Name)),
 	}, base, nil
 }
 

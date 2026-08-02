@@ -65,6 +65,26 @@ func TestGeneratedCodeCompilesAndPasses(t *testing.T) {
 		{"g consumer notification InvoiceVoided", func() (string, error) {
 			return generate.Consumer(generate.Options{Dir: dir, Module: "notification", Name: "InvoiceVoided"})
 		}},
+		// The Postgres repository, which is the whole reason this test
+		// exists: its three rules — RequireTx, db(ctx), persistence.Track —
+		// are enforced by no compiler, so the only thing standing between a
+		// template drift and a user losing events silently is that this
+		// compiles here.
+		// Into its own feature, whose generated module_test is then removed:
+		// a Postgres repository needs a live pool, so booting it is an
+		// integration concern. What this test owns is that the TEMPLATE
+		// compiles against the current framework.
+		{"g module ledger", func() (string, error) {
+			return generate.Module(generate.Options{Dir: dir, Name: "ledger"})
+		}},
+		{"g entity ledger Entry", func() (string, error) {
+			return generate.Entity(generate.Options{Dir: dir, Module: "ledger", Name: "Entry"})
+		}},
+		{"g repository ledger Entry --driver postgres", func() (string, error) {
+			return generate.Repository(generate.Options{
+				Dir: dir, Module: "ledger", Name: "Entry", Driver: "postgres",
+			})
+		}},
 	}
 	for _, step := range steps {
 		if _, err := step.run(); err != nil {
@@ -91,10 +111,21 @@ func TestGeneratedCodeCompilesAndPasses(t *testing.T) {
 		t.Fatal(rerr)
 	}
 	src = append(src, []byte(
-		"\nreplace github.com/MerseniBilel/warren => "+framework+
-			"\n\nreplace github.com/MerseniBilel/warren/transport/http => "+framework+"/transport/http\n")...)
+		"\nrequire github.com/MerseniBilel/warren/persistence/postgres v0.1.0\n"+
+			"\nreplace github.com/MerseniBilel/warren => "+framework+
+			"\n\nreplace github.com/MerseniBilel/warren/transport/http => "+framework+"/transport/http"+
+			"\n\nreplace github.com/MerseniBilel/warren/persistence/postgres => "+framework+"/persistence/postgres\n")...)
 	if err := os.WriteFile(mod, src, 0o644); err != nil {
 		t.Fatal(err)
+	}
+
+	// The ledger module's test boots the graph, and a Postgres repository
+	// cannot resolve postgres.DB without a pool. Removing it keeps this test
+	// about what it is about — that the generated SQL and the three rules
+	// still compile — and leaves booting to persistence/postgres's own
+	// integration suite.
+	if err := os.Remove(filepath.Join(dir, "internal/modules/ledger/module_test.go")); err != nil {
+		t.Fatalf("removing the ledger module test: %v", err)
 	}
 
 	// The generators must not be able to write code that breaks the rules

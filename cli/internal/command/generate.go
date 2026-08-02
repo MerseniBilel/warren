@@ -92,12 +92,18 @@ func generateCmd() *cobra.Command {
 	repository := &cobra.Command{
 		Use:   "repository <module> <Name>",
 		Short: "A repository implementing the aggregate's port",
-		Long: "repository writes the in-process implementation of the port the\n" +
-			"aggregate declares, and provides it from the module. Run `warren g\n" +
-			"entity` first: the port has to exist for this to compile.",
+		Long: "repository writes an implementation of the port the aggregate\n" +
+			"declares, and provides it from the module. Run `warren g entity`\n" +
+			"first: the port has to exist for this to compile.\n\n" +
+			"--driver postgres writes plain SQL over postgres.DB, plus the\n" +
+			"migration for its table. It follows three rules the compiler cannot\n" +
+			"enforce — RequireTx first on every write, db(ctx) for the handle,\n" +
+			"and persistence.Track after a successful write — which is exactly\n" +
+			"why it is generated rather than described in a document.",
 		Args: cobra.ExactArgs(2),
 		RunE: run(generate.Repository, true),
 	}
+	repository.Flags().StringVar(&opts.Driver, "driver", "memory", "the repository implementation: memory or postgres")
 
 	consumer := &cobra.Command{
 		Use:   "consumer <module> <EventName>",
