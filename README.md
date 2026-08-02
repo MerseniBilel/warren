@@ -136,7 +136,9 @@ contract now.
       `Telemetry` live in `app`, telemetry rides the context
 - [ ] `observability` — OTel wiring *(spec approved)*
 - [ ] `validate` — port in core, implementation in a submodule
-- [ ] `health`, `auth`, `resilience`, `jobs`, `testing`, `openapi`
+- [x] `health` — check registry, liveness/readiness verdicts, root-scope
+      binding *(implemented; the routes land with the transport adapters)*
+- [ ] `auth`, `resilience`, `jobs`, `testing`, `openapi`
 
 ### Phase 6 — the CLI
 

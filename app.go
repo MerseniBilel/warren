@@ -14,6 +14,7 @@ import (
 	"syscall"
 
 	"github.com/MerseniBilel/warren/di"
+	"github.com/MerseniBilel/warren/health"
 	"github.com/MerseniBilel/warren/lifecycle"
 )
 
@@ -84,6 +85,12 @@ func (a *App) Start(ctx context.Context) error {
 	lc := a.lc
 	a.mu.Unlock()
 	if err := root.Provide(func() lifecycle.Lifecycle { return lc }); err != nil {
+		return err
+	}
+	// The readiness gate is the lifecycle's; health only reads it, so the
+	// two can never drift. Adapters register their pings against this
+	// registry from their own constructors.
+	if err := root.Provide(func() health.Registry { return health.New(lc.Ready) }); err != nil {
 		return err
 	}
 

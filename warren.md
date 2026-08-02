@@ -680,15 +680,45 @@ type RegisterUser struct {
 ### 2.8 `warren/health`
 
 - **Path** `warren/health` · **Module** core · **Mode** Build
+- **Owns** — the registry of checks and the two probe verdicts. It serves
+  nothing: `warren/transport/http` serves `/healthz` and `/readyz` from this
+  registry, and `warren/transport/grpc` serves the gRPC health service from
+  the same one, so the two can never disagree.
 
 ```go
-type Check interface {
-    Name() string
-    Check(context.Context) error
+type Check interface { Name() string; Check(ctx context.Context) error }
+func NewCheck(name string, fn func(context.Context) error) Check
+
+type Registry interface {
+    Register(c Check, opts ...RegisterOption) error
+    Live(ctx context.Context) Report   // no checks, always up
+    Ready(ctx context.Context) Report  // the gate, then critical checks
 }
+func New(ready func() bool, opts ...Option) Registry
+func DefaultTimeout(d time.Duration) Option    // 2s
+func Timeout(d time.Duration) RegisterOption
+func Informational() RegisterOption            // reported, does not gate
 ```
 
-Adapters self-register (`postgres` registers a ping check, `kafka` a broker-metadata check). Exposes `/healthz` (liveness) and `/readyz` (readiness, gated by lifecycle state). gRPC health service is served by the gRPC adapter from the same registry.
+**Liveness runs no dependency checks, ever.** Restarting a process does not
+fix a dead database, so a liveness probe wired to Postgres kills every
+replica when Postgres blips. `/healthz` answers "this code ran" and stays up
+through the drain. **Readiness** is `lifecycle.Ready()` and then every
+critical check, run concurrently under their own timeouts — probe latency is
+the slowest check, not the sum. With the gate closed no check runs and the
+body says which red it is: `starting` before the gate first opened,
+`draining` after it closed.
+
+Checks run **on the probe**, not on an interval: freshness is the entire
+product of a readiness probe, and a cached verdict keeps traffic flowing to a
+pod whose dependency died. A `Cached` decorator is additive if a user ever
+demonstrates the cost; the reverse is a behaviour change to everyone's probes.
+
+The bootstrapper provides the registry in the root container, wired as
+`health.New(lc.Ready)` — the gate is the lifecycle's, and health only reads
+it, so the two can never drift. Adapters register their pings from their own
+module constructors.
+
 
 ---
 

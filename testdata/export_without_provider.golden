@@ -1,6 +1,6 @@
 ✗ export without provider
 
-    module "user" (warren/warren_test.go:228) exports warren_test.userRepository, but none of its providers returns it.
+    module "user" (warren/warren_test.go:NN) exports warren_test.userRepository, but none of its providers returns it.
 
   Add the constructor to warren.Providers, remove the export, or — if a
   provider returns a concrete type that implements it — declare that

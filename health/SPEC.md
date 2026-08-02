@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | Draft — not approved |
+| **Status** | **Approved and implemented (2026-08-02)** — the registry, both probe verdicts, and the root-scope binding ship in core; the two HTTP routes and the gRPC health service land with their adapters. Key decisions: liveness runs NO checks (a database blip must not restart every replica); readiness is `lifecycle.Ready()` first, then critical checks, run concurrently on the probe (freshness is the product; caching is expressible later as a decorator, the reverse is not). |
 | **Source** | [warren.md §2.8](../warren.md) |
 | **Module** | core |
 | **Mode** | Build |

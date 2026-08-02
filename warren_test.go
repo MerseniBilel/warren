@@ -6,6 +6,7 @@ import (
 	"flag"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -13,10 +14,15 @@ import (
 
 	"github.com/MerseniBilel/warren"
 	"github.com/MerseniBilel/warren/config"
+	"github.com/MerseniBilel/warren/health"
 	"github.com/MerseniBilel/warren/lifecycle"
 )
 
 var update = flag.Bool("update", false, "rewrite golden files")
+
+// declSite matches this file's own declaration sites in diagnostics, so a
+// golden pins the wording without pinning line numbers.
+var declSite = regexp.MustCompile(`warren_test\.go:\d+`)
 
 func assertGolden(t *testing.T, name, got string) {
 	t.Helper()
@@ -230,7 +236,11 @@ func TestExportWithoutProvider(t *testing.T) {
 	if err == nil {
 		t.Fatal("an export with no provider booted")
 	}
-	assertGolden(t, "export_without_provider", err.Error())
+	// The declaration site is a real line in this file, so the golden
+	// normalises it — otherwise every edit above this point rewrites the
+	// diagnostic's contract.
+	got := declSite.ReplaceAllString(err.Error(), "warren_test.go:NN")
+	assertGolden(t, "export_without_provider", got)
 }
 
 func TestLifecycleIsResolvable(t *testing.T) {
@@ -582,5 +592,60 @@ func TestModuleFactorySiteIsTheCaller(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "warren_test.go") {
 		t.Errorf("the diagnostic does not name the caller's file:\n%s", err)
+	}
+}
+
+func TestHealthRegistryIsResolvable(t *testing.T) {
+	t.Parallel()
+
+	var got health.Registry
+	m := warren.NewModule("adapterH",
+		warren.Consumers(func(r health.Registry) *pool {
+			// An adapter registers its ping from its own constructor.
+			_ = r.Register(health.NewCheck("fake-db", func(context.Context) error { return nil }))
+			got = r
+			return &pool{}
+		}),
+	)
+	app := warren.New(m)
+	if err := app.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = app.Stop(context.Background()) }()
+
+	if got == nil {
+		t.Fatal("health.Registry is not injectable from the root scope")
+	}
+	// The gate is the lifecycle's: booted means ready, and the registered
+	// check is consumed.
+	rep := got.Ready(context.Background())
+	if rep.Status != health.StatusUp || len(rep.Checks) != 1 {
+		t.Errorf("Ready() = %+v, want up with the adapter's check reported", rep)
+	}
+	if rep := got.Live(context.Background()); rep.Status != health.StatusUp {
+		t.Errorf("Live() = %+v, want up", rep)
+	}
+}
+
+func TestHealthReadinessFollowsTheLifecycle(t *testing.T) {
+	t.Parallel()
+
+	var reg health.Registry
+	m := warren.NewModule("adapterH2",
+		warren.Consumers(func(r health.Registry) *pool { reg = r; return &pool{} }),
+	)
+	app := warren.New(m)
+	if err := app.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if rep := reg.Ready(context.Background()); rep.Status != health.StatusUp {
+		t.Fatalf("Ready() after Start = %+v, want up", rep)
+	}
+	if err := app.Stop(context.Background()); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	rep := reg.Ready(context.Background())
+	if rep.Status != health.StatusDown || rep.Reason != "draining" {
+		t.Errorf("Ready() after Stop = %+v, want down/draining — readiness closes first", rep)
 	}
 }
