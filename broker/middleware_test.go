@@ -3,6 +3,7 @@ package broker_test
 import (
 	"context"
 	stderrors "errors"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -363,13 +364,15 @@ func TestConcurrencyLimitCapsInFlight(t *testing.T) {
 	}
 }
 
-// waitUntil spins on cond with Gosched — an observable-state wait, no sleeps.
+// waitUntil spins on cond, yielding the scheduler each miss — an
+// observable-state wait, no sleeps.
 func waitUntil(t *testing.T, cond func() bool) {
 	t.Helper()
 	for range 1_000_000 {
 		if cond() {
 			return
 		}
+		runtime.Gosched()
 	}
 	t.Fatal("condition never held")
 }
@@ -442,6 +445,74 @@ func TestRecover(t *testing.T) {
 	}
 }
 
+// TestExponentialBackoffNeverOverflows pins the review's HIGH finding: high
+// attempt numbers must clamp to the cap, never overflow into a negative
+// bound that panics rand.N at request time.
+func TestExponentialBackoffNeverOverflows(t *testing.T) {
+	t.Parallel()
+
+	p := broker.ExponentialBackoff(1000)
+	for _, attempt := range []int{10, 37, 38, 63, 64, 200, 999} {
+		delay, retry := p.Next(attempt)
+		if !retry {
+			t.Fatalf("attempt %d: retry = false before the bound", attempt)
+		}
+		if delay < 0 || delay > 30*time.Second {
+			t.Errorf("attempt %d: delay %v outside [0, 30s]", attempt, delay)
+		}
+	}
+}
+
+func TestWithConcurrencyRejectsNonPositive(t *testing.T) {
+	t.Parallel()
+
+	defer func() {
+		r := recover()
+		msg, ok := r.(string)
+		if !ok || !strings.Contains(msg, "WithConcurrency(0)") {
+			t.Errorf("panic = %v, want the named boot guard", r)
+		}
+	}()
+	broker.WithConcurrency(0)
+}
+
+// TestDrainWaitsForDLQPublish pins that wait covers a DLQ publish in flight,
+// not just the handler — shutdown step 5 must not close the connection
+// under the one message the DLQ exists to keep.
+func TestDrainWaitsForDLQPublish(t *testing.T) {
+	t.Parallel()
+
+	gate := make(chan struct{})
+	started := make(chan struct{})
+	var once sync.Once
+	slow := &slowPublisher{gate: gate, started: func() { once.Do(func() { close(started) }) }}
+	h, wait := broker.Pipeline("t", func(context.Context, broker.Message) error {
+		return werrors.Invalid("payload", stderrors.New("bad"))
+	}, inbox.NewMemoryStore(), slow)
+
+	inFlight := make(chan error, 1)
+	go func() { inFlight <- h(context.Background(), msg("evt-1")) }()
+	<-started // the DLQ publish is mid-flight
+
+	waitReturned := make(chan error, 1)
+	go func() { waitReturned <- wait(context.Background()) }()
+	for range 1_000 {
+		select {
+		case <-waitReturned:
+			t.Fatal("wait returned while a DLQ publish was in flight")
+		default:
+			runtime.Gosched()
+		}
+	}
+	close(gate)
+	if err := <-inFlight; err != nil {
+		t.Fatalf("delivery: %v", err)
+	}
+	if err := <-waitReturned; err != nil {
+		t.Fatalf("wait: %v", err)
+	}
+}
+
 func TestExponentialBackoff(t *testing.T) {
 	t.Parallel()
 
@@ -499,6 +570,44 @@ func TestDeliveryHeadersSeam(t *testing.T) {
 	}
 	if got["traceparent"] != "00-abc" {
 		t.Errorf("DeliveryHeaders = %v — TraceExtract did not seed the context", got)
+	}
+}
+
+type slowPublisher struct {
+	gate    chan struct{}
+	started func()
+}
+
+func (p *slowPublisher) Publish(context.Context, string, ...broker.Message) error {
+	p.started()
+	<-p.gate
+	return nil
+}
+
+func BenchmarkPipelineFullChain(b *testing.B) {
+	// Dedupe on, unique IDs — the real per-message cost.
+	store := inbox.NewMemoryStore()
+	h, _ := broker.Pipeline("t", func(context.Context, broker.Message) error { return nil },
+		store, &capturePublisher{})
+	ctx := context.Background()
+	b.ReportAllocs()
+	i := 0
+	for b.Loop() {
+		i++
+		_ = h(ctx, broker.Message{ID: strconv.Itoa(i), Type: "t"})
+	}
+}
+
+func BenchmarkPipelineDedupeSuppressed(b *testing.B) {
+	store := inbox.NewMemoryStore()
+	h, _ := broker.Pipeline("t", func(context.Context, broker.Message) error { return nil },
+		store, &capturePublisher{})
+	ctx := context.Background()
+	m := broker.Message{ID: "same", Type: "t"}
+	_ = h(ctx, m)
+	b.ReportAllocs()
+	for b.Loop() {
+		_ = h(ctx, m)
 	}
 }
 

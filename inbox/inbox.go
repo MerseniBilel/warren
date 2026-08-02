@@ -41,6 +41,12 @@ func WithClock(now func() time.Time) MemoryOption {
 // default because at-least-once delivery makes duplicates certain, not
 // hypothetical. Its records do not survive a restart; a durable store is the
 // persistence adapters' business.
+//
+// Expired records are reclaimed lazily on their own reads and by an
+// incremental sweep on every write (a few random probes, Redis-style), so
+// memory tracks the live TTL window rather than everything ever consumed.
+// It remains a dev/test-grade store: sustained high-volume production use
+// wants a durable adapter.
 func NewMemoryStore(opts ...MemoryOption) Store {
 	s := &memoryStore{expiry: map[string]time.Time{}, now: time.Now}
 	for _, opt := range opts {
@@ -72,6 +78,20 @@ func (s *memoryStore) Seen(_ context.Context, id string) (bool, error) {
 func (s *memoryStore) MarkSeen(_ context.Context, id string, ttl time.Duration) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.expiry[id] = s.now().Add(ttl)
+	now := s.now()
+	s.expiry[id] = now.Add(ttl)
+	// Incremental sweep: probe a few entries per write (map iteration order
+	// is randomized) so expired records are reclaimed even when never
+	// re-queried.
+	probed := 0
+	for k, deadline := range s.expiry {
+		if probed >= 4 {
+			break
+		}
+		probed++
+		if now.After(deadline) {
+			delete(s.expiry, k)
+		}
+	}
 	return nil
 }

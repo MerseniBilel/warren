@@ -70,8 +70,13 @@ func WithDeadLetter(topic string) SubscribeOption {
 
 // WithConcurrency caps the number of handler invocations executing
 // concurrently. A message waiting out a retry backoff holds no slot. The
-// default is uncapped — bounded only by the driver's delivery parallelism.
+// default — omitting the option — is uncapped, bounded only by the driver's
+// delivery parallelism; a cap of zero or less is a boot-time panic, because
+// a subscription that can process no messages is a config typo, not intent.
 func WithConcurrency(n int) SubscribeOption {
+	if n <= 0 {
+		panic(fmt.Sprintf("broker: WithConcurrency(%d) — a subscription cannot process %d messages; omit the option for uncapped", n, n))
+	}
 	return SubscribeOption{apply: func(c *subscribeConfig) { c.concurrency = n }}
 }
 
@@ -101,7 +106,14 @@ func (e expBackoff) Next(attempt int) (time.Duration, bool) {
 	if attempt >= e.attempts {
 		return 0, false
 	}
-	ceiling := min(100*time.Millisecond*(1<<(attempt-1)), 30*time.Second)
+	// The cap is reached by attempt 10 (100ms<<9 > 30s); computing the shift
+	// past that would overflow int64 nanoseconds around attempt 38 and hand
+	// rand.N a negative bound — a request-time panic in a stage, which the
+	// inner Recover cannot catch.
+	ceiling := 30 * time.Second
+	if attempt <= 9 {
+		ceiling = min(100*time.Millisecond*(1<<(attempt-1)), 30*time.Second)
+	}
 	return rand.N(ceiling + 1), true
 }
 
@@ -305,7 +317,10 @@ func Deduplicate(store inbox.Store, ttl time.Duration) Middleware {
 // original envelope to the dead-letter topic with forensic headers and ack.
 // NOT_FOUND and CONFLICT ack. UNAVAILABLE nacks so the broker redelivers —
 // never dead-lettered. A failed DLQ publish nacks: silent loss is the one
-// forbidden outcome.
+// forbidden outcome. Note what that nack implies: the chain holds no state,
+// so the redelivery re-runs the FULL pipeline — the handler and its side
+// effects included — before the DLQ publish is re-attempted. Handlers are
+// idempotent in an at-least-once world; this is one more reason why.
 func DeadLetter(pub Publisher, originTopic, dlqTopic string) Middleware {
 	if pub == nil {
 		panic("broker: DeadLetter composed with a nil publisher")
