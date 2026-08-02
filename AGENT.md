@@ -476,9 +476,12 @@ recommended in blog posts, and neither README said so.
   position — Chain cannot return an error (§3.2 fixes its signature), and
   deferring the failure would be the request-time nil dereference the
   boot-ordering rule exists to prevent. The same guard covers the built-in
-  middleware constructors: `app.Retrying(nil)` and `app.Authorized(nil)`
-  panic at composition with named messages. Nothing else panics, and nothing
-  is added to this list without amending this line.
+  middleware constructors — `app.Retrying(nil)`, `app.Authorized(nil)` — and
+  their consumer-ring mirrors: `broker.Chain`, `broker.Pipeline`, and the
+  stage constructors (`Deduplicate`, `DeadLetter`, `Retry`,
+  `ConcurrencyLimit`) panic at composition, with named messages, on nil or
+  nonsensical arguments. Nothing else panics, and nothing is added to this
+  list without amending this line.
 - Reflection belongs at boot, not in the request path (invariant 7).
 - Exported identifiers have doc comments starting with the identifier's name.
 - Formatting is the formatter's job. Never hand-format; never argue about it.

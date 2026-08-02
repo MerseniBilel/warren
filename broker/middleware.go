@@ -1,0 +1,428 @@
+package broker
+
+import (
+	"context"
+	stderrors "errors"
+	"fmt"
+	"maps"
+	"math/rand/v2"
+	"strconv"
+	"sync"
+	"time"
+
+	"github.com/MerseniBilel/warren/app"
+	"github.com/MerseniBilel/warren/errors"
+	"github.com/MerseniBilel/warren/inbox"
+)
+
+// Middleware decorates a MessageHandler — the consumer ring's mirror of
+// app.Middleware, one ring over. Written once, it applies to Kafka, Rabbit,
+// NATS, and the in-process broker identically; that property is the entire
+// messaging pitch, and it holds because no stage ever sees a driver type.
+type Middleware func(MessageHandler) MessageHandler
+
+// Chain composes middleware around a handler; mw[0] is the outermost, the
+// same convention as app.Chain. Like app.Chain it refuses nil at composition
+// time — a boot-time panic naming the position instead of a request-time nil
+// dereference (the AGENT.md-sanctioned guard).
+func Chain(h MessageHandler, mw ...Middleware) MessageHandler {
+	if h == nil {
+		panic("broker: Chain composed around a nil handler")
+	}
+	for i := len(mw) - 1; i >= 0; i-- {
+		if mw[i] == nil {
+			panic(fmt.Sprintf("broker: Chain middleware %d of %d is nil — append a conditional middleware only when it is enabled", i+1, len(mw)))
+		}
+		h = mw[i](h)
+		if h == nil {
+			panic(fmt.Sprintf("broker: middleware %d of %d returned a nil handler", i+1, len(mw)))
+		}
+	}
+	return h
+}
+
+// SubscribeOption configures one subscription's pipeline. It is opaque:
+// options are minted here, collected at the registration site, and applied
+// by Pipeline at boot — drivers only forward them.
+type SubscribeOption struct{ apply func(*subscribeConfig) }
+
+type subscribeConfig struct {
+	retry       app.RetryPolicy
+	dlqTopic    string
+	concurrency int
+	dedupe      bool
+	dedupeTTL   time.Duration
+}
+
+// WithRetry sets the subscription's retry policy — the same app.RetryPolicy
+// port the core Retrying middleware uses, so resilience-module policies are
+// interchangeable with ExponentialBackoff at every site. The default is
+// ExponentialBackoff(3).
+func WithRetry(p app.RetryPolicy) SubscribeOption {
+	return SubscribeOption{apply: func(c *subscribeConfig) { c.retry = p }}
+}
+
+// WithDeadLetter sets the topic exhausted and terminal messages are routed
+// to. The default is "<topic>.dlq".
+func WithDeadLetter(topic string) SubscribeOption {
+	return SubscribeOption{apply: func(c *subscribeConfig) { c.dlqTopic = topic }}
+}
+
+// WithConcurrency caps the number of handler invocations executing
+// concurrently. A message waiting out a retry backoff holds no slot. The
+// default is uncapped — bounded only by the driver's delivery parallelism.
+func WithConcurrency(n int) SubscribeOption {
+	return SubscribeOption{apply: func(c *subscribeConfig) { c.concurrency = n }}
+}
+
+// WithDedupeTTL sets how long a processed Message.ID is remembered. It must
+// exceed the subscription's redelivery window. The default is 24 hours.
+func WithDedupeTTL(d time.Duration) SubscribeOption {
+	return SubscribeOption{apply: func(c *subscribeConfig) { c.dedupeTTL = d }}
+}
+
+// WithoutDedupe disables inbox dedupe for this subscription — the named
+// opt-out from the on-by-default stance, for handlers that are naturally
+// idempotent.
+func WithoutDedupe() SubscribeOption {
+	return SubscribeOption{apply: func(c *subscribeConfig) { c.dedupe = false }}
+}
+
+// ExponentialBackoff returns a bounded exponential app.RetryPolicy:
+// attempts total attempts, base 100ms doubling per attempt, capped at 30s,
+// with full jitter. Boot-time construction, request-path arithmetic only.
+func ExponentialBackoff(attempts int) app.RetryPolicy {
+	return expBackoff{attempts: attempts}
+}
+
+type expBackoff struct{ attempts int }
+
+func (e expBackoff) Next(attempt int) (time.Duration, bool) {
+	if attempt >= e.attempts {
+		return 0, false
+	}
+	ceiling := min(100*time.Millisecond*(1<<(attempt-1)), 30*time.Second)
+	return rand.N(ceiling + 1), true
+}
+
+// Pipeline assembles the full consumer chain around h for one subscription,
+// in the fixed wrapping order:
+//
+//	Recover → Drain → TraceExtract → Deduplicate → DeadLetter → Retry → ConcurrencyLimit → handler
+//
+// and returns the composed handler plus the drain-wait the lifecycle calls
+// at shutdown step 3. Recover guards twice: innermost around the handler, so
+// a handler panic becomes INTERNAL and takes the §2.6 path — retried, then
+// dead-lettered — and outermost as a safety net, so a bug in a stage itself
+// cannot kill the subscription either. topic is the subscription's topic —
+// it names the default DLQ ("<topic>.dlq") and the origin-topic header on
+// dead-lettered messages. A nil handler, store (unless WithoutDedupe), or
+// dead-letter publisher panics here, at boot.
+func Pipeline(topic string, h MessageHandler, store inbox.Store, dlq Publisher, opts ...SubscribeOption) (MessageHandler, func(context.Context) error) {
+	if h == nil {
+		panic("broker: Pipeline composed around a nil handler")
+	}
+	if dlq == nil {
+		panic("broker: Pipeline composed with a nil dead-letter publisher — terminal messages must be preserved, never dropped")
+	}
+	cfg := subscribeConfig{
+		retry:     ExponentialBackoff(3),
+		dlqTopic:  topic + ".dlq",
+		dedupe:    true,
+		dedupeTTL: 24 * time.Hour,
+	}
+	for _, opt := range opts {
+		opt.apply(&cfg)
+	}
+	if cfg.dedupe && store == nil {
+		panic("broker: Pipeline composed with a nil inbox store — pass one, or opt out with WithoutDedupe()")
+	}
+
+	inner := Recover()(h)
+	if cfg.concurrency > 0 {
+		inner = ConcurrencyLimit(cfg.concurrency)(inner)
+	}
+	inner = Retry(cfg.retry)(inner)
+	inner = DeadLetter(dlq, topic, cfg.dlqTopic)(inner)
+	if cfg.dedupe {
+		inner = Deduplicate(store, cfg.dedupeTTL)(inner)
+	}
+	inner = TraceExtract()(inner)
+	drainMw, wait := Drain()
+	inner = drainMw(inner)
+	inner = Recover()(inner)
+	return inner, wait
+}
+
+// Recover converts a panic into errors.Internal. Pipeline applies it twice:
+// innermost — so a handler panic is classified INTERNAL and retried, then
+// dead-lettered, per §2.6 — and outermost, so a bug in a stage itself cannot
+// kill the subscription.
+func Recover() Middleware {
+	return func(next MessageHandler) MessageHandler {
+		return func(ctx context.Context, msg Message) (err error) {
+			defer func() {
+				if r := recover(); r != nil {
+					err = errors.Internal(fmt.Errorf("handler panic: %v", r))
+				}
+			}()
+			return next(ctx, msg)
+		}
+	}
+}
+
+// Drain returns the admission stage and the wait the lifecycle calls at
+// shutdown step 3: wait refuses new deliveries (UNAVAILABLE nack — the
+// broker redelivers them elsewhere) and returns when every in-flight
+// message, its retries and its DLQ publish included, has finished.
+func Drain() (Middleware, func(context.Context) error) {
+	d := &drainState{idle: make(chan struct{})}
+	mw := func(next MessageHandler) MessageHandler {
+		return func(ctx context.Context, msg Message) error {
+			if !d.admit() {
+				return errors.Unavailable("subscription", stderrors.New("draining for shutdown"))
+			}
+			defer d.done()
+			return next(ctx, msg)
+		}
+	}
+	return mw, d.wait
+}
+
+type drainState struct {
+	mu       sync.Mutex
+	inFlight int
+	draining bool
+	idle     chan struct{}
+	closed   bool
+}
+
+func (d *drainState) admit() bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.draining {
+		return false
+	}
+	d.inFlight++
+	return true
+}
+
+func (d *drainState) done() {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.inFlight--
+	if d.draining && d.inFlight == 0 && !d.closed {
+		d.closed = true
+		close(d.idle)
+	}
+}
+
+func (d *drainState) wait(ctx context.Context) error {
+	d.mu.Lock()
+	d.draining = true
+	if d.inFlight == 0 {
+		if !d.closed {
+			d.closed = true
+			close(d.idle)
+		}
+	}
+	d.mu.Unlock()
+	select {
+	case <-d.idle:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// TraceExtract seeds the delivery's headers on the context, so downstream
+// instrumentation — and the observability adapter's span extraction — can
+// continue the producer's trace without this package knowing a telemetry
+// SDK exists.
+func TraceExtract() Middleware {
+	return func(next MessageHandler) MessageHandler {
+		return func(ctx context.Context, msg Message) error {
+			if msg.Headers != nil {
+				ctx = WithDeliveryHeaders(ctx, msg.Headers)
+			}
+			return next(ctx, msg)
+		}
+	}
+}
+
+type deliveryHeadersKey struct{}
+
+// WithDeliveryHeaders returns a copy of ctx carrying the delivery's headers.
+// TraceExtract seeds it; adapters and instrumentation read it back with
+// DeliveryHeaders.
+func WithDeliveryHeaders(ctx context.Context, h map[string]string) context.Context {
+	return context.WithValue(ctx, deliveryHeadersKey{}, h)
+}
+
+// DeliveryHeaders returns the headers of the message being processed, or nil
+// when the context carries none. The returned map is the delivery's own —
+// read it, don't mutate it.
+func DeliveryHeaders(ctx context.Context) map[string]string {
+	h, _ := ctx.Value(deliveryHeadersKey{}).(map[string]string)
+	return h
+}
+
+// Deduplicate suppresses redeliveries of already-disposed messages, keyed on
+// Message.ID: Seen before the handler (seen → ack without invoking it),
+// MarkSeen only after the inner chain returns nil — a nacked message must
+// not count as its own duplicate. A store error fails CLOSED: UNAVAILABLE
+// nack, duplicates over loss, but never silently. A MarkSeen failure after
+// success is acked — the work is done; refusing the ack would guarantee the
+// duplicate it failed to prevent.
+func Deduplicate(store inbox.Store, ttl time.Duration) Middleware {
+	if store == nil {
+		panic("broker: Deduplicate composed with a nil inbox store")
+	}
+	return func(next MessageHandler) MessageHandler {
+		return func(ctx context.Context, msg Message) error {
+			seen, err := store.Seen(ctx, msg.ID)
+			if err != nil {
+				return errors.Unavailable("inbox store", err)
+			}
+			if seen {
+				return nil
+			}
+			if err := next(ctx, msg); err != nil {
+				return err
+			}
+			// Marking failure is logged by the store's own instrumentation;
+			// the disposition stands.
+			_ = store.MarkSeen(ctx, msg.ID, ttl)
+			return nil
+		}
+	}
+}
+
+// DeadLetter is the disposition stage: it maps the inner chain's final error
+// by its outermost warren/errors code to the §2.6 consumer column. Terminal
+// codes (INVALID, UNAUTHENTICATED, PERMISSION_DENIED, exhausted INTERNAL —
+// and everything unknown, INTERNAL being the safe default) publish the
+// original envelope to the dead-letter topic with forensic headers and ack.
+// NOT_FOUND and CONFLICT ack. UNAVAILABLE nacks so the broker redelivers —
+// never dead-lettered. A failed DLQ publish nacks: silent loss is the one
+// forbidden outcome.
+func DeadLetter(pub Publisher, originTopic, dlqTopic string) Middleware {
+	if pub == nil {
+		panic("broker: DeadLetter composed with a nil publisher")
+	}
+	return func(next MessageHandler) MessageHandler {
+		return func(ctx context.Context, msg Message) error {
+			err := next(ctx, msg)
+			if err == nil {
+				return nil
+			}
+			switch codeOf(err) {
+			case errors.CodeNotFound, errors.CodeConflict:
+				return nil
+			case errors.CodeUnavailable:
+				return err
+			}
+			// Terminal: INVALID, UNAUTHENTICATED, PERMISSION_DENIED,
+			// INTERNAL (retries exhausted), and every unknown code.
+			dead := msg
+			dead.Headers = make(map[string]string, len(msg.Headers)+4)
+			maps.Copy(dead.Headers, msg.Headers)
+			dead.Headers["warren-origin-topic"] = originTopic
+			dead.Headers["warren-error-code"] = string(codeOf(err))
+			dead.Headers["warren-error"] = err.Error()
+			dead.Headers["warren-attempts"] = strconv.Itoa(attemptsOf(err))
+			if perr := pub.Publish(ctx, dlqTopic, dead); perr != nil {
+				return errors.Unavailable("dead-letter publish to "+dlqTopic, perr)
+			}
+			return nil
+		}
+	}
+}
+
+// Retry re-invokes the inner chain on the two §2.6 retry rows — UNAVAILABLE
+// and INTERNAL, judged by the OUTERMOST code, a non-Warren error counting as
+// INTERNAL — under the policy. Waits observe context cancellation, so
+// shutdown never sits out a backoff. The final error is wrapped with the
+// attempt count for the DLQ's forensic header; the code stays reachable.
+func Retry(policy app.RetryPolicy) Middleware {
+	if policy == nil {
+		panic("broker: Retry composed with a nil policy")
+	}
+	return func(next MessageHandler) MessageHandler {
+		return func(ctx context.Context, msg Message) error {
+			for attempt := 1; ; attempt++ {
+				err := next(ctx, msg)
+				if err == nil {
+					return nil
+				}
+				code := codeOf(err)
+				if code != errors.CodeUnavailable && code != errors.CodeInternal {
+					return &attemptedError{err: err, attempts: attempt}
+				}
+				delay, retry := policy.Next(attempt)
+				if !retry {
+					return &attemptedError{err: err, attempts: attempt}
+				}
+				if delay > 0 {
+					timer := time.NewTimer(delay)
+					select {
+					case <-timer.C:
+					case <-ctx.Done():
+						timer.Stop()
+						return &attemptedError{err: err, attempts: attempt}
+					}
+				} else if ctx.Err() != nil {
+					return &attemptedError{err: err, attempts: attempt}
+				}
+			}
+		}
+	}
+}
+
+// ConcurrencyLimit caps concurrently executing handler invocations. It sits
+// innermost — inside Retry — so the semaphore is held per attempt and a
+// message sleeping in backoff starves nobody.
+func ConcurrencyLimit(n int) Middleware {
+	if n <= 0 {
+		panic("broker: ConcurrencyLimit composed with a non-positive cap")
+	}
+	sem := make(chan struct{}, n)
+	return func(next MessageHandler) MessageHandler {
+		return func(ctx context.Context, msg Message) error {
+			select {
+			case sem <- struct{}{}:
+			case <-ctx.Done():
+				return errors.Unavailable("subscription", ctx.Err())
+			}
+			defer func() { <-sem }()
+			return next(ctx, msg)
+		}
+	}
+}
+
+// attemptedError carries the attempt count to the DLQ stage without
+// disturbing the outermost warren/errors code — errors.As skips it.
+type attemptedError struct {
+	err      error
+	attempts int
+}
+
+func (e *attemptedError) Error() string { return e.err.Error() }
+
+func (e *attemptedError) Unwrap() error { return e.err }
+
+// codeOf reads the outermost warren/errors code; anything else — a plain
+// error included — is INTERNAL, the safe default for the unknown.
+func codeOf(err error) errors.Code {
+	if e, ok := stderrors.AsType[*errors.Error](err); ok {
+		return e.Code()
+	}
+	return errors.CodeInternal
+}
+
+func attemptsOf(err error) int {
+	if a, ok := stderrors.AsType[*attemptedError](err); ok {
+		return a.attempts
+	}
+	return 1
+}

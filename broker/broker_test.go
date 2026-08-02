@@ -126,7 +126,15 @@ func TestHandlerNilAcknowledges(t *testing.T) {
 func TestRingPosition(t *testing.T) {
 	t.Parallel()
 
-	allowed := map[string]bool{"context": true, "time": true}
+	// The standard library plus the kernel and contract siblings a
+	// CONTRACTS package may see (§1.1). No kgo, no amqp, no OTel, ever.
+	allowed := map[string]bool{
+		"context": true, "errors": true, "fmt": true, "maps": true,
+		"math/rand/v2": true, "strconv": true, "sync": true, "time": true,
+		"github.com/MerseniBilel/warren/app":    true,
+		"github.com/MerseniBilel/warren/errors": true,
+		"github.com/MerseniBilel/warren/inbox":  true,
+	}
 	entries, err := os.ReadDir(".")
 	if err != nil {
 		t.Fatalf("reading package dir: %v", err)

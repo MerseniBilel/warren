@@ -183,7 +183,8 @@ Publishing runs the other way: `UnitOfWork` writes aggregate state and outbox ro
 warren/                                 MODULE: core        (stdlib + dig)
 ├── warren.go, di/, lifecycle/,
 │   config/, log/, errors/, validate/, health/            ← kernel
-└── domain/, app/, persistence/, broker/, transport/      ← contracts (interfaces only)
+├── inbox/                                                ← dedupe port + memory store
+└── domain/, app/, persistence/, broker/, transport/      ← contracts (see §1.1's exception)
 
 warren/config/yaml/                     MODULE  yaml parser — library TBD, audit first
 warren/transport/http/                  MODULE  chi
@@ -892,6 +893,45 @@ type MessageHandler func(context.Context, Message) error
 
 That property is the entire messaging pitch. It evaporates the moment a consumer touches `kgo.Record` directly — which is why the port is mandatory and the raw client is an explicit escape hatch, not the default path.
 
+That list is the *outcome* order a failing message experiences. The wrapping
+order `broker.Pipeline` composes (settled 2026-08-02 with the implementation)
+is: `Recover` (safety net) → `Drain` → `TraceExtract` → `Deduplicate` →
+`DeadLetter` (the disposition stage, mapping the §2.6 consumer column by the
+error's outermost code) → `Retry` (`UNAVAILABLE` and `INTERNAL` only; waits
+observe cancellation) → `ConcurrencyLimit` (semaphore held per attempt — a
+message in backoff holds no slot) → `Recover` (innermost: a handler panic is
+`INTERNAL`, retried, then dead-lettered) → handler. The chain lives in
+`broker` itself — pure functions over the port's own types, the same shape
+`app`'s middleware take one ring over:
+
+```go
+type Middleware func(MessageHandler) MessageHandler
+func Chain(h MessageHandler, mw ...Middleware) MessageHandler // mw[0] outermost; nil panics at composition
+func Pipeline(topic string, h MessageHandler, store inbox.Store, dlq Publisher,
+    opts ...SubscribeOption) (MessageHandler, func(ctx context.Context) error)
+
+type SubscribeOption struct{ /* opaque */ }
+func WithRetry(p app.RetryPolicy) SubscribeOption   // default ExponentialBackoff(3)
+func WithDeadLetter(topic string) SubscribeOption   // default "<topic>.dlq"
+func WithConcurrency(n int) SubscribeOption         // default uncapped
+func WithDedupeTTL(d time.Duration) SubscribeOption // default 24h
+func WithoutDedupe() SubscribeOption                // the named opt-out
+func ExponentialBackoff(attempts int) app.RetryPolicy // base 100ms, ×2, cap 30s, full jitter
+```
+
+Chain-produced codes: a publish failure is the driver's column (transient →
+`Unavailable`, rejected → `Invalid`, else `Internal`); a failed DLQ publish
+**nacks** — the message is neither acked nor dropped, and redelivery
+re-attempts until the broker recovers; a pre-handler decode failure is
+`Invalid` → DLQ; a non-Warren handler error is `INTERNAL`. Dead-lettered
+messages carry the original envelope plus forensic headers
+(`warren-origin-topic`, `warren-error-code`, `warren-error`,
+`warren-attempts`) — which is also why `Message` needs no `Topic` field: the
+topic is per-subscription boot-time state, and provenance travels on the one
+kind of message where it is a question. Dedupe marks only on nil (disposed):
+`Seen` before the handler, fail **closed** (`UNAVAILABLE` nack — duplicates
+over loss, never silently).
+
 ---
 
 ### 3.5 `warren/transport`
@@ -1097,7 +1137,29 @@ Modes: polling (portable) and CDC (Postgres logical replication, lower latency).
 
 ### 5.6 `warren/inbox`
 
-Idempotent consumption. Dedupe store (Postgres or Redis) keyed on `Message.ID` with TTL. Enabled by default — at-least-once delivery means duplicates are certain, not hypothetical.
+- **Path** `warren/inbox` · **Module** core · **Mode** Build
+
+Idempotent consumption. The dedupe-store port, keyed on `Message.ID` with a
+per-call TTL, plus the stdlib memory store that makes dedupe-by-default cost
+neither Docker nor a database. Enabled by default — at-least-once delivery
+means duplicates are certain, not hypothetical. Durable stores ship with the
+persistence adapters (Postgres joining the unit of work, Redis with native
+TTLs).
+
+```go
+type Store interface {
+    Seen(ctx context.Context, id string) (bool, error)
+    MarkSeen(ctx context.Context, id string, ttl time.Duration) error
+}
+func NewMemoryStore(opts ...MemoryOption) Store // map + mutex + injectable clock
+func WithClock(now func() time.Time) MemoryOption
+```
+
+The protocol is `broker.Deduplicate`'s (§3.4): `Seen` before the handler,
+`MarkSeen` only after a nil disposition — a nacked message must not count as
+its own duplicate — and store failures fail closed. TTL is per call because
+the window is per *subscription* (it must exceed that subscription's
+redelivery window), while one `Store` serves them all.
 
 ---
 
@@ -1277,6 +1339,7 @@ All generators support `--dry-run` and `--force`.
 | Area | Library | Mode | Note |
 |---|---|---|---|
 | DI | `uber-go/dig` | Wrap | v1, strict SemVer, built to power frameworks · audited 2026-08-01: v1.19.0 (2025-05-13), MIT, not archived, 4.5k stars, 33 open issues |
+| Inbox dedupe | — | Build | port + stdlib memory store in core; durable stores ship with persistence adapters |
 | Config | — | Build | Viper rejected: weight + global state |
 | Lifecycle | — | Build | fx rejected: imposes its own lifecycle |
 | Logging | `log/slog` | Vendor | stdlib |

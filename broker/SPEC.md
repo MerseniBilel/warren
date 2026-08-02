@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | **Approved (2026-08-01) for `Message`, `Publisher`, `Subscriber`, `MessageHandler`** — the middleware chain's home and the option types are carved out, blocked on Open questions 1–2 |
+| **Status** | **Approved; port + chain implemented (2026-08-02)** — the architect round decided questions 1–7 (recorded in warren.md §3.4/§5.6; D-memo in the repo history): the chain lives in `broker`, options are `SubscribeOption` over `app.RetryPolicy`, the dedupe port is `inbox.Store` (mark-after-success, fail closed), DLQ-publish failure nacks, no `Topic` field (forensic headers instead), the wrapping order is fixed with a double `Recover`. Remaining: question 8 (Controllers vs Consumers distinction — the transport round's) and the exported contract suite, which lands as `broker/brokertest` with `broker/memory`. |
 | **Source** | [warren.md §3.4](../warren.md), §1.5, §5.1 |
 | **Module** | core |
 | **Mode** | Build (ports only) — **the least negotiable wrap in the framework** |

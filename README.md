@@ -95,8 +95,10 @@ contract now.
       AuthorizationPolicy, context-carried Telemetry)*
 - [ ] `app.Transactional` — waits on `persistence.UnitOfWork`'s spec
       *(the app spec retires when it lands)*
-- [ ] `broker` (port) — `Message`/`Publisher`/`Subscriber` *(approved; chain
-      home open)*
+- [x] `broker` port + consumer chain — envelope, Pipeline (Recover/Drain/
+      TraceExtract/Deduplicate/DeadLetter/Retry/ConcurrencyLimit), options
+      *(implemented; §2.6 disposition table one test per code)*
+- [x] `inbox` — dedupe-store port + stdlib memory store *(implemented)*
 
 ### Phase 2 — transport (blocked until Go 1.27 ships, expected August 2026)
 
@@ -112,7 +114,8 @@ contract now.
 - [ ] Outbox/inbox ownership decisions (writer split, leader election, module map)
 - [ ] `broker/memory` — in-process driver, default in tests
 - [ ] `outbox` — writer port + leader-elected relay
-- [ ] `inbox` — dedupe store, on by default
+- [x] `inbox` — dedupe store, on by default *(port + memory store shipped
+      with the broker chain)*
 - [ ] `broker/kafka` — franz-go driver *(SASL type decision applied)*
 - [ ] `broker/rabbitmq`, `broker/nats` — after their manifest entries are written
 
