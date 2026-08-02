@@ -2,9 +2,9 @@
 
 | | |
 |---|---|
-| **Status** | Draft — not approved |
+| **Status** | **Approved and implemented (2026-08-02)** — all eight open questions decided (below); the exported contract suite `broker/brokertest` ships with it |
 | **Source** | [warren.md §5.4](../../warren.md) |
-| **Module** | **undecided** — §1.6's module list omits this package. See Open questions. |
+| **Module** | core — decided 2026-08-02 (Q1) |
 | **Mode** | Build |
 | **Wraps** | — |
 
@@ -204,51 +204,46 @@ no wrapped library and no raw handle to reach. warren.md names none.
 
 ## Open questions
 
-1. **Which module does this live in?** §1.6's repository layout lists
-   `broker/kafka`, `broker/rabbitmq`, and `broker/nats` as their own modules and
-   **omits `broker/memory` entirely** — it appears in neither the core module's
-   contents nor the adapter module list. Two readings, and the human has to pick:
-   - **Core module.** Mode Build and "default in tests" both argue for it: a
-     test helper that requires adding a module to `go.mod` is friction on the
-     path §7.5 says is the default, and with zero third-party imports it
-     satisfies core's "stdlib + dig only" constraint (invariant 1) on the
-     dependency axis.
-   - **Its own module.** §1.1 puts every broker driver in the ADAPTERS ring,
-     which is a ring of separate modules; a driver implementation inside the
-     core module puts an adapter in the kernel's `go.mod` and blurs the ring
-     boundary that `warren lint arch` is meant to enforce. Note that invariant 5
-     ("contract packages contain zero implementations") is not violated either
-     way, since `broker/memory` is a distinct package from `broker` — but the
-     ring boundary question is real and is not a naming detail.
-
-   Whichever is chosen, **§1.6 must be amended** — it is currently silent, and
-   silence in the module map is how an empty module or a misplaced dependency
-   gets created by accident (AGENT.md: "Do not create a new module unless its
-   first real code lands in the same change").
-2. **What is the public surface?** `memory.Broker(opts ...Option)
-   warren.Module`, matching §5.1's shape? Or is the memory broker only reachable
-   through `warrentest.WithMemoryBroker()` (§7.5) and a default when no driver
-   is registered? warren.md shows only the test helper.
-3. **What does a DLQ mean in process?** §3.4's chain includes `DeadLetter` and
-   applies to memory "identically", and §5.1's consumers declare
-   `broker.WithDeadLetter("billing.subscription.created.dlq")`. In process,
-   does that become another in-memory topic, a captured list the test helper can
-   assert on, or a log line? Unstated, and tests will want to assert on it.
-4. **Is delivery synchronous or asynchronous?** It determines whether
-   `AssertPublished` (§7.5) needs synchronisation, and whether §2.3 step 3's
-   "in-flight messages ack" is ever non-trivial. Unstated.
-5. **What are the bounds?** Queue depth, backpressure when a subscriber is
-   slower than a publisher, and behaviour on overflow are unstated. A modular
-   monolith running this in production (§5.4 permits it) makes these production
-   questions, not test questions.
-6. **Does the outbox relay run against the memory broker?** §5.5's relay drains
-   the outbox to "the broker", and a modular monolith on Postgres + memory
-   broker is a configuration §5.4 explicitly blesses. Whether the relay's
-   exactly-once story (§5.1) means anything here is unstated.
-7. **Ordering guarantees.** `Message.Key` is the "partition / routing key"
-   (§3.4). Whether the memory driver preserves per-key ordering — and therefore
-   whether a monolith relying on it keeps working after extraction to Kafka — is
-   unstated, and this one directly threatens §5.4's extraction claim.
+1. **RESOLVED (2026-08-02) — the core module.** The "adapters are separate
+   modules" rule exists for dependency hygiene: a driver's third-party graph
+   must never enter a user's `go.mod` uninvited, and drivers must version
+   independently. The memory driver has neither property — channels and the
+   stdlib only, and it *cannot* version independently of the port because it
+   is the port's reference semantics. A separate module would be an empty
+   release obligation whose only content is friction on the two paths §5.4
+   calls default (tests, modular monoliths). Core placement makes a modular
+   monolith messaging-complete with `warren` + dig alone. §1.6 amended.
+2. **RESOLVED — `memory.New(opts ...Option) *Broker`**, a concrete type
+   satisfying both `broker.Publisher` and `broker.Subscriber`. The
+   `warren.Module` wrapper (`memory.Broker(...)`) lands with the transport
+   round, when there is a registrar to wire it into; until then a test or a
+   module's own provider constructs it directly, which is what the framework
+   user did.
+3. **RESOLVED — a DLQ is an ordinary in-memory topic.** The chain publishes
+   dead letters through the same `Publisher`, so a test subscribes to
+   `"<topic>.dlq"` and asserts on real envelopes with real forensic headers.
+   No special case, and the assertions match what a Kafka DLQ would show.
+4. **RESOLVED — delivery is asynchronous**, one goroutine per subscription,
+   FIFO. Synchronous delivery would make `Publish` run handlers on the
+   publisher's stack, which no real driver does and which would hide every
+   concurrency bug a monolith will meet after extraction. The cost is that
+   tests must establish readiness rather than assume it — which is true of
+   Kafka too, so `brokertest` does it for every driver with a probe loop.
+5. **RESOLVED — bounded queue per subscription, default 1024,
+   `WithBuffer(n)`.** A full queue blocks the publisher until the subscriber
+   catches up or the publishing context ends, in which case `Publish`
+   returns `UNAVAILABLE`: backpressure and a retryable error, never a
+   silently dropped message. A topic with no live subscription accepts and
+   discards — pub/sub without a log — and that is documented on `Publish`,
+   because it is the one behaviour that surprises.
+6. **RESOLVED — yes, the relay runs against it unchanged**: the relay needs
+   a `Publisher`, and this is one. Exactly-once publishing means less here
+   than on Kafka (there is no broker-side transaction), but the outbox's
+   at-least-once guarantee holds, which is what the relay actually promises.
+7. **RESOLVED — FIFO per subscription, which subsumes per-key ordering.**
+   One delivery goroutine per subscription means messages arrive in publish
+   order, so a monolith relying on per-key order keeps working after
+   extraction to a partitioned driver. `brokertest` asserts it for every
+   driver — this is the guarantee §5.4's extraction claim rests on.
 8. **RESOLVED (2026-08-01):** warren.md §1.4 was amended to `Conflict → ack`,
-   in favour of §2.6; the two sections now agree. **§1.4 contradicts §2.6 on
-   `CONFLICT`** (DLQ vs ack).
+   in favour of §2.6; the two sections now agree.

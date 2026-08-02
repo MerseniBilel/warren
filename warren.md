@@ -184,6 +184,7 @@ warren/                                 MODULE: core        (stdlib + dig)
 ├── warren.go, di/, lifecycle/,
 │   config/, log/, errors/, validate/, health/            ← kernel
 ├── inbox/                                                ← dedupe port + memory store
+├── broker/memory/, broker/brokertest/                    ← in-process driver + contract suite
 └── domain/, app/, persistence/, broker/, transport/      ← contracts (see §1.1's exception)
 
 warren/config/yaml/                     MODULE  yaml parser — library TBD, audit first

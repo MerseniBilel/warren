@@ -115,7 +115,8 @@ contract now.
 ### Phase 3 — messaging
 
 - [ ] Outbox/inbox ownership decisions (writer split, leader election, module map)
-- [ ] `broker/memory` — in-process driver, default in tests
+- [x] `broker/memory` — in-process driver, default in tests *(implemented;
+      passes the exported `broker/brokertest` contract suite)*
 - [ ] `outbox` — writer port + leader-elected relay
 - [x] `inbox` — dedupe store, on by default *(port + memory store shipped
       with the broker chain)*
