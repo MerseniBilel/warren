@@ -36,6 +36,7 @@ func TestNewWritesTheWholeTree(t *testing.T) {
 		"internal/config/config.go",
 		"internal/config/config_test.go",
 		"internal/platform/module.go",
+		"internal/modules/user/controller.go",
 		"internal/modules/user/module.go",
 		"internal/modules/user/module_test.go",
 		"internal/modules/user/domain/user.go",
@@ -151,15 +152,28 @@ func TestUnreleasedAdapterIsRefusedWithTheAlternative(t *testing.T) {
 
 	err := scaffold.New(scaffold.Options{
 		Dir: t.TempDir(), Name: "myapp", ModulePath: "example.com/myapp",
-		Version: "v0.1.0", Transport: "http",
+		Version: "v0.1.0", Transport: "grpc",
 	})
 	if err == nil {
-		t.Fatal("--transport http scaffolded against an adapter that does not exist")
+		t.Fatal("--transport grpc scaffolded against an adapter that does not exist")
 	}
-	for _, want := range []string{"transport/http", "does not exist yet", "App.Invoke"} {
+	for _, want := range []string{"transport/grpc", "does not exist yet", "serves HTTP"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("the diagnostic is missing %q — it must say what is released and what to do:\n%v", want, err)
 		}
+	}
+}
+
+// http is the transport the scaffold wires, so asking for it is not a
+// refusal — the flag names what you already get.
+func TestReleasedTransportIsAccepted(t *testing.T) {
+	t.Parallel()
+
+	if err := scaffold.New(scaffold.Options{
+		Dir: t.TempDir(), Name: "myapp", ModulePath: "example.com/myapp",
+		Version: "v0.1.0", Transport: "http",
+	}); err != nil {
+		t.Errorf("--transport http was refused: %v", err)
 	}
 }
 

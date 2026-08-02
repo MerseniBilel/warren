@@ -152,6 +152,27 @@ func Command(opts Options) (string, error) {
 		declares: []decl{{base + "/application", []string{
 			opts.Name, opts.Name + "Result", data["Lower"], "New" + opts.Name + "Handler",
 		}}},
+		// The handler is wired into the container but reachable by nothing:
+		// exposing it is three lines in the feature's controller, and this
+		// generator cannot write them without editing a struct, a
+		// constructor and a method body it did not create.
+		next: fmt.Sprintf(`  Still to do — the handler is built, but nothing serves it yet.
+  In %s/controller.go:
+
+      type Controller struct {
+          %s app.Handler[application.%s, application.%sResult]   // add
+      }
+
+      func NewController(
+          %s app.Handler[application.%s, application.%sResult],   // add
+      ) *Controller { ... }
+
+      func (c *Controller) Register(r transport.Registrar) {
+          transport.Post(r, "/%s", c.%s)                          // add
+      }
+`, base, data["Lower"], opts.Name, opts.Name,
+			data["Lower"], opts.Name, opts.Name,
+			data["Snake"], data["Lower"]),
 	}
 	return p.apply()
 }
@@ -271,8 +292,10 @@ type plan struct {
 	files    map[string][]byte
 	edits    []edit
 	declares []decl
-	dryRun   bool
-	force    bool
+	// next is what the user must still do by hand, printed after the plan.
+	next   string
+	dryRun bool
+	force  bool
 }
 
 type edit struct {
@@ -420,6 +443,13 @@ func (p *plan) describe(existing map[string]bool) string {
 	}
 	for _, e := range p.edits {
 		fmt.Fprintf(&b, "  edit       %s  (%s)\n", e.path, e.what)
+	}
+	// What the generator could NOT do for you. A generator that reports only
+	// what it wrote leaves the user believing the wiring is finished, and the
+	// missing half surfaces as a 404 nobody can explain.
+	if p.next != "" {
+		b.WriteString("\n")
+		b.WriteString(p.next)
 	}
 	return b.String()
 }

@@ -36,12 +36,32 @@ func TestScaffoldCompilesAndPasses(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	work := "go 1.26.3\n\nuse (\n\t.\n\t" + framework + "\n)\n"
-	if err := os.WriteFile(filepath.Join(dir, "go.work"), []byte(work), 0o644); err != nil {
+	// Replace directives in the TEMP app's go.mod, not a go.work.
+	//
+	// A workspace cannot resolve a require on an untagged sibling module —
+	// the generated app requires warren/transport/http v0.1.0, which does not
+	// exist yet — so `use` is not enough and `go work sync` would write the
+	// workspace's resolved versions back into the FRAMEWORK's go.mod, which
+	// is how an indirect dependency once contaminated the core module.
+	// Replaces here are scoped to this temp directory and nothing is added to
+	// the repository (invariant 8: no COMMITTED replace).
+	mod := filepath.Join(dir, "go.mod")
+	src, rerr := os.ReadFile(mod)
+	if rerr != nil {
+		t.Fatal(rerr)
+	}
+	src = append(src, []byte(
+		"\nreplace github.com/MerseniBilel/warren => "+framework+
+			"\n\nreplace github.com/MerseniBilel/warren/transport/http => "+framework+"/transport/http\n")...)
+	if err := os.WriteFile(mod, src, 0o644); err != nil {
 		t.Fatal(err)
 	}
 
 	for _, step := range [][]string{
+		// tidy first: the replaces above point at untagged local modules, so
+		// the generated go.sum has no entries for them or their own
+		// dependencies until it is written.
+		{"go", "mod", "tidy"},
 		{"go", "build", "./..."},
 		{"go", "vet", "./..."},
 		{"go", "test", "./..."},

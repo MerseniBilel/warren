@@ -23,16 +23,26 @@ go test -race ./...
 handler through `App.Invoke`, then asserts the event reached the broker
 through the outbox relay. No Docker, no network, no sleeps.
 
+## What it serves
+
+```
+POST /users     the RegisterUser use case             201
+GET  /healthz   liveness — runs no checks             200
+GET  /readyz    readiness — lifecycle + every check   200 / 503
+```
+
+Every response carries `X-Correlation-Id`; a validation failure is a 400 with
+per-field `details`. None of that is code in this repository — it comes from
+the controller registering one route.
+
 ## What is not here yet
 
-**No HTTP server wired yet.** `warren/transport/http` has shipped — uncomment
-the `http.Server(...)` line in `cmd/{{.Name}}/main.go` and add the module to
-your go.mod to serve requests. `transport/grpc` has not shipped. Everything else
-works: use cases, the module graph, config, persistence, the transactional
-outbox, the consumer chain, health.
-
-When `transport/http` ships, uncomment one line in `cmd/{{.Name}}/main.go` —
-the controllers are already written and registered.
+**No gRPC adapter**, and no Postgres wiring: the repository is in-memory. To
+add Postgres, put `postgres.Module(postgres.DSN(cfg.DatabaseURL))` in
+`cmd/{{.Name}}/main.go` and follow the three repository rules in warren.md
+§6.1 — `RequireTx` first, `db(ctx)` for the handle, `persistence.Track` to
+enlist. Everything else works: use cases, the module graph, config, the
+transactional outbox, the consumer chain, health.
 
 ## Layout
 

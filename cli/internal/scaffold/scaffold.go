@@ -44,7 +44,13 @@ type Options struct {
 // silently ignored an unreleased choice would produce code that does not
 // compile, which is a worse first impression than a refusal.
 var released = map[string][]string{
-	"transport": {},
+	// http is what a scaffold wires by default, so accepting the flag is
+	// honest rather than a no-op: --transport http asks for what you get.
+	// grpc is still refused, and postgres is refused because the scaffold
+	// cannot wire it yet even though the adapter exists — a flag that
+	// silently produced an in-memory repository would be worse than a
+	// refusal naming the manual steps.
+	"transport": {"http"},
 	"db":        {"memory"},
 	"broker":    {"memory"},
 }
@@ -171,10 +177,11 @@ func errUnreleased(flag, value string) error {
 	return diagnostic(fmt.Sprintf(
 		"✗ %s adapter not released\n\n    --%s %s  →  that adapter does not exist yet.\n\n"+
 			"  Released today: %s\n\n"+
-			"  Scaffold without it and drive your handlers through App.Invoke —\n"+
-			"  cmd/<name>/main.go shows where the HTTP server goes.\n"+
-			"  (transport/http, transport/grpc, persistence/postgres and\n"+
-			"  broker/kafka are the adapters still to come.)",
+			"  Scaffold without it: the app already serves HTTP, and you can add\n"+
+			"  the adapter to cmd/<name>/main.go by hand.\n"+
+			"  (transport/grpc and broker/kafka are the adapters still to come;\n"+
+			"  transport/http is wired for you and persistence/postgres is ready\n"+
+			"  to add manually.)",
 		flag, flag, value, have))
 }
 

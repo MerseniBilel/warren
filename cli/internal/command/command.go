@@ -140,8 +140,8 @@ func newCmd() *cobra.Command {
 			abs, _ := filepath.Abs(opts.Dir)
 			_, err := fmt.Fprintf(cmd.OutOrStdout(),
 				"Created %s\n\n  cd %s\n  %s_NAME=%s go run ./cmd/%s\n  go test ./...\n\n"+
-					"Add an HTTP server when you want one — see README.md.\n"+
-					"says what works today and where the server goes when it does.\n",
+					"It serves POST /users, /healthz and /readyz on :8080.\n"+
+					"README.md says what is there and what is not.\n",
 				abs, opts.Dir, envPrefix(opts.Name), opts.Name, opts.Name)
 			return err
 		},

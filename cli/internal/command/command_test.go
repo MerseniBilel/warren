@@ -68,7 +68,9 @@ func TestNewRequiresModulePath(t *testing.T) {
 func TestNewRefusesAnUnreleasedTransport(t *testing.T) {
 	t.Parallel()
 
-	_, err := run(t, "new", "myapp", "--module", "example.com/x", "--dir", t.TempDir()+"/y", "--transport", "http")
+	// grpc, not http: transport/http shipped and is what a scaffold wires,
+	// so asking for it names what you already get.
+	_, err := run(t, "new", "myapp", "--module", "example.com/x", "--dir", t.TempDir()+"/y", "--transport", "grpc")
 	if err == nil {
 		t.Fatal("new accepted an adapter that does not exist")
 	}

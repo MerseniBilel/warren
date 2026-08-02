@@ -79,3 +79,32 @@ finished feature:
 Then run the module's generated `module_test.go`. It boots the whole graph
 and catches the one wiring mistake the compiler cannot see: a constructor
 asking the container for a type no module exports.
+
+## `warren g command` does not expose the route
+
+The generator writes the use case and provides it from the module, so the
+container can build it — but nothing serves it until you say so. It prints
+the three lines to add, and they go in the feature's `controller.go`:
+
+```go
+type Controller struct {
+    suspendUser app.Handler[application.SuspendUser, application.SuspendUserResult]
+}
+
+func NewController(
+    suspendUser app.Handler[application.SuspendUser, application.SuspendUserResult],
+) *Controller { … }
+
+func (c *Controller) Register(r transport.Registrar) {
+    transport.Post(r, "/suspend_user", c.suspendUser)
+}
+```
+
+The generator cannot write them: it would have to edit a struct, a
+constructor and a method body it did not create. Forgetting them is not
+silent — the handler simply has no route — but it is the one part of `g
+command` that is not wiring you get for free.
+
+**The pattern is the PATH ALONE.** `transport.Post` already names the method;
+`transport.Post(r, "POST /x", h)` fails the boot. Only `transport.Raw` takes
+`"METHOD /path"`, because it names no method of its own.

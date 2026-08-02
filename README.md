@@ -119,6 +119,10 @@ contract now.
       shape; the 1.27 method form is a mechanical call-site rewrite)*
 - [ ] Bump toolchain to Go 1.27; verify generic methods compile as designed
       *(and that inference works — explicit type arguments are needed today)*
+- [x] `warren new` scaffolds a service that **serves**: a controller
+      registering `POST /users`, `whttp.Server` wired in `main.go`, health
+      probes, and `log.Handler` installed so every record carries the
+      correlation ID *(the scaffold's own compile test builds and runs it)*
 - [x] `transport/http` — the HTTP error column, health probes, the edge ring,
       drain-before-stop *(implemented on **`net/http.ServeMux`**, not chi:
       the sealed `Registrar` already discards everything a router is bought

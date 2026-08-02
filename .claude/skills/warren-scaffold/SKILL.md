@@ -41,17 +41,37 @@ by identity, so a plain factory called by two importers would be two modules
 sharing one name — a boot error. Copy the pattern; do not "simplify" it to a
 plain function.
 
-## What does not exist yet
+## What the scaffold serves
 
-**There is no HTTP or gRPC adapter.** A scaffolded service has no server and
-no port to curl. This is expected, and the generated `README.md` says where
-the server goes when it ships. Drive use cases through the framework's
-testing helpers instead — `warrentest.NewModuleTest` boots the real graph,
-and `warrentest.Invoke` calls a handler through it.
+**A scaffolded service serves HTTP.** `cmd/<name>/main.go` wires
+`whttp.Server(whttp.Port(8080))`, the `user` module has a `controller.go`
+registering `POST /users`, and the health probes come with the adapter:
 
-Do not hand-roll a `net/http` server against the handlers to "get something
-working": handlers import no transport package by invariant, and a
-hand-rolled server is exactly the code the adapter will replace.
+```
+POST /users     the RegisterUser use case          201
+GET  /healthz   liveness — runs no checks          200
+GET  /readyz    readiness — lifecycle + checks     200 / 503
+```
+
+Every response carries `X-Correlation-Id`, and a validation failure is a 400
+with per-field `details` — none of which the generated code writes.
+
+**There is still no gRPC adapter**, and `warren new` has no `--persistence
+postgres` path: a scaffolded repository is in-memory. Adding Postgres is
+manual today — `postgres.Module(postgres.DSN(...))` in `main.go` and a
+repository following the three rules in warren.md §6.1.
+
+**Do not hand-roll a `net/http` server against the handlers.** Handlers
+import no transport package by invariant; register routes from the feature's
+`controller.go` with `transport.Post(r, "/path", c.handler)` and let the
+adapter serve them.
+
+## Logs you can join to a request
+
+`main.go` installs `log.Handler`, so every record carries the correlation ID.
+**Use the `*Context` methods** — `log.FromContext(ctx).InfoContext(ctx, …)`.
+slog's plain `Info` passes `context.Background()` and silently drops every
+correlation field.
 
 ## Working in a scaffolded project before the framework is published
 

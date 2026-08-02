@@ -21,6 +21,10 @@ var Module = sync.OnceValue(func() warren.Module {
 			infrastructure.NewUserRepository,
 			application.NewRegisterUserHandler,
 		),
+		// Controllers, not Providers: only Controllers and Consumers are
+		// registered at boot step 5, and boot refuses a controller listed as
+		// a plain provider rather than let it serve nothing.
+		warren.Controllers(NewController),
 		// Only this leaves the module: another feature can depend on the
 		// port, never on this feature's internals.
 		warren.Exports[domain.UserRepository](),

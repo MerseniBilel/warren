@@ -3,9 +3,12 @@ package main
 
 import (
 	"fmt"
+	"log/slog"
 	"os"
 
 	"github.com/MerseniBilel/warren"
+	"github.com/MerseniBilel/warren/log"
+	whttp "github.com/MerseniBilel/warren/transport/http"
 
 	"{{.Module}}/internal/modules/notification"
 	"{{.Module}}/internal/modules/user"
@@ -13,6 +16,12 @@ import (
 )
 
 func main() {
+	// Every log record carries the correlation ID that ties one request's
+	// lines together — resolved when a record is emitted, so a request that
+	// logs nothing pays nothing for it. Use the *Context methods in handlers:
+	// log.FromContext(ctx).InfoContext(ctx, "saved", "id", id).
+	slog.SetDefault(slog.New(log.Handler(slog.NewJSONHandler(os.Stdout, nil))))
+
 	err := warren.New(
 		// platform imports the config module, so every feature reaches
 		// Config through one import.
@@ -20,9 +29,10 @@ func main() {
 		user.Module(),
 		notification.Module(),
 
-		// When the HTTP adapter ships, uncomment this — the controllers are
-		// already written and registered:
-		//   http.Server(http.Port(8080)),
+		// Serves every route the controllers registered. Health probes come
+		// with it: /healthz runs no checks, /readyz gates on the lifecycle
+		// and every critical check.
+		whttp.Server(whttp.Port(8080)),
 	).Run()
 
 	if err != nil {

@@ -30,6 +30,7 @@ import (
 	"github.com/MerseniBilel/warren/broker"
 	"github.com/MerseniBilel/warren/broker/memory"
 	"github.com/MerseniBilel/warren/domain"
+	"github.com/MerseniBilel/warren/transport"
 )
 
 // App is a booted module graph under test.
@@ -93,7 +94,29 @@ func NewModuleTest(t *testing.T, m warren.Module, opts ...Option) *App {
 		opt.apply(&cfg)
 	}
 
-	modules := append([]warren.Module{m}, cfg.extra...)
+	// A module test drives handlers DIRECTLY — Invoke resolves them out of
+	// the container and calls them. It serves no traffic, so the routes its
+	// controllers register have no adapter, and boot would refuse them:
+	// "registered routes have no adapter serving them" is exactly right in
+	// production and exactly wrong here.
+	//
+	// So the harness claims every protocol on its own behalf. What it gives
+	// up is the boot check that would have caught a route nobody serves —
+	// which is a production concern, and which the application's own main
+	// still gets.
+	claimAll := warren.NewModule("warrentest/claims",
+		warren.Providers(func(tbl *transport.Table) *protocolClaims {
+			for _, p := range []transport.Protocol{
+				transport.ProtocolHTTP, transport.ProtocolGRPC, transport.ProtocolEvent,
+			} {
+				tbl.Claim(p, "warren/testing")
+			}
+			return &protocolClaims{}
+		}),
+		warren.Eager[*protocolClaims](),
+	)
+
+	modules := append([]warren.Module{m, claimAll}, cfg.extra...)
 	a := &App{module: m.Name()}
 	if cfg.inModule != "" {
 		a.module = cfg.inModule
@@ -116,6 +139,10 @@ func NewModuleTest(t *testing.T, m warren.Module, opts ...Option) *App {
 	t.Cleanup(a.Close)
 	return a
 }
+
+// protocolClaims exists only to be built at boot, so its constructor's
+// Claim calls run.
+type protocolClaims struct{}
 
 // Close stops the app. It is idempotent and registered by NewModuleTest.
 func (a *App) Close() {

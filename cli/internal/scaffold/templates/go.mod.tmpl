@@ -2,4 +2,7 @@ module {{.Module}}
 
 go {{.GoVersion}}
 
-require github.com/MerseniBilel/warren {{.Version}}
+require (
+	github.com/MerseniBilel/warren {{.Version}}
+	github.com/MerseniBilel/warren/transport/http {{.Version}}
+)
