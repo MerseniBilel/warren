@@ -52,7 +52,7 @@ func generateCmd() *cobra.Command {
 		}
 	}
 
-	module := &cobra.Command{
+	moduleCmd := &cobra.Command{
 		Use:   "module <name>",
 		Short: "A feature module with its four layers, registered in main",
 		Long: "module creates internal/modules/<name> with its domain, application\n" +
@@ -63,6 +63,8 @@ func generateCmd() *cobra.Command {
 		Args: cobra.ExactArgs(1),
 		RunE: run(generate.Module, false),
 	}
+	moduleCmd.Flags().StringVar(&opts.Main, "main", "",
+		"the main.go to register the module in (required when a project has several)")
 
 	entity := &cobra.Command{
 		Use:   "entity <module> <Name>",
@@ -112,6 +114,6 @@ func generateCmd() *cobra.Command {
 	}
 	consumer.Flags().StringVar(&opts.Topic, "topic", "", "the topic to subscribe to (default: derived from the event name)")
 
-	g.AddCommand(module, entity, command, repository, consumer)
+	g.AddCommand(moduleCmd, entity, command, repository, consumer)
 	return g
 }

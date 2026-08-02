@@ -1,6 +1,8 @@
 package astedit_test
 
 import (
+	"go/parser"
+	"go/token"
 	"strings"
 	"testing"
 
@@ -156,4 +158,149 @@ func diffLines(before, after string) (added, removed []string) {
 		}
 	}
 	return added, removed
+}
+
+// TestEditsTheModuleItWasAskedFor is the mis-wiring test. findCall walks
+// the whole file, so a file declaring two modules could have its provider
+// spliced into the WRONG one — a mistake that compiles, passes the boot
+// test of the module it did not touch, and only surfaces as a container
+// resolution failure at runtime.
+func TestEditsTheModuleItWasAskedFor(t *testing.T) {
+	t.Parallel()
+
+	src := []byte(`package billing
+
+import (
+	"sync"
+
+	"github.com/MerseniBilel/warren"
+
+	"example.com/app/internal/modules/billing/infrastructure"
+)
+
+var Reporting = sync.OnceValue(func() warren.Module {
+	return warren.NewModule("billing.reporting",
+		warren.Providers(infrastructure.NewReportStore),
+	)
+})
+
+var Module = sync.OnceValue(func() warren.Module {
+	return warren.NewModule("billing",
+		warren.Providers(infrastructure.NewInvoiceRepository),
+	)
+})
+`)
+	out, err := astedit.AddArgument(src, "warren.Providers", "infrastructure.NewLedger")
+	if err != nil {
+		t.Fatalf("AddArgument: %v", err)
+	}
+	got := string(out)
+
+	// The two declarations, split at the second module's name.
+	split := strings.Index(got, `warren.NewModule("billing",`)
+	if split < 0 {
+		t.Fatalf("the second module declaration is gone:\n%s", got)
+	}
+	if strings.Contains(got[:split], "NewLedger") {
+		t.Errorf("the provider landed in the wrong module:\n%s", got)
+	}
+	if !strings.Contains(got[split:], "NewLedger") {
+		t.Errorf("the provider did not reach the right module:\n%s", got)
+	}
+}
+
+// TestAddImportKeepsTrailingComments — the offset of an import spec ends at
+// the path, not at the end of the line, so a naive splice lands between a
+// path and its own comment and the comment ends up documenting the wrong
+// import.
+func TestAddImportKeepsTrailingComments(t *testing.T) {
+	t.Parallel()
+
+	src := []byte(`package main
+
+import (
+	"example.com/app/internal/modules/user"
+	"example.com/app/internal/platform" // config lives here
+)
+`)
+	out, err := astedit.AddImport(src, "example.com/app/internal/modules/billing")
+	if err != nil {
+		t.Fatalf("AddImport: %v", err)
+	}
+	got := string(out)
+	for _, line := range strings.Split(got, "\n") {
+		if strings.Contains(line, "config lives here") && !strings.Contains(line, "internal/platform") {
+			t.Errorf("the comment was moved onto another import:\n%s", got)
+		}
+	}
+	if !strings.Contains(got, "internal/modules/billing") {
+		t.Errorf("the import was not added:\n%s", got)
+	}
+}
+
+// TestAddImportHandlesASingleUnparenthesizedImport — `import "x"` is legal
+// Go and the scaffold is not the only shape this tool meets.
+func TestAddImportHandlesASingleUnparenthesizedImport(t *testing.T) {
+	t.Parallel()
+
+	src := []byte("package main\n\nimport \"github.com/MerseniBilel/warren\"\n\nfunc main() { _ = warren.New }\n")
+	out, err := astedit.AddImport(src, "example.com/app/internal/modules/billing")
+	if err != nil {
+		t.Fatalf("AddImport: %v", err)
+	}
+	if !strings.Contains(string(out), "internal/modules/billing") {
+		t.Errorf("the import was not added:\n%s", out)
+	}
+	if _, err := parser.ParseFile(token.NewFileSet(), "main.go", out, 0); err != nil {
+		t.Errorf("the result does not parse: %v\n%s", err, out)
+	}
+}
+
+// TestBlockCommentIsNotStolen — afterLast understood // only, so a /* */
+// comment on the same line as the last argument was carried onto the new
+// one.
+func TestBlockCommentIsNotStolen(t *testing.T) {
+	t.Parallel()
+
+	src := []byte(`package m
+
+import "github.com/MerseniBilel/warren"
+
+var Module = warren.NewModule("m",
+	warren.Providers(
+		app.A, /* keep me with A */
+	),
+)
+`)
+	out, err := astedit.AddArgument(src, "warren.Providers", "app.C")
+	if err != nil {
+		t.Fatalf("AddArgument: %v", err)
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		if strings.Contains(line, "keep me with A") && !strings.Contains(line, "app.A") {
+			t.Errorf("the block comment was moved onto another argument:\n%s", out)
+		}
+	}
+}
+
+// TestCRLFSurvives — format.Source normalises line endings, so a one-line
+// wiring edit on a CRLF checkout became a whole-file diff.
+func TestCRLFSurvives(t *testing.T) {
+	t.Parallel()
+
+	unix := "package m\n\nimport \"github.com/MerseniBilel/warren\"\n\nvar Module = warren.NewModule(\"m\",\n\twarren.Providers(\n\t\tapp.A,\n\t),\n)\n"
+	src := []byte(strings.ReplaceAll(unix, "\n", "\r\n"))
+
+	out, err := astedit.AddArgument(src, "warren.Providers", "app.C")
+	if err != nil {
+		t.Fatalf("AddArgument: %v", err)
+	}
+	in := strings.Count(string(src), "\r\n")
+	got := strings.Count(string(out), "\r\n")
+	if got < in {
+		t.Errorf("CRLF line endings were stripped: %d in, %d out\n%q", in, got, out)
+	}
+	if strings.Count(string(out), "\n") != got {
+		t.Errorf("the result mixes line endings:\n%q", out)
+	}
 }

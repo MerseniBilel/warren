@@ -37,16 +37,17 @@ func AddArgument(src []byte, fn, ident string) ([]byte, error) {
 		return nil, fmt.Errorf("astedit: %w", err)
 	}
 
-	newModule := findCall(f, "warren.NewModule")
-	if newModule == nil {
-		return nil, diagnostic(
-			"✗ no module declaration found\n\n    This file has no warren.NewModule(...) call to add to.\n\n" +
-				"  Generators wire new code into a module's declaration. Run this from a\n" +
-				"  project scaffolded by `warren new`, or create the module first with\n" +
-				"  `warren g module <name>`.")
+	newModule, err := findModuleCall(f)
+	if err != nil {
+		return nil, err
 	}
 
-	if call := findCall(f, fn); call != nil {
+	// Search for the option INSIDE the module being edited, never across the
+	// whole file. A file that declares two modules would otherwise have its
+	// provider spliced into whichever one happens to appear first — a
+	// mis-wiring that compiles, passes the other module's boot test, and
+	// surfaces only as a resolution failure at run time.
+	if call := findCallIn(newModule, fn); call != nil {
 		if hasArg(fset, src, call, ident) {
 			return src, nil // already there: a no-op, by design
 		}
@@ -106,12 +107,49 @@ func AddImport(src []byte, path string) ([]byte, error) {
 		return nil, diagnostic("✗ no import block\n\n    This file has no imports to add to.")
 	}
 
-	// Splice after the last import, matching its indentation.
+	// `import "x"` — legal Go, and not what the scaffold writes, but this
+	// tool meets files it did not author. Turn it into a block, because
+	// there is nowhere to splice a second path otherwise.
+	if decl := importDecl(f); decl != nil && !decl.Lparen.IsValid() {
+		start := fset.Position(decl.Pos()).Offset
+		end := fset.Position(decl.End()).Offset
+		only := strconv.Quote(mustUnquote(f.Imports[0].Path.Value))
+		block := "import (\n\t" + only + "\n\t" + strconv.Quote(path) + "\n)"
+		return spliceRange(src, start, end, block)
+	}
+
+	// Splice after the last import, matching its indentation. The offset has
+	// to advance to the END OF THE LINE: an import spec ends at its path, so
+	// splicing there lands between a path and its own trailing comment, and
+	// the comment then documents the wrong import.
 	last := f.Imports[len(f.Imports)-1]
-	offset := fset.Position(last.End()).Offset
+	offset, _ := afterLast(src, fset.Position(last.End()).Offset)
 	indent := indentOf(src, fset.Position(last.Pos()).Offset)
 	insert := "\n" + indent + strconv.Quote(path)
 	return splice(src, offset, insert)
+}
+
+// importDecl returns the file's import declaration, if it has exactly one.
+func importDecl(f *ast.File) *ast.GenDecl {
+	var found *ast.GenDecl
+	for _, decl := range f.Decls {
+		gen, ok := decl.(*ast.GenDecl)
+		if !ok || gen.Tok != token.IMPORT {
+			continue
+		}
+		if found != nil {
+			return nil // several: leave them alone
+		}
+		found = gen
+	}
+	return found
+}
+
+func mustUnquote(lit string) string {
+	if s, err := strconv.Unquote(lit); err == nil {
+		return s
+	}
+	return lit
 }
 
 // spliceIntoCall appends an argument to an existing call.
@@ -158,8 +196,8 @@ func afterLast(src []byte, offset int) (int, string) {
 	// Advance to the end of the line: a trailing // comment belongs to the
 	// argument above it.
 	if nl := bytes.IndexByte(src[offset:], '\n'); nl >= 0 {
-		tail := strings.TrimSpace(string(src[offset : offset+nl]))
-		if tail == "" || strings.HasPrefix(tail, "//") {
+		tail := strings.TrimSpace(strings.TrimSuffix(string(src[offset:offset+nl]), "\r"))
+		if tail == "" || strings.HasPrefix(tail, "//") || strings.HasPrefix(tail, "/*") {
 			offset += nl
 		}
 	}
@@ -169,16 +207,120 @@ func afterLast(src []byte, offset int) (int, string) {
 // splice inserts text at a byte offset and re-formats — format.Source only
 // normalises whitespace, so the surrounding file is untouched.
 func splice(src []byte, offset int, text string) ([]byte, error) {
-	out := make([]byte, 0, len(src)+len(text))
-	out = append(out, src[:offset]...)
-	out = append(out, text...)
-	out = append(out, src[offset:]...)
+	return spliceRange(src, offset, offset, text)
+}
 
+// spliceRange replaces src[start:end] with text and re-formats.
+//
+// format.Source normalises line endings to LF, so a CRLF file is restored
+// afterwards. Without that, a one-line wiring edit on a Windows checkout
+// becomes a whole-file diff — which contradicts the promise this package
+// exists to keep.
+func spliceRange(src []byte, start, end int, text string) ([]byte, error) {
+	out := make([]byte, 0, len(src)+len(text))
+	out = append(out, src[:start]...)
+	out = append(out, text...)
+	out = append(out, src[end:]...)
+
+	crlf := bytes.Contains(src, []byte("\r\n"))
+	if crlf {
+		out = bytes.ReplaceAll(out, []byte("\r\n"), []byte("\n"))
+	}
 	formatted, err := format.Source(out)
 	if err != nil {
 		return nil, fmt.Errorf("astedit: the edit produced invalid Go: %w", err)
 	}
+	if crlf {
+		formatted = bytes.ReplaceAll(formatted, []byte("\n"), []byte("\r\n"))
+	}
 	return formatted, nil
+}
+
+// findModuleCall returns the warren.NewModule call this file's edits belong
+// to: the one inside `var Module = ...`, which is the convention every
+// scaffolded and generated module.go follows.
+//
+// A file with exactly one such call is unambiguous whatever it is named. A
+// file with several and no `Module` is an error rather than a guess —
+// picking wrong wires a provider into the wrong container.
+func findModuleCall(f *ast.File) (*ast.CallExpr, error) {
+	var all []*ast.CallExpr
+	ast.Inspect(f, func(n ast.Node) bool {
+		if call, ok := n.(*ast.CallExpr); ok && isCallTo(call, "warren.NewModule") {
+			all = append(all, call)
+		}
+		return true
+	})
+
+	switch len(all) {
+	case 0:
+		return nil, diagnostic(
+			"✗ no module declaration found\n\n    This file has no warren.NewModule(...) call to add to.\n\n" +
+				"  Generators wire new code into a module's declaration. Run this from a\n" +
+				"  project scaffolded by `warren new`, or create the module first with\n" +
+				"  `warren g module <name>`.")
+	case 1:
+		return all[0], nil
+	}
+
+	for _, decl := range f.Decls {
+		gen, ok := decl.(*ast.GenDecl)
+		if !ok || gen.Tok != token.VAR {
+			continue
+		}
+		for _, spec := range gen.Specs {
+			value, ok := spec.(*ast.ValueSpec)
+			if !ok || len(value.Names) == 0 || value.Names[0].Name != "Module" {
+				continue
+			}
+			for _, call := range all {
+				if within(value, call) {
+					return call, nil
+				}
+			}
+		}
+	}
+	return nil, diagnostic(fmt.Sprintf(
+		"✗ this file declares %d modules\n\n    None of them is assigned to a variable named Module, so there is\n"+
+			"    no way to tell which one new code belongs to — and wiring it into\n"+
+			"    the wrong container is a failure that only shows up at run time.\n\n"+
+			"  Name the feature's module `Module`, or add the provider by hand.", len(all)))
+}
+
+// within reports whether the call lies inside the node's source range.
+func within(outer ast.Node, call *ast.CallExpr) bool {
+	return call.Pos() >= outer.Pos() && call.End() <= outer.End()
+}
+
+// findCallIn returns the first call to a dotted name within a subtree.
+func findCallIn(root ast.Node, dotted string) *ast.CallExpr {
+	var found *ast.CallExpr
+	ast.Inspect(root, func(n ast.Node) bool {
+		if found != nil {
+			return false
+		}
+		if call, ok := n.(*ast.CallExpr); ok && isCallTo(call, dotted) {
+			found = call
+			return false
+		}
+		return true
+	})
+	return found
+}
+
+// isCallTo reports whether the call is to a dotted name like
+// "warren.Providers".
+func isCallTo(call *ast.CallExpr, dotted string) bool {
+	pkg, name, ok := strings.Cut(dotted, ".")
+	if !ok {
+		return false
+	}
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok || sel.Sel.Name != name {
+		return false
+	}
+	id, ok := sel.X.(*ast.Ident)
+	return ok && id.Name == pkg
 }
 
 // findCall returns the first call to a dotted name like "warren.Providers".

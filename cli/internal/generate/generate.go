@@ -16,8 +16,10 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"text/template"
+	"unicode"
 
 	"github.com/MerseniBilel/warren/cli/internal/astedit"
 )
@@ -38,12 +40,15 @@ type Options struct {
 	DryRun bool
 	// Force overwrites files that already exist.
 	Force bool
+	// Main is the main.go a new module is registered in, relative to Dir.
+	// Empty finds it, and errors when a project has more than one.
+	Main string
 }
 
 // Module creates a feature module, its three layers, and wires it into main.
 func Module(opts Options) (string, error) {
-	if opts.Name == "" {
-		return "", errMissingName("a module name")
+	if err := checkModuleName(opts.Name); err != nil {
+		return "", err
 	}
 	modPath, err := goModulePath(opts.Dir)
 	if err != nil {
@@ -51,9 +56,18 @@ func Module(opts Options) (string, error) {
 	}
 	name := strings.ToLower(opts.Name)
 	base := "internal/modules/" + name
+
+	// --force is deliberately not honoured for a module declaration. Every
+	// other generator's --force costs you one file you can rewrite; this one
+	// would replace module.go with an empty declaration and silently discard
+	// every provider, consumer and export the module had accumulated.
+	if _, err := os.Stat(filepath.Join(opts.Dir, base, "module.go")); err == nil {
+		return "", errModuleExists(name, base)
+	}
+
 	data := map[string]string{
-		"Module": modPath, "Name": name, "Title": title(name),
-		"EnvPrefix": envPrefix(opts.Dir),
+		"Module": modPath, "Name": name, "Title": upperFirst(name),
+		"EnvPrefix": strconv.Quote(envPrefix(opts.Dir) + "_NAME"),
 	}
 
 	files := map[string]string{
@@ -72,7 +86,7 @@ func Module(opts Options) (string, error) {
 		p.files[path] = content
 	}
 
-	mainPath, err := findMain(opts.Dir)
+	mainPath, err := findMain(opts.Dir, opts.Main)
 	if err != nil {
 		return "", err
 	}
@@ -107,6 +121,9 @@ func Entity(opts Options) (string, error) {
 	p := &plan{
 		dir: opts.Dir, dryRun: opts.DryRun, force: opts.Force,
 		files: map[string][]byte{base + "/domain/" + data["Snake"] + ".go": content},
+		declares: []decl{{base + "/domain", []string{
+			opts.Name, opts.Name + "ID", opts.Name + "Created", opts.Name + "Repository", "New" + opts.Name,
+		}}},
 	}
 	return p.apply()
 }
@@ -132,6 +149,9 @@ func Command(opts Options) (string, error) {
 			base + "/application/" + data["Snake"] + "_test.go": test,
 		},
 		edits: []edit{provide(data, base, "application", "New"+opts.Name+"Handler")},
+		declares: []decl{{base + "/application", []string{
+			opts.Name, opts.Name + "Result", data["Lower"], "New" + opts.Name + "Handler",
+		}}},
 	}
 	return p.apply()
 }
@@ -151,6 +171,9 @@ func Repository(opts Options) (string, error) {
 		dir: opts.Dir, dryRun: opts.DryRun, force: opts.Force,
 		files: map[string][]byte{base + "/infrastructure/" + data["Snake"] + "_repository.go": content},
 		edits: []edit{provide(data, base, "infrastructure", "New"+opts.Name+"Repository")},
+		declares: []decl{{base + "/infrastructure", []string{
+			opts.Name + "Repository", "New" + opts.Name + "Repository",
+		}}},
 	}
 	return p.apply()
 }
@@ -166,10 +189,17 @@ func Consumer(opts Options) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	data["Topic"] = opts.Topic
-	if data["Topic"] == "" {
-		data["Topic"] = strings.ReplaceAll(data["Snake"], "_", ".")
+	topic := opts.Topic
+	if topic == "" {
+		topic = strings.ReplaceAll(data["Snake"], "_", ".")
 	}
+	data["Topic"] = topic
+	// The topic reaches three Go string literals. Quoted, a `"` in it closes
+	// the literal and the rest becomes an expression; a `\` makes the
+	// template fail and blame Warren for the user's input.
+	data["TopicLiteral"] = strconv.Quote(topic)
+	data["HandlingLiteral"] = strconv.Quote("handling " + topic)
+	data["HookNameLiteral"] = strconv.Quote(opts.Module + " " + topic + " consumer")
 
 	handler, err := render("consumer.go.tmpl", data)
 	if err != nil {
@@ -195,6 +225,12 @@ func Consumer(opts Options) (string, error) {
 				},
 			},
 		},
+		declares: []decl{
+			{base + "/application", []string{
+				opts.Name, opts.Name + "Handled", "on" + opts.Name, "NewOn" + opts.Name + "Handler",
+			}},
+			{base, []string{data["Lower"] + "Subscription", "new" + opts.Name + "Subscription"}},
+		},
 	}
 	return p.apply()
 }
@@ -219,13 +255,15 @@ func provide(data map[string]string, base, layer, ctor string) edit {
 }
 
 // plan is the set of changes a generator will make: whole files to create,
-// and edits to apply to files that already exist.
+// edits to apply to files that already exist, and the identifiers the new
+// code will declare.
 type plan struct {
-	dir    string
-	files  map[string][]byte
-	edits  []edit
-	dryRun bool
-	force  bool
+	dir      string
+	files    map[string][]byte
+	edits    []edit
+	declares []decl
+	dryRun   bool
+	force    bool
 }
 
 type edit struct {
@@ -234,12 +272,27 @@ type edit struct {
 	fn   func([]byte) ([]byte, error)
 }
 
-// apply checks every target, computes every edit, and only then writes.
-// Nothing reaches the disk unless everything can.
+// decl is a package directory and the identifiers the generated code will
+// declare in it.
+type decl struct {
+	pkgDir string
+	names  []string
+}
+
+// apply checks every target, computes every edit, writes — and undoes the
+// lot if any write fails.
+//
+// The check-first pass catches the ordinary refusals. The rollback catches
+// what it cannot: a read-only file, a full disk, a permission change
+// between the check and the write. Without it a failed run leaves files
+// nothing references, and the next run refuses because those files exist
+// while telling the user nothing was written.
 func (p *plan) apply() (string, error) {
+	existing := make(map[string]bool, len(p.files))
 	var conflicts []string
 	for path := range p.files {
 		if _, err := os.Stat(filepath.Join(p.dir, path)); err == nil {
+			existing[path] = true
 			conflicts = append(conflicts, path)
 		}
 	}
@@ -248,21 +301,32 @@ func (p *plan) apply() (string, error) {
 		return "", errConflict(conflicts)
 	}
 
-	// Every edit is computed up front, so an edit that fails cannot leave
-	// newly written files behind.
+	// A collision with an identifier some OTHER file already declares. The
+	// generator's own previous output is excluded: that is a path conflict,
+	// which --force is for, not a redeclaration.
+	for _, d := range p.declares {
+		if err := checkNotDeclared(p.dir, d.pkgDir, p.files, d.names...); err != nil {
+			return "", err
+		}
+	}
+
+	// Every edit is computed up front, so an edit that cannot be computed
+	// never reaches the disk.
 	//
 	// Two edits to the same file — a consumer both provides its handler and
 	// registers its subscription — must COMPOSE: each one reads what the
 	// previous produced, not what is still on disk, or the last writer wins
 	// and the earlier wiring is silently dropped.
 	edited := make(map[string][]byte, len(p.edits))
+	original := make(map[string][]byte, len(p.edits))
 	for _, e := range p.edits {
 		src, seen := edited[e.path]
 		if !seen {
 			var err error
 			if src, err = os.ReadFile(filepath.Join(p.dir, e.path)); err != nil {
-				return "", fmt.Errorf("warren g: reading %s: %w", e.path, err)
+				return "", errCannotRead(e.path, err)
 			}
+			original[e.path] = src
 		}
 		out, err := e.fn(src)
 		if err != nil {
@@ -272,34 +336,81 @@ func (p *plan) apply() (string, error) {
 	}
 
 	if p.dryRun {
-		return p.String(), nil
+		return p.describe(existing), nil
 	}
+
+	// From here on anything written is undone on failure.
+	undo := &rollback{dir: p.dir, original: original}
 	for _, path := range sortedKeys(p.files) {
 		full := filepath.Join(p.dir, path)
 		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
-			return "", err
+			return "", undo.after(errCannotWrite(path, err))
+		}
+		if existing[path] {
+			if prev, rerr := os.ReadFile(full); rerr == nil {
+				undo.original[path] = prev
+			}
+		} else {
+			undo.created = append(undo.created, path)
 		}
 		if err := os.WriteFile(full, p.files[path], 0o644); err != nil {
-			return "", err
+			return "", undo.after(errCannotWrite(path, err))
 		}
 	}
 	for _, path := range sortedKeys(edited) {
 		if err := os.WriteFile(filepath.Join(p.dir, path), edited[path], 0o644); err != nil {
-			return "", err
+			return "", undo.after(errCannotWrite(path, err))
 		}
 	}
-	return p.String(), nil
+	return p.describe(existing), nil
 }
 
-// String renders the plan — what --dry-run prints, and what a real run
-// reports afterwards.
-func (p *plan) String() string {
+// rollback restores what a half-finished run changed.
+type rollback struct {
+	dir      string
+	created  []string
+	original map[string][]byte
+}
+
+// after undoes the run and returns the error that caused it. A failure to
+// undo is appended rather than replacing the cause: the user needs to know
+// both what went wrong and that the tree was left dirty.
+func (r *rollback) after(cause error) error {
+	var stuck []string
+	for _, path := range r.created {
+		if err := os.Remove(filepath.Join(r.dir, path)); err != nil && !os.IsNotExist(err) {
+			stuck = append(stuck, path)
+		}
+	}
+	for path, src := range r.original {
+		if err := os.WriteFile(filepath.Join(r.dir, path), src, 0o644); err != nil {
+			stuck = append(stuck, path)
+		}
+	}
+	if len(stuck) == 0 {
+		return cause
+	}
+	slices.Sort(stuck)
+	return diagnostic(fmt.Sprintf(
+		"%v\n\n  AND the tree could not be restored. Check these by hand:\n\n      %s",
+		cause, strings.Join(stuck, "\n      ")))
+}
+
+// describe renders the plan — what --dry-run prints, and what a real run
+// reports afterwards. It distinguishes create from overwrite, because a
+// plan that calls an overwrite "create" is how a hand-wired file gets lost
+// without anyone noticing.
+func (p *plan) describe(existing map[string]bool) string {
 	var b strings.Builder
 	for _, path := range sortedKeys(p.files) {
-		fmt.Fprintf(&b, "  create  %s\n", path)
+		verb := "create   "
+		if existing[path] {
+			verb = "overwrite"
+		}
+		fmt.Fprintf(&b, "  %s  %s\n", verb, path)
 	}
 	for _, e := range p.edits {
-		fmt.Fprintf(&b, "  edit    %s  (%s)\n", e.path, e.what)
+		fmt.Fprintf(&b, "  edit       %s  (%s)\n", e.path, e.what)
 	}
 	return b.String()
 }
@@ -315,8 +426,11 @@ func sortedKeys(m map[string][]byte) []string {
 
 // featureData validates the target module and builds the template data.
 func featureData(opts Options) (map[string]string, string, error) {
-	if opts.Name == "" {
-		return nil, "", errMissingName("a name")
+	if err := checkModuleName(opts.Module); err != nil {
+		return nil, "", err
+	}
+	if err := checkTypeName(opts.Name); err != nil {
+		return nil, "", err
 	}
 	modPath, err := goModulePath(opts.Dir)
 	if err != nil {
@@ -339,6 +453,10 @@ func featureData(opts Options) (map[string]string, string, error) {
 // goModulePath reads the project's module path out of go.mod, which is what
 // every generated import is built from.
 func goModulePath(dir string) (string, error) {
+	if info, serr := os.Stat(dir); serr == nil && !info.IsDir() {
+		return "", diagnostic(fmt.Sprintf(
+			"✗ %s is not a directory\n\n    --dir is the root of a Go module — the directory holding go.mod.", dir))
+	}
 	src, err := os.ReadFile(filepath.Join(dir, "go.mod"))
 	if err != nil {
 		return "", diagnostic("✗ not a Go module\n\n    There is no go.mod here.\n\n" +
@@ -353,23 +471,52 @@ func goModulePath(dir string) (string, error) {
 }
 
 // findMain locates the application's main.go — the file a new module is
-// wired into.
-func findMain(dir string) (string, error) {
+// registered in.
+//
+// A project with more than one binary is an ERROR rather than a guess.
+// Wiring the first one found leaves the others missing a module with
+// nothing to say so, and which binary a feature belongs in is a decision
+// only the author can make.
+func findMain(dir, named string) (string, error) {
+	if named != "" {
+		rel := filepath.ToSlash(named)
+		if _, err := os.Stat(filepath.Join(dir, rel)); err != nil {
+			return "", diagnostic(fmt.Sprintf(
+				"✗ no such file: %s\n\n    --main is a path relative to the project root.", rel))
+		}
+		return rel, nil
+	}
+
 	entries, err := os.ReadDir(filepath.Join(dir, "cmd"))
 	if err != nil {
 		return "", diagnostic("✗ no cmd directory\n\n    Cannot find the application's main package.\n\n" +
-			"  Run `warren g module` from the root of a project scaffolded by `warren new`.")
+			"  Run `warren g module` from the root of a project scaffolded by `warren new`,\n" +
+			"  or name the file with --main.")
 	}
+	var found []string
 	for _, e := range entries {
 		if !e.IsDir() {
 			continue
 		}
 		rel := filepath.ToSlash(filepath.Join("cmd", e.Name(), "main.go"))
 		if _, serr := os.Stat(filepath.Join(dir, rel)); serr == nil {
-			return rel, nil
+			found = append(found, rel)
 		}
 	}
-	return "", diagnostic("✗ no main.go under cmd/\n\n    Cannot find the application's main package.")
+	switch len(found) {
+	case 0:
+		return "", diagnostic("✗ no main.go under cmd/\n\n    Cannot find the application's main package.\n\n" +
+			"  Name it with --main if it lives elsewhere.")
+	case 1:
+		return found[0], nil
+	}
+	slices.Sort(found)
+	return "", diagnostic(fmt.Sprintf(
+		"✗ this project has %d main packages\n\n      %s\n\n"+
+			"    A module is registered in one of them, and which one is a decision\n"+
+			"    only you can make — wiring the first would leave the others short a\n"+
+			"    module with nothing to say so.\n\n  Name it:\n\n      warren g module ... --main %s",
+		len(found), strings.Join(found, "\n      "), found[0]))
 }
 
 func render(name string, data map[string]string) ([]byte, error) {
@@ -389,34 +536,30 @@ func render(name string, data map[string]string) ([]byte, error) {
 }
 
 // snake turns SuspendUser into suspend_user — Go's file naming, and the
-// stem of the event name.
+// stem of the event name and the consumer topic.
+//
+// It keeps acronyms whole: HTTPServer is http_server, not h_t_t_p_server,
+// and ID is id. That matters beyond aesthetics, because the result becomes
+// a WIRE FORMAT — the event name and the topic other services subscribe to.
 func snake(s string) string {
+	runes := []rune(s)
 	var b strings.Builder
-	for i, r := range s {
-		if r >= 'A' && r <= 'Z' {
-			if i > 0 {
-				b.WriteByte('_')
-			}
-			b.WriteRune(r + ('a' - 'A'))
+	for i, r := range runes {
+		if !unicode.IsUpper(r) {
+			b.WriteRune(r)
 			continue
 		}
-		b.WriteRune(r)
+		// A separator goes before an upper-case rune only where a word
+		// actually starts: after a non-upper rune, or at the end of a run of
+		// upper-case runes that is followed by a lower-case one.
+		startsWord := i > 0 && (!unicode.IsUpper(runes[i-1]) ||
+			(i+1 < len(runes) && unicode.IsLower(runes[i+1])))
+		if startsWord {
+			b.WriteByte('_')
+		}
+		b.WriteRune(unicode.ToLower(r))
 	}
 	return b.String()
-}
-
-func lowerFirst(s string) string {
-	if s == "" {
-		return s
-	}
-	return strings.ToLower(s[:1]) + s[1:]
-}
-
-func title(s string) string {
-	if s == "" {
-		return s
-	}
-	return strings.ToUpper(s[:1]) + s[1:]
 }
 
 // article picks "an" or "a" for a doc comment. It is wrong for the odd word
@@ -460,6 +603,30 @@ func errUnknownModule(name, dir string) error {
 		"✗ no such module: %q\n\n    There is no internal/modules/%s/module.go.\n\n"+
 			"  This project has: %s\n\n  Create it first:\n\n      warren g module %s",
 		name, name, list, name))
+}
+
+// errCannotRead and errCannotWrite dress a raw OS error as a diagnostic.
+// Every other failure path prints a ✗ block; a bare "permission denied"
+// with no path context is the one that makes people think the tool broke.
+func errCannotRead(path string, cause error) error {
+	return diagnostic(fmt.Sprintf(
+		"✗ cannot read %s\n\n    %v\n\n  Nothing was written.", path, cause))
+}
+
+func errCannotWrite(path string, cause error) error {
+	return diagnostic(fmt.Sprintf(
+		"✗ cannot write %s\n\n    %v\n\n  Everything this run had written was undone.", path, cause))
+}
+
+func errModuleExists(name, base string) error {
+	return diagnostic(fmt.Sprintf(
+		"\u2717 the module %q already exists\n\n    %s/module.go is there, and it is the\n"+
+			"    file every other generator wires into. Regenerating it would replace\n"+
+			"    it with an empty declaration and discard every provider, consumer and\n"+
+			"    export the module has — so --force does not apply here.\n\n"+
+			"  To add to it:\n\n      warren g entity %s <Name>\n      warren g command %s <Name>\n\n"+
+			"  To start it over, delete %s yourself first.",
+		name, base, name, name, base))
 }
 
 func errMissingName(what string) error {

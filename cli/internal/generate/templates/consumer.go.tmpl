@@ -38,7 +38,7 @@ func (h *on{{.Name}}) Handle(ctx context.Context, e {{.Name}}) ({{.Name}}Handled
 	// Returning nil acks. Returning an error hands the message to the retry
 	// and dead-letter middleware, which decide by the error's code:
 	// Unavailable retries, Invalid dead-letters without retrying.
-	log.FromContext(ctx).Info("handling {{.Topic}}",
+	log.FromContext(ctx).Info({{.HandlingLiteral}},
 		slog.String("aggregate_id", e.AggregateID))
 	return {{.Name}}Handled{}, nil
 }

@@ -16,7 +16,7 @@ import (
 // and without this test the first person to find it is whoever runs the
 // service.
 func TestModuleBoots(t *testing.T) {
-	t.Setenv("{{.EnvPrefix}}_NAME", "test")
+	t.Setenv({{.EnvPrefix}}, "test")
 
 	warrentest.NewModuleTest(t, {{.Name}}.Module(), warrentest.WithMemoryBroker())
 }

@@ -30,7 +30,7 @@ func new{{.Name}}Subscription(
 	store inbox.Store,
 	lc lifecycle.Lifecycle,
 ) *{{.Lower}}Subscription {
-	const topic = "{{.Topic}}"
+	const topic = {{.TopicLiteral}}
 
 	// Decode the payload into the typed event; a malformed message is
 	// INVALID, which dead-letters without retrying.
@@ -50,7 +50,7 @@ func new{{.Name}}Subscription(
 	// context, cancelled as soon as boot finishes under Start/Stop.
 	ctx, cancel := context.WithCancel(context.Background())
 	lc.Append(lifecycle.Hook{
-		Name:    "{{.Feature}} {{.Topic}} consumer",
+		Name:    {{.HookNameLiteral}},
 		OnStart: func(context.Context) error { go func() { _ = sub.Subscribe(ctx, topic, pipeline) }(); return nil },
 		OnStop: func(c context.Context) error {
 			cancel()
