@@ -184,6 +184,47 @@ func Authorized[Req, Res any](policy AuthorizationPolicy) Middleware[Req, Res] {
 	}
 }
 
+// UnitOfWork is the transaction seam Transactional speaks to — the shape
+// warren/persistence's UnitOfWork already has. It is declared here rather
+// than imported so app stays free of every sibling contract: the middleware
+// needs one method, and a port with one method costs less than a coupling.
+type UnitOfWork interface {
+	Do(ctx context.Context, fn func(context.Context) error) error
+}
+
+// Transactional wraps Handle in a unit of work, so the aggregate state the
+// handler wrote and the outbox rows for the events it raised commit in one
+// transaction — or neither does.
+//
+// A handler that calls uow.Do itself under this middleware is joined, not
+// nested: warren.md §10 shows both patterns, and the unit of work's own
+// contract makes the inner call join the transaction in scope. The
+// transaction's error passes through with its code intact, so a serialization
+// failure arrives as UNAVAILABLE and app.Retrying — composed OUTSIDE this
+// middleware — re-runs the whole transaction rather than retrying inside a
+// doomed one. A nil unit of work panics at composition time, like Chain's
+// guards.
+func Transactional[Req, Res any](uow UnitOfWork) Middleware[Req, Res] {
+	if uow == nil {
+		panic("app: Transactional composed with a nil unit of work — construct it before boot step 5 composes the route table")
+	}
+	return func(next Handler[Req, Res]) Handler[Req, Res] {
+		return HandlerFunc[Req, Res](func(ctx context.Context, req Req) (Res, error) {
+			var res Res
+			err := uow.Do(ctx, func(ctx context.Context) error {
+				var err error
+				res, err = next.Handle(ctx, req)
+				return err
+			})
+			if err != nil {
+				var zero Res
+				return zero, err
+			}
+			return res, nil
+		})
+	}
+}
+
 // Traced opens one span per handler invocation, named with the
 // "<module>.<handler>" the adapter seeded via WithHandlerName. The Telemetry
 // rides the context (WithTelemetry); on a context carrying none, Traced is

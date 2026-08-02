@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | Draft — not approved |
+| **Status** | **Approved and implemented (2026-08-02)** — ports, the `Track`/`Collect` enlistment seam, the in-process driver, and the exported contract suite ship in core. The spec's hard question (the aggregate-save registration mechanism) is answered by `domain.Aggregate` + context-carried enlistment; nested `Do` joins; `Specification.ToSQL` was removed from `domain` (a domain type obliged to emit SQL knows its persistence technology by name). Real transactions wait for `persistence/postgres`. |
 | **Source** | [warren.md §3.3](../warren.md) |
 | **Module** | core |
 | **Mode** | Build (ports only) |

@@ -341,3 +341,109 @@ func BenchmarkTracedMeteredUninstrumented(b *testing.B) {
 		_, _ = h.Handle(ctx, "req")
 	}
 }
+
+// recordingUoW is the in-test unit of work: it records commits and rollbacks
+// so the middleware's contract is asserted without a database.
+type recordingUoW struct {
+	commits   int
+	rollbacks int
+	failWith  error
+}
+
+func (f *recordingUoW) Do(ctx context.Context, fn func(context.Context) error) error {
+	if f.failWith != nil {
+		return f.failWith
+	}
+	if err := fn(ctx); err != nil {
+		f.rollbacks++
+		return err
+	}
+	f.commits++
+	return nil
+}
+
+func TestTransactional(t *testing.T) {
+	t.Parallel()
+
+	t.Run("a successful handler commits and its response passes through", func(t *testing.T) {
+		t.Parallel()
+		uow := &recordingUoW{}
+		h := app.Chain(echo(), app.Transactional[string, string](uow))
+		res, err := h.Handle(context.Background(), "x")
+		if err != nil || res != "echo:x" {
+			t.Fatalf("Handle() = %q, %v", res, err)
+		}
+		if uow.commits != 1 || uow.rollbacks != 0 {
+			t.Errorf("commits=%d rollbacks=%d, want 1/0", uow.commits, uow.rollbacks)
+		}
+	})
+
+	t.Run("a failing handler rolls back and keeps its code", func(t *testing.T) {
+		t.Parallel()
+		uow := &recordingUoW{}
+		h := app.Chain(
+			app.HandlerFunc[string, string](func(context.Context, string) (string, error) {
+				return "", werrors.Conflict("already exists")
+			}),
+			app.Transactional[string, string](uow),
+		)
+		_, err := h.Handle(context.Background(), "x")
+		if !werrors.Is(err, werrors.CodeConflict) {
+			t.Errorf("err = %v, want the handler's CONFLICT intact for the adapter to map", err)
+		}
+		if uow.commits != 0 || uow.rollbacks != 1 {
+			t.Errorf("commits=%d rollbacks=%d, want 0/1", uow.commits, uow.rollbacks)
+		}
+	})
+
+	t.Run("a commit failure surfaces with its code and a zero response", func(t *testing.T) {
+		t.Parallel()
+		uow := &recordingUoW{failWith: werrors.Unavailable("postgres", stderrors.New("serialization failure"))}
+		h := app.Chain(echo(), app.Transactional[string, string](uow))
+		res, err := h.Handle(context.Background(), "x")
+		if !werrors.Is(err, werrors.CodeUnavailable) {
+			t.Errorf("err = %v, want UNAVAILABLE so Retrying re-runs the whole transaction", err)
+		}
+		if res != "" {
+			t.Errorf("res = %q, want the zero value when the transaction failed", res)
+		}
+	})
+
+	t.Run("retry outside the transaction re-runs the whole transaction", func(t *testing.T) {
+		t.Parallel()
+		attempts := 0
+		uow := &countingUoW{}
+		h := app.Chain(
+			app.HandlerFunc[string, string](func(context.Context, string) (string, error) {
+				attempts++
+				if attempts < 3 {
+					return "", werrors.Unavailable("postgres", stderrors.New("serialization failure"))
+				}
+				return "ok", nil
+			}),
+			app.Retrying[string, string](&countingPolicy{max: 5}), // outermost
+			app.Transactional[string, string](uow),
+		)
+		res, err := h.Handle(context.Background(), "x")
+		if err != nil || res != "ok" {
+			t.Fatalf("Handle() = %q, %v", res, err)
+		}
+		if uow.opened != 3 {
+			t.Errorf("transactions opened = %d, want 3 — each retry is its own transaction", uow.opened)
+		}
+	})
+
+	t.Run("a nil unit of work panics at composition", func(t *testing.T) {
+		t.Parallel()
+		assertPanics(t, "Transactional composed with a nil unit of work", func() {
+			app.Transactional[string, string](nil)
+		})
+	})
+}
+
+type countingUoW struct{ opened int }
+
+func (c *countingUoW) Do(ctx context.Context, fn func(context.Context) error) error {
+	c.opened++
+	return fn(ctx)
+}

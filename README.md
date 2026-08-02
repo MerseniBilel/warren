@@ -96,8 +96,8 @@ contract now.
 - [x] `app` built-in middleware — `Retrying`/`Traced`/`Metered`/`Authorized`
       *(implemented over the app-owned ports: RetryPolicy,
       AuthorizationPolicy, context-carried Telemetry)*
-- [ ] `app.Transactional` — waits on `persistence.UnitOfWork`'s spec
-      *(the app spec retires when it lands)*
+- [x] `app.Transactional` — over the one-method `app.UnitOfWork` port
+      *(implemented; the app spec is retired)*
 - [x] `broker` port + consumer chain — envelope, Pipeline (Recover/Drain/
       TraceExtract/Deduplicate/DeadLetter/Retry/ConcurrencyLimit), options
       *(implemented; §2.6 disposition table one test per code)*
@@ -125,7 +125,8 @@ contract now.
 
 ### Phase 4 — persistence
 
-- [ ] `persistence` (port) — the aggregate-save registration mechanism decided
+- [x] `persistence` (port) — `Repository`, `UnitOfWork`, the Track/Collect
+      enlistment seam, in-process driver + contract suite *(implemented)*
 - [ ] `persistence/postgres` — pool, `UnitOfWork`, outbox table, migrations
 - [ ] `persistence/mongo`, `persistence/redis` — after their manifest entries
       are written *(`mysql`: deferred — exists only in a heading)*

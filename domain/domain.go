@@ -26,12 +26,22 @@ type Entity[T ID] struct{ id T }
 // identifier itself is set at construction and never reassigned.
 func (e *Entity[T]) ID() T { return e.id }
 
+// Aggregate is the identity-agnostic view of an aggregate root: the events
+// it has pending. Every Root satisfies it.
+//
+// It exists because a unit of work holds a heterogeneous collection of saved
+// aggregates and therefore cannot name their identifier types — the one
+// method it needs is this one.
+type Aggregate interface {
+	PullEvents() []Event
+}
+
 // Root is the constraint repositories are generic over. AggregateRoot
 // satisfies it. (A struct cannot serve as a Go type constraint — only this
 // interface makes Repository[T Root[K], K ID] expressible.)
 type Root[T ID] interface {
 	ID() T
-	PullEvents() []Event
+	Aggregate
 }
 
 // AggregateRoot is the consistency boundary of a cluster of entities and the
@@ -90,12 +100,16 @@ type Event interface {
 	AggregateID() string
 }
 
-// Specification is a reusable predicate over T, expressed once and usable both
-// in memory and, where a repository chooses to translate it, in a query.
+// Specification is a reusable predicate over T: a domain rule expressed once
+// and evaluable in memory.
+//
+// It renders no SQL. A domain type obliged to emit SQL knows its persistence
+// technology by name, which is the substance of the dependency rule even
+// though no import crosses — and it is unimplementable for Mongo and Redis.
+// Pushing a predicate down to a query is the driver's business: a repository
+// type-asserts for its own translator interface (postgres.SQLSpecification,
+// mongo.FilterSpecification) and falls back to in-memory evaluation.
 type Specification[T any] interface {
 	// IsSatisfiedBy reports whether the candidate matches the specification.
 	IsSatisfiedBy(T) bool
-	// ToSQL renders the specification as a SQL fragment and its arguments.
-	// Repositories may translate it; nothing requires them to.
-	ToSQL() (clause string, args []any)
 }

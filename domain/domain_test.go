@@ -147,41 +147,34 @@ func TestEventConformance(t *testing.T) {
 	}
 }
 
-// totalAbove is the sample specification: one rule, two renderings.
+// totalAbove is the sample specification: one rule, evaluated in memory.
+// Translating it to a query is a driver's business, not the domain's.
 type totalAbove struct{ threshold int }
 
 func (s totalAbove) IsSatisfiedBy(o *order) bool { return o.total > s.threshold }
-func (s totalAbove) ToSQL() (string, []any)      { return "total > ?", []any{s.threshold} }
 
 var _ domain.Specification[*order] = totalAbove{}
 
-func TestSpecificationRenderingsAgree(t *testing.T) {
+func TestSpecificationEvaluatesInMemory(t *testing.T) {
 	t.Parallel()
 
 	spec := totalAbove{threshold: 100}
-	clause, args := spec.ToSQL()
-	if clause != "total > ?" || len(args) != 1 {
-		t.Fatalf("ToSQL() = %q %v, want the fragment and one argument", clause, args)
-	}
-	threshold := args[0].(int)
-
-	// The predicate implied by the SQL fragment, evaluated in memory — the
-	// check that keeps the two renderings of one specification from drifting.
 	cases := []struct {
 		name  string
 		total int
+		want  bool
 	}{
-		{"below the threshold", 50},
-		{"at the threshold", 100},
-		{"above the threshold", 150},
+		{"below the threshold", 50, false},
+		{"at the threshold", 100, false},
+		{"above the threshold", 150, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			o := newOrder("o-1")
 			o.total = tc.total
-			if spec.IsSatisfiedBy(o) != (tc.total > threshold) {
-				t.Errorf("IsSatisfiedBy disagrees with the ToSQL predicate for total=%d", tc.total)
+			if got := spec.IsSatisfiedBy(o); got != tc.want {
+				t.Errorf("IsSatisfiedBy(total=%d) = %v, want %v", tc.total, got, tc.want)
 			}
 		})
 	}

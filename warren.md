@@ -760,8 +760,7 @@ type Event interface {
                                 // is load-bearing, not conventional
 
 type Specification[T any] interface {
-    IsSatisfiedBy(T) bool
-    ToSQL() (clause string, args []any)   // repositories may translate
+    IsSatisfiedBy(T) bool   // in-memory evaluation; drivers translate their own way
 }
 ```
 
@@ -829,7 +828,7 @@ invoking it allocates nothing (benchmarked).
 
 | Middleware | Effect |
 |---|---|
-| `app.Transactional(uow)` | Wraps `Handle` in a transaction; commits state + outbox atomically |
+| `app.Transactional(uow)` | Wraps `Handle` in a transaction; commits state + outbox atomically. Its `uow` is `app.UnitOfWork` — one method, declared in `app` so it imports no sibling contract; `persistence.UnitOfWork` satisfies it |
 | `app.Retrying(policy)` | Retries on `CodeUnavailable` |
 | `app.Traced()` | Span per handler, named `<module>.<handler>` |
 | `app.Metered()` | Duration histogram, error counter by code |
@@ -871,41 +870,69 @@ policies speak the §2.6 vocabulary (`PermissionDenied` for a known caller,
 `Unauthenticated` for absent identity). A nil policy panics at composition —
 the same boot-time guard as `Chain`'s.
 
-`Transactional(uow)` is the one still pending: `persistence.UnitOfWork` has
-no approved spec yet; it lands with the persistence round. Until it does, the
-recommended composition order is trace → meter → authorize → retry, with the
-transaction's position (inside or outside the retry) decided when it exists.
+All five ship. The composition order is trace → meter → authorize → **retry →
+transaction**: retry outside the transaction means a serialization failure
+re-runs the whole transaction rather than retrying inside a doomed one, which
+is the only ordering that makes `Serializable` usable.
 
 ---
 
 ### 3.3 `warren/persistence`
 
-- **Mode** Build (ports only)
+- **Mode** Build (ports) · **The deliberate omission is an ORM.**
 
 ```go
-type Repository[T domain.Root[ID], ID domain.ID] interface {
-    FindByID(context.Context, ID) (T, error)
-    Save(context.Context, T) error
-    Delete(context.Context, ID) error
+type Repository[T domain.Root[K], K domain.ID] interface {
+    FindByID(ctx context.Context, id K) (T, error)   // CodeNotFound when absent
+    Save(ctx context.Context, root T) error          // MUST call persistence.Track
+    Delete(ctx context.Context, id K) error
 }
 
 type UnitOfWork interface {
-    Do(ctx context.Context, fn func(context.Context) error) error
+    Do(ctx context.Context, fn func(context.Context) error, opts ...Option) error
 }
+
+type Transaction struct { ReadOnly bool; Isolation Level }
+func ReadOnly() Option
+func Isolation(l Level) Option        // ReadCommitted | RepeatableRead | Serializable
+func Configure(opts ...Option) Transaction
+
+// the enlistment seam
+func Track(ctx context.Context, aggregates ...domain.Aggregate)
+func Collect(ctx context.Context) (context.Context, func() []domain.Event)
+func InTransaction(ctx context.Context) bool
+
+// the in-process driver + the exported contract suite
+func NewMemoryUnitOfWork() *MemoryUnitOfWork
+func NewMemoryRepository[T domain.Root[K], K domain.ID](uow *MemoryUnitOfWork) *MemoryRepository[T, K]
+func RunContract[T domain.Root[K], K domain.ID](t *testing.T, newDriver NewDriver[T, K], newAggregate func(K) T)
 ```
 
-**`UnitOfWork.Do` is where DDD becomes real:**
+**How the unit of work drains events it never imported.** A `Repository` is
+generic; a unit of work holds saved aggregates of many types at once and
+cannot name their identifier types. `domain.Aggregate` — `PullEvents()`
+alone — is the non-generic view that admits a heterogeneous collection, and
+`Track`/`Collect` ride the same context the transaction already travels on.
+`Save` calls `Track` as part of its contract, not as an implementation
+detail: a driver whose `Save` does not `Track` loses events, and the contract
+suite asserts it. Outside a transaction `Track` is a no-op that loses
+nothing — the events stay pending for a later `Do`.
 
-1. Begin transaction, put it on the context
-2. Run `fn` — repositories pick the transaction up from context automatically
-3. Drain `PullEvents()` from every aggregate saved in this scope
-4. Insert those events into the outbox table **in the same transaction**
-5. Commit — state and events are atomic
-6. Post-commit: signal the relay to publish
+**A nested `Do` joins.** §10's handler calls `uow.Do` itself while §3.2 wraps
+the same handler in `app.Transactional`, so erroring would break documented
+code. Savepoints were rejected: rolling back to one would publish events for
+state that was rolled back, and Mongo and Redis have none, so the port's
+semantics would become driver-dependent. Options on a nested `Do` are an
+error rather than a silent downgrade. A panic rolls back and **re-panics** —
+a leaked transaction holds locks, and swallowing the panic would convert a
+bug into a 503 and destroy the stack.
 
-**The deliberate omission is an ORM.** No GORM, no ent, no sqlc mandate. Generated Postgres repositories use plain pgx and are yours to edit. A team preferring sqlc writes the adapter with sqlc — the domain layer cannot tell the difference. Shipping an ORM would be the fastest way to lose the "explicit, no magic" positioning.
+Error codes: absent → `NOT_FOUND`; unique or optimistic-concurrency conflict
+→ `CONFLICT`; constraint violation → `INVALID`; connection lost, pool
+exhausted, serialization failure, **commit failure** → `UNAVAILABLE`, so
+`app.Retrying` composed OUTSIDE `app.Transactional` re-runs the whole
+transaction. An unsupported `Option` is `INVALID`, never a silent downgrade.
 
----
 
 ### 3.4 `warren/broker`
 
