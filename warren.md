@@ -191,7 +191,7 @@ warren/                                 MODULE: core        (stdlib + dig)
 └── domain/, app/, persistence/, broker/, transport/      ← contracts (see §1.1's exception)
 
 warren/config/yaml/                     MODULE  yaml parser — library TBD, audit first
-warren/transport/http/                  MODULE  chi
+warren/transport/http/                  MODULE  net/http only
 warren/transport/grpc/                  MODULE  google.golang.org/grpc
 warren/openapi/                         MODULE  —
 warren/broker/kafka/                    MODULE  twmb/franz-go
@@ -214,7 +214,7 @@ warren/cli/                             MODULE  cobra                   (build-t
 
 | Service profile | Direct deps in the user's `go.mod` |
 |---|---|
-| HTTP only | `warren`, `warren/transport/http`, `chi`, `dig`, `validator` |
+| HTTP only | `warren`, `warren/transport/http` — two modules, zero third party |
 | + Postgres | `+ warren/persistence/postgres`, `pgx`, `goose` |
 | + gRPC + Kafka + OTel | `+ grpc`, `franz-go`, OTel SDK + exporter |
 
@@ -1101,9 +1101,11 @@ risk to verify when 1.27 ships, not a certainty.
 
 ### 4.1 `warren/transport/http`
 
-- **Wraps** `net/http` + `go-chi/chi/v5` · **Mode** Wrap (router swappable)
+- **Wraps** `net/http` · **Mode** Vendor (standard library only) — *amended 2026-08-02, see below*
 
-chi is default because it's `net/http`-compatible — every stdlib-shaped middleware in the Go ecosystem works unmodified. Gin/Echo adapters implement the same `HTTPRegistrar`. Fiber gets a lossier adapter and a documented caveat, since fasthttp isn't `net/http`-compatible.
+**Amended 2026-08-02: the router is `net/http.ServeMux`, and there is no swappable router.** Go 1.22 gave `ServeMux` method and wildcard patterns and Go 1.23 gave `Request.Pattern` — the two features this port actually needs — and the sealed `Registrar` (§3.5) already discards everything else a router is bought for: it consumes `[]HTTPRoute`, and core owns decode, validate, param binding and status defaults. Measured, chi is the *worst* of five candidates on this project's stated first priority — 4 allocations and 704 B per request against `ServeMux`'s 2 and 48 B, because `Mux.ServeHTTP` shallow-copies the whole `*http.Request` — and gin's and echo's zeroes are unreachable behind a `func(http.Handler) http.Handler` middleware model. `RouterAdapter` and the Gin/Echo/Fiber adapters are dropped: a swap mechanism protecting against a cost the port already eliminated.
+
+The ecosystem argument survives intact — `chi/v5/middleware` is `net/http`-shaped and runs unmodified on a `ServeMux`, so a user who wants it adds chi to *their* go.mod rather than everyone's. Full evidence, and what this gives up, in `transport/http/SPEC.md`.
 
 **Surface**
 
@@ -1126,7 +1128,7 @@ http.Server(
 )
 ```
 
-Registers a lifecycle hook: starts after all dependencies are healthy, stops before pools close, drains in-flight requests. Escape hatch: `http.Raw(func(mux *chi.Mux) { ... })`.
+Registers a lifecycle hook: starts after all dependencies are healthy, stops before pools close, drains in-flight requests. Escape hatch: `http.Raw(func(mux *http.ServeMux) { ... })`, plus `http.Handle(pattern, h)` for the streaming cases the typed port deliberately does not model (uploads, downloads, SSE, WebSocket upgrades).
 
 ---
 
@@ -1505,7 +1507,7 @@ All generators support `--dry-run` and `--force`.
 | Lifecycle | — | Build | fx rejected: imposes its own lifecycle |
 | Logging | `log/slog` | Vendor | stdlib |
 | Validation | `go-playground/validator/v10` | Wrap | errors normalised to `errors.Error` |
-| HTTP | `go-chi/chi/v5` | Wrap | `net/http`-compatible; Gin/Echo/Fiber adapters |
+| HTTP | `net/http.ServeMux` | Vendor | stdlib. **`go-chi/chi/v5` rejected 2026-08-02** — healthy (MIT, zero deps, released 2026-07-06) and still wrong here: measured 4 allocs / 704 B per request vs ServeMux's 2 / 48, because `Mux.ServeHTTP` clones the request; and behind the sealed Registrar none of what chi is bought for is reachable. gin rejected (29 indirect requires, incl. a mongo driver and a JIT JSON encoder); httprouter rejected (v1.3.0, 2019-09; no commit since 2024-07 — the rule-9 case in all but the flag); fasthttp/fiber rejected (no `func(http.Handler) http.Handler`, no Flusher/Hijacker, no HTTP/2) |
 | gRPC | `google.golang.org/grpc` | Wrap | shared middleware chain |
 | Proto | `buf` | Vendor | tooling only |
 | Kafka | `twmb/franz-go` | Wrap | pure Go, Kafka ≤4.2+, transactions |
@@ -1595,7 +1597,7 @@ func main() {
 **What happens on `POST /users`:**
 
 ```
-chi → edge middleware (CORS, auth, correlation ID)
+ServeMux → edge middleware (recover, correlation ID, telemetry, yours)
     → decode JSON → validate → app.Handler
         → core middleware (trace, transaction, metrics)
             → Handle()

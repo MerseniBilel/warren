@@ -2,11 +2,191 @@
 
 | | |
 |---|---|
-| **Status** | Draft — not approved |
+| **Status** | **RESHAPED, not yet approved (architect round 2026-08-02).** The router is decided — `net/http.ServeMux`, no chi — and the rulings below are binding on the rewrite. Three foundations of the previous draft were wrong: it described types core does not have (`HTTPRegistrar`, `RouterAdapter`), it picked the worst of five candidate routers on the project's own stated priority, and it depends on a boot step that is unimplemented and unmentioned. **Blocked on the human for two decisions, marked ⚠ below.** |
 | **Source** | [warren.md §4.1](../../warren.md) |
 | **Module** | own module (`warren/transport/http`) |
-| **Mode** | Wrap (router swappable) |
-| **Wraps** | `net/http` + `go-chi/chi/v5` |
+| **Mode** | Vendor (standard library only) |
+| **Wraps** | `net/http` — and nothing else. Its `go.mod` is the core module and no third party. |
+
+## Decisions — architect round, 2026-08-02
+
+Every measurement below was taken on this machine (go1.26.3, darwin/arm64,
+Apple M3 Pro) and is reproducible.
+
+### The router: `net/http.ServeMux`. Vendor. No chi, gin, echo, httprouter or fiber.
+
+The argument is not that chi is unhealthy — audited 2026-08-02 it is the
+healthiest candidate (MIT, **zero dependencies**, 22.6k stars, released
+2026-07-06). The argument is that **the sealed `Registrar` already threw away
+everything a router is bought for.** `transport.Registrar` is sealed, adapters
+consume `[]HTTPRoute`, and core owns decode, validate, param binding and status
+defaults. The adapter's entire use of a router is two operations: match a
+method+pattern to one pre-built closure, and hand back the path segments. Route
+groups, `Mount`, per-group middleware, binding, rendering, `gin.Context` — none
+of it is reachable through the port, by construction.
+
+What changed since §4.1 was written: **Go 1.22 gave `ServeMux` method and
+wildcard patterns, and Go 1.23 gave `Request.Pattern`** — precisely the two
+features the port needs, the second being the low-cardinality route label
+`app.Metered()` wants.
+
+Routing plus two path parameters, no body:
+
+| | ns/op | B/op | allocs/op |
+|---|---|---|---|
+| `net/http.ServeMux` | 155.6 | 48 | **2** |
+| `go-chi/chi/v5` | 237.7 | 704 | **4** |
+| `julienschmidt/httprouter` | 43.0 | 64 | 1 |
+| `gin` | 34.9 | 0 | 0 |
+| `echo` | 49.9 | 0 | 0 |
+
+chi's own source explains its number, in `Mux.ServeHTTP`: `r.WithContext(...)`
+shallow-copies the whole `http.Request` — that is the 704 B. `ServeMux` sets
+`r.Pattern` in place and never clones. **Choosing the slowest and heaviest
+option and calling this the performance-first framework does not survive a
+benchmark blog post.**
+
+gin's and echo's zeroes are unreachable behind this port: both reach 0 by
+pooling their own `Context` and owning the handler signature, and §4.1's
+`Middleware(func(http.Handler) http.Handler)` — the reason chi was chosen —
+forces `*http.Request` back in, and the clone with it. gin also costs **29
+indirect requires**, including a mongo driver, quic-go, a JIT JSON encoder and
+an assembler, in every service's `go.sum`. `httprouter` is the rule-9 case in
+everything but the flag: **v1.3.0, September 2019; no commit since 2024-07.**
+fasthttp/fiber cannot honour `func(http.Handler) http.Handler`, `Flusher`,
+`Hijacker` or HTTP/2 at all.
+
+**The ecosystem argument survives.** `chi/v5/middleware` — `RealIP`,
+`RequestID`, `Recoverer`, `Compress`, `Timeout` — is `net/http`-shaped and runs
+unmodified on a `ServeMux`. §4.1's own usage example compiles unchanged. A user
+who wants it adds chi to *their* go.mod; Warren does not put it in everyone's.
+
+**Boot diagnostics get better:** `ServeMux` refuses overlapping patterns at
+registration and names both call sites; chi accepts `{id}` and `{uid}` on the
+same path silently. And invariant 3 stops being strained — with no driver type
+in the package, `Raw(func(*http.ServeMux))` is not an escape from an invariant.
+
+**Given up, and the spec must say so:** regex path constraints (`validate:`
+covers the intent), `Mount`/sub-router composition, replaceable `NotFound`
+handler objects, and chi's ordering helpers. `ServeMux`'s implicit
+trailing-slash 301 needs explicit golden tests.
+
+**Consequences:** `RouterAdapter` and `Router(...)` are deleted — a swap
+mechanism protecting against a cost the sealed port already eliminated. The
+Gin/Echo/Fiber adapters become a non-goal. warren.md §9 loses its
+`HTTP | go-chi/chi/v5 | Wrap` row.
+
+### Blocking, and ⚠ for the human
+
+**⚠ 1. Boot step 5 does not exist.** `app.go` instantiates controllers and
+consumers and **never calls `Register` on any of them**; warren.md §2.1 admits
+it. So this package's definition of done is unreachable without a change to the
+core `warren` package — a public-API change, and therefore not the
+implementer's call. Proposed: boot builds one `*transport.Table` at step 5,
+provides it in the root scope, adapters inject it and call `Claim`, and
+`Unserved()` is checked after every module constructor and before
+`lifecycle.Start`. And `Controllers(...any)` takes `any`, so the bootstrapper
+must type-assert and **fail the boot naming the type and its declaration
+site** — today a controller with a typo'd `Register` signature registers
+nothing, silently, which is the exact failure §1.3 exists to prevent.
+
+**⚠ 2. Streaming, uploads, SSE and WebSockets have no shape, and the port
+cannot grow one.** `Invoker` is `func(ctx, []byte) ([]byte, error)`: whole body
+in memory, whole response in memory. Right for commands, wrong for multipart
+upload, file download, SSE, WebSocket upgrade and NDJSON export — the same hole
+as `transport/grpc` open question 2. Widening `Invoker` is the wrong fix;
+modelling streams behind a three-protocol port is a v2 design that has to
+satisfy gRPC streaming and broker batching too. Ruling: **the typed
+byte-in/byte-out route is the only typed route in v0.1**, plus one named
+escape hatch, `Handle(pattern string, h http.Handler)`, which gets the edge
+ring, the correlation ID and the drain, and no decode/validate/encode. An
+honest documented gap beats a guessed abstraction — but shipping a backend
+framework with no answer for file upload is the human's call.
+
+### Rulings on the rest
+
+**Error body.** `{"error":{"code","message","details","correlation_id"}}`,
+`application/json; charset=utf-8`. `code` is `errors.Code` verbatim — the
+seven-value closed set, so clients can switch on it. **`INTERNAL` never renders
+`Message()` and never renders the wrapped cause** — a fixed `"internal error"`
+plus the correlation ID, with the real thing logged at ERROR; anything else
+leaks DSNs and SQL to the internet. Validation failures are `INVALID` with one
+`details` entry per field in declaration order, so golden files are
+deterministic. Not RFC 9457 `problem+json`: `errors.Code` is not a URI.
+
+**Success status.** Already decided in core (`transport.Status`, defaults 201
+for `Post`, 204 for `Delete`, 200 otherwise); the adapter only reads it. Two
+rules to add: `Success` is ignored on the error path, and a 204 route writes
+**no body and no `Content-Type`**.
+
+**Health probes are not routes.** `/healthz` and `/readyz` register directly on
+the mux and **bypass the edge ring entirely** — no auth, no rate limit, no
+tracing; a span every two seconds is a telemetry bill, not a signal. `/readyz`
+returns 503 with a body naming the failing check, and whether the gate is
+`starting` or `draining`.
+
+**Defaults.** `Port` 8080 · `ReadHeaderTimeout` **10s** (non-negotiable, the
+Slowloris fix) · `ReadTimeout` 30s · `WriteTimeout` **0, deliberately** (a
+global write timeout kills SSE and large downloads) · `IdleTimeout` 120s ·
+`MaxHeaderBytes` 1 MiB · **`MaxBodyBytes` 1 MiB, new** (`Invoker` is
+`[]byte`-in; an unbounded body is a one-request OOM) · **`DrainDelay` 5s,
+new** · stop-hook timeout 15s, which must sit inside `lifecycle`'s 30s
+force-exit budget.
+
+**Shutdown: warren.md's claim that step 9 is why rolling deploys do not drop
+requests is not true as specified.** Readiness closing and the listener
+stopping happen in immediate succession, but a load balancer polls `/readyz`
+on an interval and keeps routing for up to one full poll period afterwards.
+`DrainDelay` makes the stop hook wait, interruptibly, between the two, so the
+balancer observes the 503 before the listener goes away. warren.md §1.3 gains
+the step. Also to state: **`Server.Shutdown` does not cancel in-flight request
+contexts**, so a handler that ignores `ctx` blocks the drain until the
+force-exit deadline.
+
+**Middleware order, stated as fixed:** recover (outermost, not removable) →
+correlation-ID and logger seeding → telemetry → user `Middleware(...)` in
+argument order → mux dispatch → guards → decode → validate → core chain →
+handler. User middleware cannot precede correlation-ID seeding or their log
+lines have none. **Limitation to state plainly: `Middleware` is global-only in
+v0.1**; "auth on `/admin/*` only" is answered by `transport.Guard(policy)` per
+route, which runs before decode — which is also why guards travel as data.
+
+**TLS: add `TLS(*tls.Config)` and `TLSFiles(cert, key)`.** "Terminate at the
+ingress" is the user's decision, not the framework's; mTLS meshes and
+single-binary deployments both need it. `*tls.Config` is stdlib, so invariant 3
+is untouched, and it matches Kafka's option rather than gRPC's file pair.
+
+**H2C: add it.** Since Go 1.24 `http.Protocols`/`SetUnencryptedHTTP2` needs no
+`x/net`; verified on go1.26.3. Meshes speak it. TLS implies h2 already.
+
+**404/405 cost nothing.** A boot-time method-less pattern per path with a
+precomputed `Allow` header, plus a `/` catch-all, gives JSON 404 and 405
+envelopes with zero per-request work. Verified.
+
+**Allocation budget, to be committed in the spec:** ≤ 16 allocations and
+≤ 640 B for a POST with a JSON body and two path parameters — of which
+**seven are `encoding/json`'s decoder** and ten are core's `Invoker`
+(measured). The reference point the benchmark must also print is the same
+handler called directly: **0 allocations.** `TestAllocations` asserts an exact
+count. Two rules with numbers behind them, to be written down before someone
+"simplifies" them back: read the body into a **pooled `bytes.Buffer`**, never
+`json.NewDecoder(r.Body)` (9 allocs/968 B vs 7/272) and never `io.ReadAll`
+(2/544); and read query parameters by **scanning `r.URL.RawQuery`** (0 allocs),
+never `r.URL.Query()` (4 allocs/432 B).
+
+**Already applied from this round:** the `app.WithHandlerName` boxing (one
+allocation per request on all three protocols) is fixed in
+`app.StampHandlerName`; invariant 7 is restated in AGENT.md, warren.md §1.4 and
+CLAUDE.md, because `bindParams`, `validate`'s rule and `encoding/json` all
+reflect per request and the old wording was false.
+
+**Also to correct:** §1.7's dependency budget claims an HTTP-only service
+depends on `dig` and `validator` — `dig` is a direct dependency of nobody's
+service (invariant 2) and `validator` is not in core at all. The true row is
+**`warren`, `warren/transport/http` — two modules, zero third party**, which is
+a headline the manifest is currently understating.
+
+---
 
 ## Problem
 
