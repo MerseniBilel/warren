@@ -1,0 +1,44 @@
+package application
+
+import (
+	"context"
+	"log/slog"
+	"time"
+
+	"github.com/MerseniBilel/warren/app"
+	"github.com/MerseniBilel/warren/log"
+)
+
+// {{.Name}} is this module's OWN view of the fact, declared locally and
+// decoded from the wire. Add only the fields this feature reads.
+//
+// It deliberately does not import the publishing module's Go type: the
+// contract between modules is the wire format, which is what makes
+// extracting a module into its own service a wiring change rather than a
+// rewrite.
+type {{.Name}} struct {
+	AggregateID string    `json:"aggregate_id"`
+	At          time.Time `json:"at"`
+}
+
+// {{.Name}}Handled is the (empty) result — a consumer's response is
+// discarded; its error is the disposition.
+type {{.Name}}Handled struct{}
+
+type on{{.Name}} struct{}
+
+// NewOn{{.Name}}Handler returns the handler for the event. It is an
+// app.Handler like any other use case: the subscription is what knows this
+// one arrives over a broker.
+func NewOn{{.Name}}Handler() app.Handler[{{.Name}}, {{.Name}}Handled] {
+	return &on{{.Name}}{}
+}
+
+func (h *on{{.Name}}) Handle(ctx context.Context, e {{.Name}}) ({{.Name}}Handled, error) {
+	// Returning nil acks. Returning an error hands the message to the retry
+	// and dead-letter middleware, which decide by the error's code:
+	// Unavailable retries, Invalid dead-letters without retrying.
+	log.FromContext(ctx).Info("handling {{.Topic}}",
+		slog.String("aggregate_id", e.AggregateID))
+	return {{.Name}}Handled{}, nil
+}

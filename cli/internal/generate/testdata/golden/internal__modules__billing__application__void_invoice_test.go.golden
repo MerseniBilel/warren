@@ -1,0 +1,29 @@
+package application_test
+
+import (
+	"context"
+	"testing"
+
+	"example.com/myapp/internal/modules/billing/application"
+)
+
+// voidInvoiceUoW runs the function without a transaction — enough to
+// unit-test the handler in isolation. A hand-written double, no mocking
+// framework: a fake you can read is a fake you can trust.
+type voidInvoiceUoW struct{}
+
+func (voidInvoiceUoW) Do(ctx context.Context, fn func(context.Context) error) error { return fn(ctx) }
+
+func TestVoidInvoice(t *testing.T) {
+	t.Parallel()
+
+	h := application.NewVoidInvoiceHandler(voidInvoiceUoW{})
+
+	got, err := h.Handle(context.Background(), application.VoidInvoice{ID: "void_invoice-1"})
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if got.ID != "void_invoice-1" {
+		t.Errorf("got %+v", got)
+	}
+}

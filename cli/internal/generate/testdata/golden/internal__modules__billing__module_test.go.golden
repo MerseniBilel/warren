@@ -1,0 +1,22 @@
+package billing_test
+
+import (
+	"testing"
+
+	warrentest "github.com/MerseniBilel/warren/testing"
+
+	"example.com/myapp/internal/modules/billing"
+)
+
+// TestModuleBoots builds the module's whole graph — it and everything it
+// imports — and resolves every provider it declares.
+//
+// It guards the one wiring mistake the compiler cannot: a constructor that
+// asks the container for a type no module exports. That is a boot error,
+// and without this test the first person to find it is whoever runs the
+// service.
+func TestModuleBoots(t *testing.T) {
+	t.Setenv("MYAPP_NAME", "test")
+
+	warrentest.NewModuleTest(t, billing.Module(), warrentest.WithMemoryBroker())
+}

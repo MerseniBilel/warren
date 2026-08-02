@@ -1,0 +1,44 @@
+package application
+
+import (
+	"context"
+
+	"github.com/MerseniBilel/warren/app"
+)
+
+// VoidInvoice is the command: the caller's intent, and nothing else. Tag the
+// fields that must be present — the transport adapter validates before the
+// handler ever runs.
+type VoidInvoice struct {
+	ID string `json:"id" validate:"required"`
+}
+
+// VoidInvoiceResult is what the caller gets back. Never the aggregate itself:
+// a use case returns a view, so the domain can change shape without
+// breaking every client.
+type VoidInvoiceResult struct {
+	ID string `json:"id"`
+}
+
+type voidInvoice struct{}
+
+// NewVoidInvoiceHandler returns the use case wrapped in its core middleware.
+// It returns the PORT, not the concrete type, so the container resolves it
+// by the type every adapter and test looks for.
+//
+// Transactional wraps the handler in the unit of work, so the rows it
+// writes and the outbox rows announcing them commit together or not at all.
+func NewVoidInvoiceHandler(uow app.UnitOfWork) app.Handler[VoidInvoice, VoidInvoiceResult] {
+	return app.Chain[VoidInvoice, VoidInvoiceResult](
+		&voidInvoice{},
+		app.Transactional[VoidInvoice, VoidInvoiceResult](uow),
+	)
+}
+
+func (h *voidInvoice) Handle(ctx context.Context, cmd VoidInvoice) (VoidInvoiceResult, error) {
+	// Load the aggregate, call the behaviour that enforces the invariant,
+	// save it. Injecting the repository here is the next step: add it to
+	// NewVoidInvoiceHandler's parameters and the container will supply it.
+	_ = ctx
+	return VoidInvoiceResult{ID: cmd.ID}, nil
+}

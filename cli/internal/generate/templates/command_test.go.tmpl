@@ -1,0 +1,29 @@
+package application_test
+
+import (
+	"context"
+	"testing"
+
+	"{{.Module}}/internal/modules/{{.Feature}}/application"
+)
+
+// {{.Lower}}UoW runs the function without a transaction — enough to
+// unit-test the handler in isolation. A hand-written double, no mocking
+// framework: a fake you can read is a fake you can trust.
+type {{.Lower}}UoW struct{}
+
+func ({{.Lower}}UoW) Do(ctx context.Context, fn func(context.Context) error) error { return fn(ctx) }
+
+func Test{{.Name}}(t *testing.T) {
+	t.Parallel()
+
+	h := application.New{{.Name}}Handler({{.Lower}}UoW{})
+
+	got, err := h.Handle(context.Background(), application.{{.Name}}{ID: "{{.Snake}}-1"})
+	if err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if got.ID != "{{.Snake}}-1" {
+		t.Errorf("got %+v", got)
+	}
+}

@@ -28,7 +28,7 @@ func Root() *cobra.Command {
 		SilenceErrors: true, // diagnostics are rendered by main, as written
 		SilenceUsage:  true,
 	}
-	root.AddCommand(newCmd(), lintCmd(), versionCmd())
+	root.AddCommand(newCmd(), generateCmd(), lintCmd(), versionCmd())
 	return root
 }
 

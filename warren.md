@@ -203,7 +203,7 @@ warren/auth/                            MODULE  golang-jwt + go-oidc
 warren/resilience/                      MODULE  gobreaker + backoff
 warren/jobs/                            MODULE  robfig/cron
 warren/testing/                         MODULE  testcontainers + testify
-warren/cli/                             MODULE  cobra + dst + x/tools   (build-time only)
+warren/cli/                             MODULE  cobra                   (build-time only)
 ```
 
 **Rule:** adapters never import each other. `broker/kafka` and `persistence/postgres` are mutually invisible. Both depend only on the core module's contract packages.
@@ -1439,7 +1439,9 @@ Integration helpers spin real Postgres/Kafka behind a build tag. Every CLI gener
 
 ## 8. CLI — `warren/cli`
 
-**Vendors** `spf13/cobra`, `dave/dst`, `x/tools/go/packages`. The tooling ring from §1.1 — build-time only, never in a service's `go.mod`, and it imports the runtime rather than the reverse.
+**Vendors** `spf13/cobra`, and nothing else. The tooling ring from §1.1 — build-time only, never in a service's `go.mod`, and it imports the runtime rather than the reverse.
+
+`dave/dst` and `x/tools/go/packages` were both budgeted for and neither was needed: the AST editor splices bytes located through `go/parser` (§9), and `lint arch` reads imports syntactically so that it still works on a project that does not compile — which is when a layer violation is most likely.
 
 ### Three subsystems
 
@@ -1495,7 +1497,7 @@ All generators support `--dry-run` and `--force`.
 |---|---|---|---|
 | DI | `uber-go/dig` | Wrap | v1, strict SemVer, built to power frameworks · audited 2026-08-01: v1.19.0 (2025-05-13), MIT, not archived, 4.5k stars, 33 open issues |
 | Inbox dedupe | — | Build | port + stdlib memory store in core; durable stores ship with persistence adapters |
-| CLI | `spf13/cobra` (+ `golang.org/x/tools`, for later analysis) | Vendor | build-time only, own module · audited 2026-08-02: cobra v1.10.2 (2025-12-04), Apache-2.0, 2 transitive; x/tools v0.48.0, BSD-3 |
+| CLI | `spf13/cobra` | Vendor | build-time only, own module · audited 2026-08-02: cobra v1.10.2 (2025-12-04), Apache-2.0, 2 transitive. **`golang.org/x/tools` dropped 2026-08-02**: budgeted for `go/packages`, never imported — `lint arch` reads imports syntactically, which also makes it work on a project that does not compile |
 | CLI AST editing | — (stdlib `go/parser` + `go/format`) | Build | **`dave/dst` rejected 2026-08-02**: no published releases, untouched 2022-12→2026-04, pins x/tools 2022, `go 1.18` — the wrong dependency under a subsystem that edits every user's `module.go` on a project adopting Go 1.27. Splicing bytes located by the AST preserves comments *by construction*, and is the model `x/tools/go/analysis` itself uses |
 | Config | — | Build | Viper rejected: weight + global state |
 | Lifecycle | — | Build | fx rejected: imposes its own lifecycle |
@@ -1515,7 +1517,7 @@ All generators support `--dry-run` and `--force`.
 | Resilience | `sony/gobreaker`, `cenkalti/backoff/v4` | Wrap | one `Policy` interface |
 | Cron | `robfig/cron/v3` | Wrap | lifecycle-aware |
 | Testing | `testcontainers-go`, `testify` | Vendor | |
-| CLI | `cobra`, `dave/dst`, `x/tools` | Vendor | build-time only |
+| CLI | `cobra` | Vendor | build-time only |
 
 ---
 

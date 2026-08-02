@@ -1,0 +1,32 @@
+// Package billing is the Billing feature. This file is the only one in
+// the feature permitted to see all four layers — which is what lets the
+// layers themselves stay ignorant of each other.
+package billing
+
+import (
+	"sync"
+
+	"github.com/MerseniBilel/warren"
+
+	"example.com/myapp/internal/modules/billing/application"
+	"example.com/myapp/internal/modules/billing/infrastructure"
+	"example.com/myapp/internal/platform"
+)
+
+// Module declares the feature. Declared once: modules are deduplicated by
+// identity, so a plain factory called by two importers would be two modules
+// sharing a name — a boot error. sync.OnceValue reads like a function and
+// yields one identity.
+var Module = sync.OnceValue(func() warren.Module {
+	return warren.NewModule("billing",
+		warren.Imports(platform.Module()),
+		warren.Providers(
+			infrastructure.NewInvoiceRepository,
+			application.NewVoidInvoiceHandler,
+			application.NewOnPaymentReceivedHandler,
+		),
+		warren.Consumers(
+			newPaymentReceivedSubscription,
+		),
+	)
+})

@@ -2,11 +2,11 @@
 
 | | |
 |---|---|
-| **Status** | **Approved (2026-08-02); `warren new` + `version` implemented** — the scaffold compiles, vets, and passes its own tests against the framework, gated by a CI test that builds it. Decisions: cobra (contributor familiarity beat urfave/cli's better dependency numbers); **`dave/dst` REJECTED** — no published releases, untouched 2022-12→2026-04, pins x/tools from 2022 — the AST editor is stdlib splicing, which preserves comments by construction. Generators, `lint arch`, and the rest follow in the recorded order. |
+| **Status** | **Approved (2026-08-02); `new`, `version`, `lint arch` and the five `g` generators implemented** — the scaffold and everything the generators write compiles, vets, passes its own tests and passes `lint arch`, all gated by CI tests that build a real app. Decisions: cobra (contributor familiarity beat urfave/cli's better dependency numbers); **`dave/dst` REJECTED** — no published releases, untouched 2022-12→2026-04, pins x/tools from 2022 — the AST editor is stdlib splicing, which preserves comments by construction; **`x/tools` DROPPED** — budgeted for `go/packages`, never imported, because `lint arch` reads imports syntactically and so still works on a project that does not compile. |
 | **Source** | [warren.md §8](../warren.md) |
 | **Module** | own module (`warren/cli`) — build-time only, never in a service go.mod |
 | **Mode** | Vendor |
-| **Vendors** | `spf13/cobra`, `dave/dst`, `golang.org/x/tools/go/packages` |
+| **Vendors** | `spf13/cobra` — the only one. See § Dependencies for the two that were budgeted and rejected. |
 
 ## Problem
 
@@ -95,15 +95,15 @@ warren.md fixes the libraries and the mode. §9 ledger row:
 
 | Area | Library | Mode | Note |
 |---|---|---|---|
-| CLI | `cobra`, `dave/dst`, `x/tools` | Vendor | build-time only |
+| CLI | `cobra` | Vendor | build-time only |
 
-§1.6 records the module line `warren/cli/ MODULE cobra + dst + x/tools
-(build-time only)`, and §8 names the third one precisely as
-`x/tools/go/packages`.
+§1.6 and §8 originally budgeted for `dst` and `x/tools/go/packages` as well.
+Neither survived its audit; both entries were corrected in warren.md when the
+AST editor and `lint arch` shipped without them.
 
 **Why Vendor is right here.** The wrap rule is: *if changing a library would
 force edits across hundreds of user files, it must be behind a port* (§ Modes,
-AGENT.md). For these three the blast radius of a swap is zero user files,
+AGENT.md). For cobra the blast radius of a swap is zero user files,
 because no user file can import them — the module is build-time only and never
 enters a service's `go.mod`. The cost of a swap is confined to this module, which
 is exactly the trade Vendor names: *"imported and used directly; swapping it
@@ -112,9 +112,9 @@ nothing and would add a layer between the command definitions and their tests.
 
 | Library | Role in §8 |
 |---|---|
-| `spf13/cobra` | The command surface — four groups, subcommands, flags |
-| `dave/dst` | The AST editor. Chosen because it is **comment-preserving**; a wiring edit must not reflow or drop the comments in a user's `module.go` |
-| `golang.org/x/tools/go/packages` | The analyzer's single load, shared by `lint arch`, `doctor`, and the three `graph` commands |
+| `spf13/cobra` | The command surface — four groups, subcommands, flags. **Adopted.** |
+| `dave/dst` | Was to be the AST editor, chosen for comment preservation. **Rejected 2026-08-02**: no published releases, untouched 2022-12→2026-04, pins x/tools from 2022, declares `go 1.18`. `internal/astedit` locates the insertion point through `go/parser` and splices bytes, so comments survive by construction rather than by a decoration model — the same approach `x/tools/go/analysis` takes for suggested fixes. |
+| `golang.org/x/tools/go/packages` | Was to be the analyzer's single load. **Dropped 2026-08-02**: `lint arch` reads imports syntactically, which needs only `go/parser` and has the better property — it works on a project that does not compile, which is exactly when a layer violation is likely, because the fix for one usually breaks the build first. |
 
 **The audit is outstanding, and it blocks the `go.mod`.** warren.md records a
 mode and a one-line note for each of these and nothing else — no observation
@@ -473,19 +473,26 @@ and not `go/ast`.
 **Module-wide**
 
 - [ ] Spec approved.
-- [ ] `spf13/cobra`, `dave/dst` and `golang.org/x/tools/go/packages` audited per
+- [x] `spf13/cobra`, `dave/dst` and `golang.org/x/tools/go/packages` audited per
       AGENT.md § Adding a dependency — archived?, `pushed_at`, real latest-release
       date, open issues, transitive deps, licence — **recorded in this spec with
-      the observation date** and reconciled with the §9 ledger row.
+      the observation date** and reconciled with the §9 ledger row. cobra
+      adopted; the other two rejected, and warren.md corrected to match.
 - [ ] `warren/cli` is its own module (§1.6) and appears in no other module's
       `go.mod`; no package outside it imports it.
 - [ ] No committed `replace` directive (invariant 8); Go 1.26, no `toolchain`
       directive (invariant 9).
 - [ ] Templates embedded via `embed.FS` and ejectable.
-- [ ] AST editor performs real `dst` edits; no regex or marker-comment wiring
-      anywhere in the module.
-- [ ] Analyzer does one `go/packages` load shared by `lint arch`, `doctor`, and
-      the three `graph` commands, and passes the non-Warren-project test.
+- [x] AST editor performs real AST-located edits; no regex or marker-comment
+      wiring anywhere in the module. **Amended**: `dst` was rejected (see
+      § Dependencies), so `internal/astedit` locates the insertion point with
+      `go/parser` and splices bytes — comments survive because the file is
+      never reprinted.
+- [ ] Analyzer shares one import scan across `lint arch`, `doctor`, and the
+      three `graph` commands, and passes the non-Warren-project test.
+      **Amended**: `go/packages` was dropped — the scan is syntactic, which
+      is what lets `lint arch` run on a project that does not compile.
+      (`lint arch` ships; `doctor` and `graph` do not yet.)
 - [ ] `warren lint arch` passes on Warren's own repository and fails, non-zero,
       on each violation fixture.
 - [ ] Every exported identifier has a doc comment starting with the identifier's
@@ -505,8 +512,11 @@ and not `go/ast`.
 - [ ] Error messages tell the user how to fix the problem, at the §2.2 bar:
       what failed, where, and a copy-pasteable fix (AGENT.md § Errors). A CLI
       that prints "invalid layout" and exits has failed this line.
-- [ ] `--dry-run` and `--force` supported and tested (generators).
-- [ ] Idempotency and conflict behaviour tested (generators).
+- [x] `--dry-run` and `--force` supported and tested (generators) — for the
+      five that ship.
+- [x] Idempotency and conflict behaviour tested (generators) — for the five
+      that ship, including that `--force` does not duplicate the wiring in
+      `module.go`.
 - [ ] **Its skill exists.** *"The command is not done until the skill exists"* —
       AGENT.md states this twice: § Spec-driven development step 3 (*"implement
       to the definition of done — tests, doc comments, and the skill if it is a

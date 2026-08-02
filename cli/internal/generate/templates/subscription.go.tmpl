@@ -1,0 +1,61 @@
+package {{.Feature}}
+
+import (
+	"context"
+	"encoding/json"
+
+	"github.com/MerseniBilel/warren/app"
+	"github.com/MerseniBilel/warren/broker"
+	"github.com/MerseniBilel/warren/errors"
+	"github.com/MerseniBilel/warren/inbox"
+	"github.com/MerseniBilel/warren/lifecycle"
+
+	"{{.Module}}/internal/modules/{{.Feature}}/application"
+)
+
+type {{.Lower}}Subscription struct{}
+
+// new{{.Name}}Subscription wires the handler into the consumer chain and
+// starts it as a lifecycle component. It lives beside module.go because it
+// is the only file in the feature permitted to see both the broker and the
+// application layer.
+//
+// When the transport adapters ship, this becomes one line in a Register
+// method — transport.OnEvent(r, topic, h) — and the pipeline is assembled
+// for you.
+func new{{.Name}}Subscription(
+	h app.Handler[application.{{.Name}}, application.{{.Name}}Handled],
+	pub broker.Publisher,
+	sub broker.Subscriber,
+	store inbox.Store,
+	lc lifecycle.Lifecycle,
+) *{{.Lower}}Subscription {
+	const topic = "{{.Topic}}"
+
+	// Decode the payload into the typed event; a malformed message is
+	// INVALID, which dead-letters without retrying.
+	handle := func(ctx context.Context, msg broker.Message) error {
+		var e application.{{.Name}}
+		if err := json.Unmarshal(msg.Payload, &e); err != nil {
+			return errors.Invalid("payload", err)
+		}
+		_, herr := h.Handle(ctx, e)
+		return herr
+	}
+
+	// The chain: recover, drain, trace, dedupe, dead-letter, retry, limit.
+	pipeline, wait := broker.Pipeline(topic, handle, store, pub)
+
+	// The loop's context must not be OnStart's: that one is the boot
+	// context, cancelled as soon as boot finishes under Start/Stop.
+	ctx, cancel := context.WithCancel(context.Background())
+	lc.Append(lifecycle.Hook{
+		Name:    "{{.Feature}} {{.Topic}} consumer",
+		OnStart: func(context.Context) error { go func() { _ = sub.Subscribe(ctx, topic, pipeline) }(); return nil },
+		OnStop: func(c context.Context) error {
+			cancel()
+			return wait(c)
+		},
+	})
+	return &{{.Lower}}Subscription{}
+}

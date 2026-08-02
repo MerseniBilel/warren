@@ -1,0 +1,22 @@
+// Package {{.Name}} is the {{.Title}} feature. This file is the only one in
+// the feature permitted to see all four layers — which is what lets the
+// layers themselves stay ignorant of each other.
+package {{.Name}}
+
+import (
+	"sync"
+
+	"github.com/MerseniBilel/warren"
+
+	"{{.Module}}/internal/platform"
+)
+
+// Module declares the feature. Declared once: modules are deduplicated by
+// identity, so a plain factory called by two importers would be two modules
+// sharing a name — a boot error. sync.OnceValue reads like a function and
+// yields one identity.
+var Module = sync.OnceValue(func() warren.Module {
+	return warren.NewModule("{{.Name}}",
+		warren.Imports(platform.Module()),
+	)
+})

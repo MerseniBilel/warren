@@ -1,0 +1,63 @@
+package domain
+
+import (
+	"context"
+	"time"
+
+	wdomain "github.com/MerseniBilel/warren/domain"
+)
+
+// {{.Name}}ID identifies {{.Article}} {{.Lower}}. It is comparable and
+// renders itself, which is what domain.ID requires: identifiers become map
+// keys, URL segments, and message keys.
+type {{.Name}}ID string
+
+func (id {{.Name}}ID) String() string { return string(id) }
+
+// {{.Name}} is the aggregate: the consistency boundary a repository loads
+// and saves whole. Add the fields the invariants need, and put every change
+// behind a method — a struct whose fields are all exported is a record, not
+// an aggregate.
+type {{.Name}} struct {
+	wdomain.AggregateRoot[{{.Name}}ID]
+
+	CreatedAt time.Time
+}
+
+// New{{.Name}} mints the identity, then raises the fact. Raise records; it
+// publishes nothing — the unit of work drains the events into the outbox
+// inside the transaction, which is what makes the state change and its
+// announcement atomic.
+func New{{.Name}}(id {{.Name}}ID, now time.Time) *{{.Name}} {
+	x := &{{.Name}}{
+		AggregateRoot: wdomain.NewAggregateRoot(id),
+		CreatedAt:     now,
+	}
+	x.Raise({{.Name}}Created{{"{"}}{{.Name}}ID: id, At: now})
+	return x
+}
+
+// {{.Name}}Created is a fact that has already happened, which is why it is
+// named in the past tense and carries no behaviour.
+type {{.Name}}Created struct {
+	{{.Name}}ID {{.Name}}ID `json:"{{.Snake}}_id"`
+	At          time.Time   `json:"at"`
+}
+
+// EventName is the topic and the type key for messaging.
+func (e {{.Name}}Created) EventName() string { return "{{.Snake}}.created" }
+
+// OccurredAt is when the fact happened, not when it was published.
+func (e {{.Name}}Created) OccurredAt() time.Time { return e.At }
+
+// AggregateID ties the fact to its aggregate — and, as the message key,
+// preserves per-aggregate order through a partitioned broker.
+func (e {{.Name}}Created) AggregateID() string { return e.{{.Name}}ID.String() }
+
+// {{.Name}}Repository is the port the application layer depends on. It
+// lives here, in the domain, so infrastructure depends on the domain and
+// never the other way round.
+type {{.Name}}Repository interface {
+	FindByID(ctx context.Context, id {{.Name}}ID) (*{{.Name}}, error)
+	Save(ctx context.Context, {{.Lower}} *{{.Name}}) error
+}

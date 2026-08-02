@@ -1,0 +1,63 @@
+package domain
+
+import (
+	"context"
+	"time"
+
+	wdomain "github.com/MerseniBilel/warren/domain"
+)
+
+// InvoiceID identifies an invoice. It is comparable and
+// renders itself, which is what domain.ID requires: identifiers become map
+// keys, URL segments, and message keys.
+type InvoiceID string
+
+func (id InvoiceID) String() string { return string(id) }
+
+// Invoice is the aggregate: the consistency boundary a repository loads
+// and saves whole. Add the fields the invariants need, and put every change
+// behind a method — a struct whose fields are all exported is a record, not
+// an aggregate.
+type Invoice struct {
+	wdomain.AggregateRoot[InvoiceID]
+
+	CreatedAt time.Time
+}
+
+// NewInvoice mints the identity, then raises the fact. Raise records; it
+// publishes nothing — the unit of work drains the events into the outbox
+// inside the transaction, which is what makes the state change and its
+// announcement atomic.
+func NewInvoice(id InvoiceID, now time.Time) *Invoice {
+	x := &Invoice{
+		AggregateRoot: wdomain.NewAggregateRoot(id),
+		CreatedAt:     now,
+	}
+	x.Raise(InvoiceCreated{InvoiceID: id, At: now})
+	return x
+}
+
+// InvoiceCreated is a fact that has already happened, which is why it is
+// named in the past tense and carries no behaviour.
+type InvoiceCreated struct {
+	InvoiceID InvoiceID `json:"invoice_id"`
+	At        time.Time `json:"at"`
+}
+
+// EventName is the topic and the type key for messaging.
+func (e InvoiceCreated) EventName() string { return "invoice.created" }
+
+// OccurredAt is when the fact happened, not when it was published.
+func (e InvoiceCreated) OccurredAt() time.Time { return e.At }
+
+// AggregateID ties the fact to its aggregate — and, as the message key,
+// preserves per-aggregate order through a partitioned broker.
+func (e InvoiceCreated) AggregateID() string { return e.InvoiceID.String() }
+
+// InvoiceRepository is the port the application layer depends on. It
+// lives here, in the domain, so infrastructure depends on the domain and
+// never the other way round.
+type InvoiceRepository interface {
+	FindByID(ctx context.Context, id InvoiceID) (*Invoice, error)
+	Save(ctx context.Context, invoice *Invoice) error
+}
