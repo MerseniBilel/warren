@@ -1,0 +1,227 @@
+package http
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	stderrors "errors"
+	"net/http"
+	"sync"
+
+	"github.com/MerseniBilel/warren/errors"
+	"github.com/MerseniBilel/warren/health"
+	"github.com/MerseniBilel/warren/log"
+	"github.com/MerseniBilel/warren/transport"
+)
+
+// statusFor is the HTTP column of the error table (warren.md §2.6). It is the
+// only place in an HTTP service where a semantic code becomes a status, which
+// is what lets domain code return errors.Conflict(...) and never import
+// net/http.
+func statusFor(code errors.Code) int {
+	switch code {
+	case errors.CodeInvalid:
+		return http.StatusBadRequest
+	case errors.CodeNotFound:
+		return http.StatusNotFound
+	case errors.CodeConflict:
+		return http.StatusConflict
+	case errors.CodeUnauthenticated:
+		return http.StatusUnauthorized
+	case errors.CodePermissionDenied:
+		return http.StatusForbidden
+	case errors.CodeUnavailable:
+		return http.StatusServiceUnavailable
+	default:
+		return http.StatusInternalServerError
+	}
+}
+
+// errorBody is the wire shape. code is errors.Code verbatim — a closed set of
+// seven values, so a client can switch on it — and it is deliberately not RFC
+// 9457 problem+json, whose "type" is a URI that errors.Code is not.
+type errorBody struct {
+	Error errorPayload `json:"error"`
+}
+
+type errorPayload struct {
+	Code          string         `json:"code"`
+	Message       string         `json:"message"`
+	Details       map[string]any `json:"details,omitempty"`
+	CorrelationID string         `json:"correlation_id,omitempty"`
+}
+
+// writeError renders err through the table above.
+//
+// INTERNAL never renders the message and never renders the wrapped cause: a
+// fixed "internal error" plus the correlation ID goes to the client, and the
+// real thing goes to the log at ERROR. Anything else leaks DSNs and SQL
+// statements to the internet.
+func writeError(w http.ResponseWriter, r *http.Request, err error) {
+	ctx := r.Context()
+	var werr *errors.Error
+	code := errors.CodeInternal
+	if e, ok := asWarrenError(err); ok {
+		werr, code = e, e.Code()
+	}
+
+	body := errorPayload{Code: string(code), CorrelationID: log.CorrelationID(ctx)}
+	if code == errors.CodeInternal {
+		body.Message = "internal error"
+		log.FromContext(ctx).Error("request failed", "error", err.Error(), "path", r.URL.Path)
+	} else {
+		body.Message = werr.Message()
+		body.Details = werr.Details()
+	}
+	writeJSON(w, statusFor(code), errorBody{Error: body})
+}
+
+// asWarrenError finds the *errors.Error anywhere in the chain. A handler that
+// wrapped one with %w still maps to the right status.
+func asWarrenError(err error) (*errors.Error, bool) {
+	var e *errors.Error
+	if stderrors.As(err, &e) && e != nil {
+		return e, true
+	}
+	return nil, false
+}
+
+func writeJSON(w http.ResponseWriter, status int, v any) {
+	buf, err := json.Marshal(v)
+	if err != nil {
+		// Encoding the error envelope itself failed; there is nothing left to
+		// tell the client but the status.
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	w.Header()[contentType] = jsonContentType
+	w.WriteHeader(status)
+	_, _ = w.Write(buf)
+}
+
+// Canonical key and a shared value, assigned straight into the header map:
+// see the note in typed.
+const contentType = "Content-Type"
+
+var jsonContentType = []string{"application/json; charset=utf-8"}
+
+// bodyPool is why the read is a pooled bytes.Buffer and not
+// json.NewDecoder(r.Body) or io.ReadAll: measured, the decoder costs 9
+// allocations and 968 B and io.ReadAll costs 2 and 544 B, against 7 and 272 B
+// for this. Do not "simplify" it back.
+var bodyPool = sync.Pool{New: func() any { return new(bytes.Buffer) }}
+
+// typed serves one registered route: guards, then core's pre-built closure —
+// decode, bind params, validate, core middleware, handler, encode — then the
+// success status. Everything except the body read happens inside the closure
+// the Builder froze at boot.
+func (s *server) typed(rt transport.HTTPRoute) http.Handler {
+	invoke := rt.Bind(transport.JSON())
+	guards := rt.Guards
+	success := rt.Success
+	limit := s.cfg.maxBodyBytes
+
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// params is pointer-shaped, so putting it in the interface costs no
+		// allocation; the context value costs one.
+		ctx := transport.WithParams(r.Context(), params{r: r})
+
+		for _, g := range guards {
+			if err := g.Authorize(ctx); err != nil {
+				writeError(w, r, err)
+				return
+			}
+		}
+
+		buf := bodyPool.Get().(*bytes.Buffer)
+		buf.Reset()
+		defer bodyPool.Put(buf)
+		if r.Body != nil {
+			if _, err := buf.ReadFrom(http.MaxBytesReader(w, r.Body, limit)); err != nil {
+				writeError(w, r, errors.Invalid("body", err))
+				return
+			}
+		}
+
+		out, err := invoke(ctx, buf.Bytes())
+		if err != nil {
+			writeError(w, r, err)
+			return
+		}
+		if success == http.StatusNoContent {
+			// A 204 writes no body and no Content-Type.
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		// Assigning the map entry directly, with a package-level value,
+		// skips both the key canonicalisation and the one-element slice
+		// Header.Set allocates — 2 allocations on every response. net/http
+		// does the same thing for its own headers. Content-Length is left to
+		// net/http, which computes it for a response it can buffer.
+		w.Header()[contentType] = jsonContentType
+		w.WriteHeader(success)
+		_, _ = w.Write(out)
+	})
+}
+
+// raw serves an escape-hatch route: the edge ring and the route's guards, and
+// then the handler, which owns its own body reading, status and encoding.
+func (s *server) raw(rr transport.RawRoute, h http.Handler) http.Handler {
+	if len(rr.Guards) == 0 {
+		return h
+	}
+	guards := rr.Guards
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		for _, g := range guards {
+			if err := g.Authorize(r.Context()); err != nil {
+				writeError(w, r, err)
+				return
+			}
+		}
+		h.ServeHTTP(w, r)
+	})
+}
+
+// methodNotAllowed renders the JSON 405 envelope for a path that exists under
+// another verb. Registering this shim costs ServeMux's own free Allow header,
+// so the value is computed at boot and written here.
+func (s *server) methodNotAllowed(allow string) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Allow", allow)
+		writeJSON(w, http.StatusMethodNotAllowed, errorBody{Error: errorPayload{
+			Code:          string(errors.CodeNotFound),
+			Message:       r.Method + " is not allowed on " + r.URL.Path,
+			CorrelationID: log.CorrelationID(r.Context()),
+		}})
+	})
+}
+
+// notFound is the catch-all. It also answers a wrong method on "/" itself,
+// whose pattern is this one, which is why it carries rootAllow.
+func (s *server) notFound(rootAllow string) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if rootAllow != "" && r.URL.Path == "/" {
+			s.methodNotAllowed(rootAllow).ServeHTTP(w, r)
+			return
+		}
+		writeJSON(w, http.StatusNotFound, errorBody{Error: errorPayload{
+			Code:          string(errors.CodeNotFound),
+			Message:       "no route for " + r.Method + " " + r.URL.Path,
+			CorrelationID: log.CorrelationID(r.Context()),
+		}})
+	})
+}
+
+// probe serves a health verdict. It is not a route: it bypasses the edge ring
+// so that a probe every two seconds is not a span, an audit line and a rate
+// limiter decision.
+func probe(verdict func(context.Context) health.Report) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rep := verdict(r.Context())
+		status := http.StatusOK
+		if rep.Status != health.StatusUp {
+			status = http.StatusServiceUnavailable
+		}
+		writeJSON(w, status, rep)
+	})
+}

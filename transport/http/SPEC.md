@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | **APPROVED (2026-08-02)** — architect round complete; both ⚠ blocking questions ruled on (below), the public API rewritten for `net/http.ServeMux`, and the four `net/http` facts the previous draft got wrong corrected against go1.26.3. Implementation may start. |
+| **Status** | **APPROVED AND IMPLEMENTED (2026-08-02)** — architect round complete, both ⚠ blocking questions ruled on, boot step 5 built in core, the adapter shipped with golden files and an allocation test. See **Divergences** below for what the implementation changed. |
 | **Source** | [warren.md §4.1](../../warren.md) |
 | **Module** | own module (`warren/transport/http`) |
 | **Mode** | Vendor (standard library only) |
@@ -677,6 +677,66 @@ the service's — a downstream auth failure is `UNAVAILABLE`.
 13. This spec corrected wherever the implementation diverged, and **retired**
     once the package is implemented and reviewed.
 
+## Divergences — what the implementation changed, and why
+
+Rule 4 of the spec process: where the code had to differ, the spec is
+corrected in the same change rather than later.
+
+**1. The allocation budget is 18, not 16.** The 16 was an estimate made before
+the code existed. Measured on go1.26.3/darwin-arm64, with the breakdown
+committed in `TestAllocations`:
+
+| | allocs |
+|---|---|
+| `net/http.ServeMux` dispatch, one path wildcard | 2 |
+| edge ring — ID string, response-header slice, correlation context value, and the `http.Request` clone `r.WithContext` makes so user middleware sees the ID | 6 |
+| typed path — of which ~7 are `encoding/json`'s decoder | 10 |
+| **total** | **18** |
+
+The same handler called directly allocates **0**, and `BenchmarkHandlerDirect`
+prints it beside `BenchmarkRequest` so the gap is never an adjective.
+
+**2. The edge ring does NOT derive a per-request logger, and warren.md §2.5's
+promise is not yet free.** The first implementation seeded
+`log.With(ctx, "correlation_id", id)`. Measured, that one call costs **8
+allocations** — more than the entire decode-validate-handle-encode path — and
+it charges them to every request, including the ones that never log. It was
+removed: the adapter seeds `log.WithCorrelationID` (2 allocations) and the
+error and panic paths add the ID explicitly. §2.5 wants `log.FromContext(ctx)`
+to carry it; the way to have that for free is a `slog.Handler` in `warren/log`
+that reads the ID off the context at `Handle` time, which is where `slog` is
+designed to do it. **Open question 6 below.**
+
+Two smaller measured wins, recorded so nobody "simplifies" them back:
+`CorrelationHeader` is spelled `X-Correlation-Id`, net/http's canonical form,
+so `Get` and `Set` skip re-canonicalising the key on every request; and
+`Content-Type` is written by assigning a package-level `[]string` straight
+into the header map, which skips both the canonicalisation and the
+one-element slice `Header.Set` allocates. `Content-Length` is left to
+net/http, which computes it for any response it can buffer.
+
+**3. `Addr(string)` and `Listener(net.Listener)` were both added** — the spec
+anticipated `Listener`; `Addr` is the deployment decision (`127.0.0.1` versus
+every interface) that `Port(int)` alone cannot express. Both amend
+warren.md §4.1, which is corrected in the same change.
+
+**4. A 405 renders `"code":"NOT_FOUND"`.** The code set is closed at seven
+values so clients can switch on it, and none of them is
+"method not allowed". `NOT_FOUND` is the honest member — the route as
+addressed does not exist — and the `message` says which method was refused,
+with `Allow` naming the ones that are not. Golden-tested rather than argued
+about.
+
+**5. `ErrorLog` is routed into `slog`**, which answers what was open question 5:
+left unset, net/http writes connection-level errors (TLS handshake failures,
+malformed requests) straight to stderr, bypassing the service's own log
+stream.
+
+**6. `make workspace` generates a git-ignored `go.work`.** A submodule cannot
+resolve an untagged core module and invariant 8 forbids a committed `replace`,
+so the Makefile generates the workspace and every compiling target depends on
+it. `.gitignore` is new in this change and exists for exactly this.
+
 ## Open questions
 
 Everything the previous draft asked has been answered — questions 1–3 dissolved
@@ -695,6 +755,12 @@ scope. What genuinely remains:
 3. **Per-prefix middleware.** Global-only in v0.1; `Guard` covers authorization
    but not a rate limit or a CORS policy scoped to `/admin/*`. Not in v0.1.
 4. **Do raw routes appear in `warren/openapi` (§4.3)?** For that spec to answer.
-5. **Where `http.Server`'s `ErrorLog` goes.** Left unset, `net/http` writes
-   connection errors to stderr, bypassing `warren/log`. Answer before this
-   spec retires.
+5. **RESOLVED** — `ErrorLog` goes to `slog`. See Divergences 5.
+6. **`warren/log` should carry the correlation ID through a `slog.Handler`,
+   not through a per-request derived logger.** warren.md §2.5 promises
+   `log.FromContext(ctx)` already carries it; deriving it at the edge costs 8
+   allocations on every request, including the ones that never log. A
+   `slog.Handler` that reads the ID off the `ctx` it is already handed at
+   `Handle` time makes the promise free. It is a kernel change, so it is the
+   human's, and it is the last thing between this adapter and §2.5. See
+   Divergences 2.

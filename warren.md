@@ -1178,10 +1178,37 @@ The ecosystem argument survives intact — `chi/v5/middleware` is `net/http`-sha
 func Server(opts ...Option) warren.Module
 
 func Port(int) Option
+func Addr(string) Option                                     // "127.0.0.1:8080"; overrides Port
+func Listener(net.Listener) Option                           // a test binding port 0; overrides both
 func Middleware(...func(http.Handler) http.Handler) Option   // stdlib signature
-func Router(RouterAdapter) Option                            // gin.Adapter(), echo.Adapter()
-func ReadTimeout(time.Duration) Option
+func Handle(string, http.Handler) Option                     // pprof, static assets, webhooks
+
+func ReadHeaderTimeout(time.Duration) Option                 // 10s — the Slowloris fix
+func ReadTimeout(time.Duration) Option                       // 30s
+func WriteTimeout(time.Duration) Option                      // 0, deliberately: SSE, downloads
+func IdleTimeout(time.Duration) Option                       // 120s
+func MaxHeaderBytes(int) Option                              // 1 MiB
+func MaxBodyBytes(int64) Option                              // 1 MiB — Invoker is []byte-in
+func DrainDelay(time.Duration) Option                        // 5s — step 9b
+func ShutdownTimeout(time.Duration) Option                   // 15s, inside lifecycle's 30s
+
+func TLS(*tls.Config) Option
+func TLSFiles(certFile, keyFile string) Option
+func H2C() Option                                            // no golang.org/x/net since Go 1.24
+
+const CorrelationHeader = "X-Correlation-Id"
 ```
+
+Implemented 2026-08-02. `Router` and `RouterAdapter` are gone with the
+ServeMux decision, and there is no `Raw(*http.ServeMux)`: a `ServeMux`'s entire
+API is `Handle`, so a mux escape hatch would buy exactly what `Handle` gives.
+The escape hatch that matters is `transport.Raw` (§3.5), registered from a
+controller so the module's own container builds the handler.
+
+Measured on go1.26.3/darwin-arm64: **18 allocations** for a POST with a JSON
+body and a path and query parameter — 2 for `ServeMux` dispatch, 6 for the edge
+ring, 10 for the typed path of which ~7 are `encoding/json`. The same handler
+called directly allocates **0**. `TestAllocations` asserts the exact number.
 
 **Usage**
 

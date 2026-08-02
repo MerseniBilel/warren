@@ -1,0 +1,39 @@
+── raw route is not an http.Handler
+✗ constructor failed
+
+    ✗ raw route is not an http.Handler
+
+    route "POST /uploads", registered by files.notAHandler,
+    was given a value of type http_test.notAHandler.
+
+  transport.Raw hands its handler to whichever adapter serves the
+  protocol, and this one is HTTP: the value must implement
+  net/http.Handler. Wrap a function with http.HandlerFunc(fn).
+
+  A constructor returned this error while the graph for scope "warren/transport/http" was
+  being built. Fix the constructor, or the configuration it read.
+
+── conflicting patterns
+✗ constructor failed
+
+    ✗ conflicting HTTP route patterns
+
+    pattern "GET /users/{uid}" conflicts with pattern "GET /users/{id}":
+GET /users/{uid} matches the same requests as GET /users/{id}
+
+  net/http.ServeMux refuses two patterns that can match the same request,
+  because which one wins would be arbitrary. Two routes with
+  differently-named wildcards on the same path — "/users/{id}" and
+  "/users/{uid}" — are the usual cause: pick one name.
+
+  Both patterns come from a controller's Register method; grep for them.
+
+  A constructor returned this error while the graph for scope "warren/transport/http" was
+  being built. Fix the constructor, or the configuration it read.
+
+── routes with no server
+✗ registered routes have no adapter serving them
+
+    4 HTTP route(s) — add http.Server(...) to warren.New
+
+  A route nobody serves is a route that silently 404s in production.

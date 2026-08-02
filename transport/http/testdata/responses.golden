@@ -1,0 +1,51 @@
+── success
+POST /users → 201  Content-Type: application/json; charset=utf-8
+{"id":"u-1","email":"bob@example.com"}
+
+── no content
+DELETE /users/u-1 → 204
+
+── validation
+POST /users → 400  Content-Type: application/json; charset=utf-8
+{"error":{"code":"INVALID","message":"field email is invalid","details":{"email":"is required"},"correlation_id":"<id>"}}
+
+── malformed body
+POST /users → 400  Content-Type: application/json; charset=utf-8
+{"error":{"code":"INVALID","message":"field body is invalid","correlation_id":"<id>"}}
+
+── invalid
+POST /fail → 400  Content-Type: application/json; charset=utf-8
+{"error":{"code":"INVALID","message":"field email is invalid","details":{"email":"must be an address"},"correlation_id":"<id>"}}
+
+── not found
+POST /fail → 404  Content-Type: application/json; charset=utf-8
+{"error":{"code":"NOT_FOUND","message":"user u-9 not found","correlation_id":"<id>"}}
+
+── conflict
+POST /fail → 409  Content-Type: application/json; charset=utf-8
+{"error":{"code":"CONFLICT","message":"user already exists","correlation_id":"<id>"}}
+
+── unauthenticated
+POST /fail → 401  Content-Type: application/json; charset=utf-8
+{"error":{"code":"UNAUTHENTICATED","message":"no bearer token","correlation_id":"<id>"}}
+
+── permission denied
+POST /fail → 403  Content-Type: application/json; charset=utf-8
+{"error":{"code":"PERMISSION_DENIED","message":"not allowed to users:delete","correlation_id":"<id>"}}
+
+── unavailable
+POST /fail → 503  Content-Type: application/json; charset=utf-8
+{"error":{"code":"UNAVAILABLE","message":"postgres is unavailable","correlation_id":"<id>"}}
+
+── internal
+POST /fail → 500  Content-Type: application/json; charset=utf-8
+{"error":{"code":"INTERNAL","message":"internal error","correlation_id":"<id>"}}
+
+── unknown path
+GET /nope → 404  Content-Type: application/json; charset=utf-8
+{"error":{"code":"NOT_FOUND","message":"no route for GET /nope","correlation_id":"<id>"}}
+
+── wrong method
+PATCH /users/u-1 → 405  Allow: DELETE, GET, HEAD  Content-Type: application/json; charset=utf-8
+{"error":{"code":"NOT_FOUND","message":"PATCH is not allowed on /users/u-1","correlation_id":"<id>"}}
+
