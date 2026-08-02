@@ -232,6 +232,7 @@ func New(modules ...Module) *App
 func (a *App) Run() error              // blocks; handles SIGINT/SIGTERM
 func (a *App) Start(ctx) error         // for tests
 func (a *App) Stop(ctx) error
+func (a *App) Invoke(module string, fn any) error // reach what boot built
 
 func NewModule(name string, opts ...ModuleOption) Module
 
@@ -241,9 +242,22 @@ func Providers(constructors ...any) ModuleOption
 func Controllers(...any) ModuleOption
 func Consumers(...any) ModuleOption
 func Exports[T any]() ModuleOption
+func Eager[T any]() ModuleOption       // materialise at boot even if unconsumed
 func OnStart(fn func(context.Context) error) ModuleOption
 func OnStop(fn func(context.Context) error) ModuleOption
 ```
+
+`App.Invoke(module, fn)` resolves `fn`'s parameters from that module's scope
+and calls it — the seam tests and pre-transport mains use to reach the
+components boot built, with module encapsulation intact. `Eager[T]()`
+materialises a provider nothing consumes: `config.Module` uses it so a bad
+config fails the boot even when no constructor injects the struct.
+
+Two hooks patterns, deliberately different: `warren.OnStart`/`OnStop` take
+plain closures fixed at declaration time; anything created *at* boot — a
+consumer pipeline's drain func, a pool a constructor opened — registers the
+other way, by injecting `lifecycle.Lifecycle` (provided in the root scope)
+and appending its own `lifecycle.Hook`.
 
 **Key property:** `NewModule` returns an inert value. Nothing registers on construction. The bootstrapper walks the entire graph before materialising containers — that ordering is what makes cycle detection and encapsulation checkable rather than emergent.
 

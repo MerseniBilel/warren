@@ -1,6 +1,7 @@
 package config_test
 
 import (
+	"context"
 	stderrors "errors"
 	"flag"
 	"os"
@@ -11,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MerseniBilel/warren"
 	"github.com/MerseniBilel/warren/config"
 )
 
@@ -426,5 +428,25 @@ func TestNoGlobalState(t *testing.T) {
 	}
 	if results[0] != "one-env" || results[1] != "two-env" {
 		t.Errorf("concurrent loads interfered: %v", results)
+	}
+}
+
+// TestModuleIsEager pins the 2026-08-02 feedback fix: a config module whose
+// struct nothing injects must STILL fail the boot when a required field is
+// unset — the doc promises boot-time validation, and lazy instantiation was
+// silently skipping it.
+func TestModuleIsEager(t *testing.T) {
+	t.Parallel()
+
+	type lonely struct {
+		Key string `config:"key" validate:"required"`
+	}
+	// Nothing in the graph consumes lonely.
+	err := warren.New(config.Module[lonely](config.WithEnvPrefix("LONELY"))).Start(context.Background())
+	if err == nil {
+		t.Fatal("an unconsumed config module booted with a required field unset")
+	}
+	if !strings.Contains(err.Error(), "key is required") {
+		t.Errorf("error = %v, want the missing-required diagnostic", err)
 	}
 }

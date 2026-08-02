@@ -74,6 +74,7 @@ func WithFlags(fs *flag.FlagSet) Option {
 func Module[T any](opts ...Option) warren.Module {
 	return warren.NewModule("config["+reflect.TypeFor[T]().String()+"]",
 		warren.Providers(func() (T, error) { return Load[T](opts...) }),
+		warren.Eager[T](),
 		warren.Exports[T](),
 	)
 }

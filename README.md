@@ -2,11 +2,14 @@
 
 **A DDD-first application framework and CLI for Go backends.**
 
-> ⚠️ **Pre-release.** Nothing is importable yet. The repository was reset in
-> July 2026 and is being rebuilt spec-first: every package gets an approved
-> `SPEC.md` before its first line of Go, retired once the package is
-> implemented and reviewed. [warren.md](warren.md) is the design;
-> [AGENT.md](AGENT.md) is the rules.
+> ⚠️ **Pre-release, v0.1 in progress.** The kernel is importable and works
+> today — use cases, errors, domain, config, DI, lifecycle, the module system,
+> and the consumer chain. The transport adapters, outbox, and broker drivers
+> are not built yet, so a service currently drives handlers directly and
+> through `broker.Pipeline`. The repository is being rebuilt spec-first: every
+> package gets an approved `SPEC.md` before its first line of Go, retired once
+> the package is implemented and reviewed. [warren.md](warren.md) is the
+> design; [AGENT.md](AGENT.md) is the rules.
 
 ---
 

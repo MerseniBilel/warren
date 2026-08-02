@@ -26,6 +26,7 @@ type App struct {
 	booted   bool
 	stopping bool
 	lc       lifecycle.Lifecycle
+	scopes   map[string]di.Container
 }
 
 // New builds an App from the given module declarations. It does no fallible
@@ -87,6 +88,9 @@ func (a *App) Start(ctx context.Context) error {
 	}
 
 	scopes := map[string]di.Container{}
+	a.mu.Lock()
+	a.scopes = scopes
+	a.mu.Unlock()
 	for _, m := range ordered {
 		scope := root.Scope(m.name)
 		scopes[m.name] = scope
@@ -156,6 +160,11 @@ func (a *App) Start(ctx context.Context) error {
 				}
 			}
 		}
+		for _, t := range m.eager {
+			if err := resolveDynamic(scope, t); err != nil {
+				return err
+			}
+		}
 		for _, fn := range m.onStart {
 			lc.Append(lifecycle.Hook{Name: m.name, OnStart: fn})
 		}
@@ -187,6 +196,32 @@ func (a *App) Start(ctx context.Context) error {
 
 func errBootAbandoned() error {
 	return errors.New("warren: Stop arrived during boot — boot abandoned, readiness never opened")
+}
+
+// Invoke resolves fn's parameters from the named module's scope and calls
+// fn — the seam tests and pre-transport mains reach the components the boot
+// built, without constructing second instances. Module encapsulation holds:
+// fn sees exactly what the module's own constructors see, own bindings and
+// imported exports, nothing else. It is boot-time machinery (invariant 7 is
+// about the request path); a transport adapter, once one exists, is the
+// production caller of your handlers.
+func (a *App) Invoke(module string, fn any) error {
+	a.mu.Lock()
+	booted := a.booted
+	scope := a.scopes[module]
+	known := make([]string, 0, len(a.scopes))
+	for name := range a.scopes {
+		known = append(known, name)
+	}
+	a.mu.Unlock()
+	if !booted {
+		return errors.New("warren: Invoke before Start — boot the app first")
+	}
+	if scope == nil {
+		slices.Sort(known)
+		return fmt.Errorf("warren: Invoke on unknown module %q — the graph has: %s", module, strings.Join(known, ", "))
+	}
+	return scope.Invoke(fn)
 }
 
 // Stop runs the shutdown sequence: readiness closes first, then hooks stop

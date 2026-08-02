@@ -455,3 +455,132 @@ func TestFailingConstructorSurfacesAtBoot(t *testing.T) {
 		t.Errorf("the constructor's own error did not surface:\n%s", err)
 	}
 }
+
+// --- Fixes from the 2026-08-02 framework-user feedback round ---
+
+func TestInvokeReachesWhatBootBuilt(t *testing.T) {
+	t.Parallel()
+
+	platform := warren.NewModule("platformI",
+		warren.Providers(func() *pool { return &pool{} }),
+		warren.Exports[*pool](),
+	)
+	user := warren.NewModule("userI",
+		warren.Imports(platform),
+		warren.Providers(func(p *pool) userRepository { return &pgUserRepository{p: p} }),
+		warren.Consumers(func(userRepository) *invoiceService { return &invoiceService{} }),
+	)
+	app := warren.New(platform, user)
+	if err := app.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = app.Stop(context.Background()) }()
+
+	t.Run("reaches a module's own binding", func(t *testing.T) {
+		var got userRepository
+		if err := app.Invoke("userI", func(r userRepository) { got = r }); err != nil {
+			t.Fatalf("Invoke: %v", err)
+		}
+		if got == nil || got.Kind() != "pg" {
+			t.Error("Invoke did not deliver the repository the boot built")
+		}
+	})
+
+	t.Run("module encapsulation still holds", func(t *testing.T) {
+		// platformI cannot see user's private binding.
+		err := app.Invoke("platformI", func(userRepository) {})
+		if err == nil {
+			t.Fatal("Invoke crossed the module boundary")
+		}
+		if !strings.Contains(err.Error(), "✗ cannot resolve dependency") {
+			t.Errorf("not the resolution diagnostic:\n%s", err)
+		}
+	})
+
+	t.Run("an unknown module names the ones that exist", func(t *testing.T) {
+		err := app.Invoke("nope", func(*pool) {})
+		if err == nil || !strings.Contains(err.Error(), "the graph has: platformI, userI") {
+			t.Errorf("error = %v, want the known-module list", err)
+		}
+	})
+}
+
+func TestInvokeBeforeStart(t *testing.T) {
+	t.Parallel()
+
+	err := warren.New(warren.NewModule("x")).Invoke("x", func() {})
+	if err == nil || !strings.Contains(err.Error(), "Invoke before Start") {
+		t.Errorf("error = %v, want the boot-first diagnostic", err)
+	}
+}
+
+type eagerThing struct{}
+
+func TestEagerMaterialisesUnconsumedProviders(t *testing.T) {
+	t.Parallel()
+
+	t.Run("an eager provider runs even when nothing consumes it", func(t *testing.T) {
+		t.Parallel()
+		built := false
+		m := warren.NewModule("eager",
+			warren.Providers(func() *eagerThing { built = true; return &eagerThing{} }),
+			warren.Eager[*eagerThing](),
+		)
+		app := warren.New(m)
+		if err := app.Start(context.Background()); err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+		defer func() { _ = app.Stop(context.Background()) }()
+		if !built {
+			t.Error("the eager provider was never built")
+		}
+	})
+
+	t.Run("its failure fails the boot", func(t *testing.T) {
+		t.Parallel()
+		boom := stderrors.New("bad config")
+		m := warren.NewModule("eagerFail",
+			warren.Providers(func() (*eagerThing, error) { return nil, boom }),
+			warren.Eager[*eagerThing](),
+		)
+		err := warren.New(m).Start(context.Background())
+		if err == nil || !stderrors.Is(err, boom) {
+			t.Errorf("Start = %v, want the eager provider's failure at boot", err)
+		}
+	})
+
+	t.Run("without Eager an unconsumed provider is never built", func(t *testing.T) {
+		t.Parallel()
+		built := false
+		m := warren.NewModule("lazy",
+			warren.Providers(func() *eagerThing { built = true; return &eagerThing{} }),
+		)
+		app := warren.New(m)
+		if err := app.Start(context.Background()); err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+		defer func() { _ = app.Stop(context.Background()) }()
+		if built {
+			t.Error("an unconsumed, non-eager provider was built")
+		}
+	})
+}
+
+// TestModuleFactorySiteIsTheCaller pins the diagnostic fix: a module factory
+// records ITS CALLER's line, never its own body inside the framework.
+func TestModuleFactorySiteIsTheCaller(t *testing.T) {
+	t.Parallel()
+
+	a := config.Module[struct{}]()
+	b := config.Module[struct{}]()
+	err := warren.New(a, b).Start(context.Background())
+	if err == nil {
+		t.Fatal("two config modules for one type booted")
+	}
+	if strings.Contains(err.Error(), "config/config.go") {
+		t.Errorf("the diagnostic points into the framework instead of the user's call site:\n%s", err)
+	}
+	if !strings.Contains(err.Error(), "warren_test.go") {
+		t.Errorf("the diagnostic does not name the caller's file:\n%s", err)
+	}
+}
