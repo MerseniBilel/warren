@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | Draft — not approved |
+| **Status** | **APPROVED (2026-08-02)** — architect round complete; the dependency audit is done and every open question ruled. Two corrections carry weight: **the exactly-once claim is dropped** (warren.md §5.5 had already refuted §5.1 and this spec inherited the contradiction), and `SASL(sasl.Mechanism)` becomes a Warren-owned type plus a named carve-out. **Zero changes required to core `broker` or `outbox`.** |
 | **Source** | [warren.md §5.1](../../warren.md) |
 | **Module** | own module (`warren/broker/kafka`) — [warren.md §1.6](../../warren.md) |
 | **Mode** | Wrap |
@@ -28,8 +28,10 @@ and the driver-agnostic middleware chain does the rest.
   driver is one block in `main.go` (§5.1 Usage, §10 bootstrap).
 - Participate in the lifecycle as a component, not as a loose goroutine (§1.5):
   register start/stop hooks at the exact positions §2.3 requires.
-- Support Kafka transactions, because the outbox relay needs them for
-  exactly-once publishing (§5.1).
+- **NOT** Kafka transactions, and **not** exactly-once — see the ruling below.
+  The producer is idempotent, which removes duplicates caused by producer
+  retries within a session; duplicates are prevented downstream by the inbox
+  dedupe the consumer chain applies by default.
 - Keep Kafka-specific concerns — partition assignment, offset commit strategy —
   as `kafka.*` module options, never visible to consumer code (§5.1).
 - Register a broker-metadata health check with `warren/health` (§2.8).
@@ -253,7 +255,180 @@ is an open question.
 9. Doc comments on every exported identifier, starting with the identifier's
    name.
 
-## Open questions
+## Rulings — architect round, 2026-08-02
+
+### The dependency audit, done
+
+| Package | Version | Licence | Stars | Last push | Archived | Modules compiled in |
+|---|---|---|---|---|---|---|
+| `twmb/franz-go` | v1.21.5 | BSD-3-Clause | 2 971 | 2026-07-31 | no | **4** |
+
+Measured with `go list -deps` on a program importing `kgo` and `sasl/scram`:
+`klauspost/compress`, `pierrec/lz4`, `twmb/franz-go`, `golang.org/x/crypto`
+(the last is SCRAM's). For scale in this repository: core 1,
+`transport/http` 0, `persistence/postgres` 6, `observability` 24. This is the
+second-smallest adapter footprint in the framework.
+
+Alternatives, same date: `IBM/sarama` v1.60.1 (MIT, 12 499); `segmentio/kafka-go`
+v0.4.51 (MIT, 8 597, last push 2026-04 — the only one going quiet);
+`confluent-kafka-go` v2.15.0 (Apache-2.0, 5 153) is cgo over librdkafka, which
+costs cross-compilation and a C toolchain in every build image. franz-go stands
+on being pure Go, covering Kafka 0.8.0–4.2+, and tracking every client KIP.
+
+`franz-go/pkg/kfake` is a SEPARATE module and enters the go.mod as a
+**test-only** dependency; the 4 above are the non-test build and must stay so.
+
+### THE EXACTLY-ONCE CLAIM IS DROPPED, and `Transactional` is deleted
+
+warren.md §5.1 says franz-go was chosen partly for "transactions — which the
+outbox relay needs for exactly-once publishing." **warren.md §5.5 already
+refutes that**, and this spec inherited the contradiction without noticing:
+
+> *Kafka transactions do not make this exactly-once. The outbox ack is in
+> Postgres and the publish is in Kafka — two systems.*
+
+`outbox.Relay.DrainOnce` confirms it mechanically: it calls `Publish(...)` and
+then `MarkPublished(...)` — two systems, two calls, and a crash between them
+republishes. A Kafka transaction around the produce closes nothing, because the
+gap is the *Postgres* write and no Kafka primitive spans it.
+
+What transactions would actually buy is atomic multi-partition produce (the
+relay does not need it: `disposition()` already gives every record its own
+verdict) and read-process-write EOS entirely inside Kafka (unreachable by
+construction, because Warren consumers write to Postgres). What they would cost
+is a `transactional.id` that must be unique and stable per instance — a
+deployment concern the framework would have to invent an answer for — zombie
+fencing, hung-transaction timeouts that block `read_committed` consumers on
+unrelated topics, and produce latency.
+
+**Rulings:** `Transactional(bool)` is not implemented. The port does not grow a
+transactional publish — that would be a Kafka-only concept every other driver
+must fake, and it still would not buy exactly-once. The relay does not
+special-case Kafka (invariant 4). What ships instead is the **idempotent
+producer, on by default**, documented as exactly what it is: no duplicates from
+*producer retries within a session*. warren.md §5.1 is amended in the same
+change.
+
+**One hard requirement this puts on the driver.** `Publish` must return errors
+carrying the right `warren/errors` code, because `outbox.disposition` switches
+on it: dial failure, no leader and `NOT_ENOUGH_REPLICAS` are `Unavailable`
+(left for the next drain, never parked); `RECORD_TOO_LARGE`,
+`UNKNOWN_TOPIC_OR_PARTITION` with auto-create off and `INVALID_RECORD` are
+`Invalid` (parked immediately). Get this backwards and **a broker outage parks
+the entire outbox.** It gets its own table-driven test against `kerr` values,
+which needs no network.
+
+### SASL: a Warren-owned type, plus one named carve-out
+
+Invariant 3 is not narrower than it reads, and `persistence/postgres` set the
+precedent — named carve-outs, documented as such, not "driver types are fine
+inside the driver's own options".
+
+```go
+func SASL(m Mechanism) Option           // Warren-owned
+func Plain(user, pass string) Mechanism
+func SCRAM256(user, pass string) Mechanism
+func SCRAM512(user, pass string) Mechanism
+func RawSASL(m sasl.Mechanism) Option   // the carve-out
+```
+
+Those three cover essentially all managed Kafka. OAUTHBEARER, AWS MSK IAM and
+GSSAPI need a token callback or a keytab; they go through `RawSASL` in v0.1 and
+modelling them is a v0.2 decision, not a v0.1 blocker.
+
+### The escape hatches: `Raw` and `Configure`, and NOT the container
+
+`*kgo.Client` is **not** provided into the container. A driver type any
+constructor can inject is not an escape hatch, it is a second default path —
+and a consumer reaching `kgo.Record` has left the driver-agnostic chain behind,
+which is the entire thing this package exists to prevent.
+
+`Configure(...kgo.Opt)` runs before the client is built, because hooks
+(`kgo.WithHooks`, how `observability` would instrument this) and a custom
+partitioner are read at construction. `Raw(func(ctx, *kgo.Client) error)` runs
+in `OnStart` after the metadata fetch. Same split, same reasons, as
+`postgres.Configure`/`postgres.Raw`.
+
+### The consumer loop: one client, in-process fan-out, mark-the-prefix
+
+franz-go assigns consume topics **client-wide**, not per `Subscribe`. So: one
+shared consumer client, `AddConsumeTopics` per subscription, one poll loop
+demultiplexing on `record.Topic`. A client per `Subscribe` would put N members
+of one group in a single process, splitting partitions against itself.
+
+**The load-bearing consequence, which the draft did not mention: two
+`Subscribe` calls on the same topic must fan out IN-PROCESS.** Two real group
+members would *split* partitions rather than duplicate, and
+`brokertest`'s fan-out test would fail. This is safe only because
+`Deduplicate` scopes its key by subscription name — the sibling handler that
+already succeeded sees its own key marked and acks without re-running. The
+design anticipated it; the driver must pass `EventRoute.Name` as the
+subscription, not the topic.
+
+**Marking is prefix-only.** A Kafka offset is a high-water mark, so marking
+record k+1 commits past a failed record k. A nack therefore **seeks the
+partition back** to the failed offset and discards the buffered remainder.
+Head-of-line blocking on that partition is not a bug — it is what per-key
+ordering costs, and `Retry` has already exhausted the policy before the driver
+sees the error. `BlockRebalanceOnPoll` plus `AllowRebalance` after dispositions
+means a partition is never revoked mid-flight.
+
+**Offset commit strategy is a fixed invariant, not an option.** Auto-commit by
+time would advance offsets past messages the chain has not disposed of,
+silently turning at-least-once into at-most-once. `CommitInterval` is the only
+knob and it is a duplicate-window knob, never a correctness one.
+
+### The lifecycle: two hooks, ordered by a dependency edge
+
+`lifecycle.Hook` has no phase field — ordering is append order with
+reverse-order teardown. §2.3 needs consumers to stop at step 3 and connections
+to close at step 5, so:
+
+- the **client** constructor appends its hook first, so it stops LAST (step 5);
+- the **subscription runner** depends on the client, so it is constructed
+  second, appended second, and stops FIRST (step 3): cancel the run context,
+  wait on every `Pipeline` drain, then commit marked offsets.
+
+The client is deliberately not closed at step 3 — the outbox relay's step-4
+flush still publishes through it. The runner's `OnStart` must not capture the
+boot context, which `outbox` documents as a trap.
+
+### Open questions 2, 5, 6, 7 — closed
+
+**2.** `Option` is `struct{ apply func(*config) }`, matching
+`persistence/postgres`: unforgeable outside the package, and room for
+validation later.
+**5.** Partition assignment is `PartitionAssignment(Balancer)`, cooperative by
+default — a stop-the-world rebalance fights the drain. Documented hazard:
+cooperative and eager balancers cannot coexist in one group, so changing it
+needs a full group restart, not a rolling deploy.
+**6.** No, `Transactional` is not needed for the DLQ. `DeadLetter` already
+publishes and acks only on success, nacking on failure because silent loss is
+the forbidden outcome. The residual failure — DLQ publish succeeds, commit
+fails, duplicate DLQ row — is at-least-once, which is what the rest of the
+system is.
+**7. STALE.** `broker.ExponentialBackoff` already exists in
+`broker/middleware.go` and is `Pipeline`'s default. The §5.1 snippet is valid
+Go today.
+
+### Testing
+
+Unit-testable with no Docker, no network and no sleeps: `Message` ↔
+`kgo.Record` both directions (headers, key, timestamp, nil-versus-empty
+payload), option assembly asserted on the unexported config rather than on
+opaque `kgo.Opt` values, **the `kerr` → `errors.Code` table** (load-bearing for
+the outbox, per the ruling above), **the mark/seek decision extracted as a pure
+function** — that is where offset bugs live, so it stays out of the I/O — and a
+golden file per diagnostic.
+
+Behind `//go:build integration`: `brokertest.Run` entire, group rebalancing,
+drain-before-close ordering, and DLQ production. The suite reads
+`WARREN_TEST_KAFKA_BROKERS` and skips with the command that produces one.
+`brokertest`'s 10s readiness and 5s await budgets may prove tight for a cold
+group join; if so they are raised in the SUITE first and the drivers follow —
+never weakened in a driver to fit.
+
+## Open questions## Open questions
 
 1. **`SASL(sasl.Mechanism)` puts a franz-go type in an exported signature.**
    `sasl.Mechanism` is `github.com/twmb/franz-go/pkg/sasl`. AGENT.md invariant 3

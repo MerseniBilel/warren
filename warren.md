@@ -1330,7 +1330,11 @@ Reads route registrations plus DTO struct tags (including `validate:` constraint
 
 - **Wraps** `twmb/franz-go` · **Mode** Wrap
 
-**Why franz-go.** Feature-complete pure Go covering Kafka 0.8.0 through 4.2+, targets every client KIP, and has transactions — which the outbox relay needs for exactly-once publishing. The alternatives each disqualify themselves for framework use:
+**Why franz-go.** Feature-complete pure Go covering Kafka 0.8.0 through 4.2+, and it targets every client KIP. **Audited 2026-08-02**: v1.21.5, BSD-3-Clause, 2 971 stars, pushed 2026-07-31, not archived, and **4 third-party modules compiled in** (`klauspost/compress`, `pierrec/lz4`, `twmb/franz-go`, `golang.org/x/crypto`) — the second-smallest adapter footprint in the framework, after `transport/http`'s zero.
+
+**Corrected 2026-08-02: this section used to say franz-go was chosen partly for "transactions — which the outbox relay needs for exactly-once publishing". That contradicted §5.5, which is right and this was wrong.** The outbox ack is in Postgres and the publish is in Kafka; no Kafka transaction spans two systems, and `Relay.DrainOnce` publishes and then marks published, so a crash between them republishes. There is no `Transactional` option, and the guarantee is **at-least-once plus inbox dedupe**. What the driver does ship is the idempotent producer, which removes duplicates from producer RETRIES within a session — the one duplicate source inside its control.
+
+The alternatives each disqualify themselves for framework use:
 
 | Client | Blocker |
 |---|---|
@@ -1357,7 +1361,8 @@ func Transactional(bool) Option
 kafka.Broker(
     kafka.Brokers(cfg.Kafka.Brokers...),
     kafka.ConsumerGroup(cfg.Kafka.Group),
-    kafka.Transactional(true),
+    kafka.TLS(cfg.Kafka.TLS),
+    kafka.SASL(kafka.SCRAM512(cfg.Kafka.User, cfg.Kafka.Password)),
 )
 ```
 
@@ -1367,7 +1372,7 @@ kafka.Broker(
 type BillingConsumer struct{ activate *ActivateUserHandler }
 
 func (c *BillingConsumer) Register(r transport.Registrar) {
-    r.Events().On("billing.subscription.created", c.activate,
+    transport.OnEvent(r, "billing.subscription.created", c.activate,
         broker.WithRetry(broker.ExponentialBackoff(5)),
         broker.WithDeadLetter("billing.subscription.created.dlq"),
         broker.WithConcurrency(10),

@@ -10,9 +10,8 @@
 > `net/http.ServeMux` and adds nothing to your `go.mod` but itself, and
 > **`persistence/postgres`**, whose unit of work commits aggregate state and
 > the outbox rows for that aggregate's events in one transaction. What is
-> *not* built yet are the driver adapters that need third-party libraries:
-> `broker/kafka`, and `transport/grpc` — the latter deferred to v0.2 with its
-> design decided; see [its spec](transport/grpc/SPEC.md).
+> *not* built yet: `transport/grpc`, deferred to v0.2 with its design decided
+> — see [its spec](transport/grpc/SPEC.md).
 > The repository is being rebuilt spec-first: every
 > package gets an approved `SPEC.md` before its first line of Go, retired once
 > the package is implemented and reviewed. [warren.md](warren.md) is the
@@ -154,7 +153,12 @@ contract now.
       the SQL store and advisory-lock elector land with postgres)*
 - [x] `inbox` — dedupe store, on by default *(port + memory store shipped
       with the broker chain)*
-- [ ] `broker/kafka` — franz-go driver *(SASL type decision applied)*
+- [x] `broker/kafka` — franz-go driver: one client, one group, in-process
+      fan-out, mark-the-prefix offsets, and publish errors carrying the code
+      the outbox relay switches on *(implemented; **at-least-once plus inbox
+      dedupe, not exactly-once** — §5.1 claimed otherwise and §5.5 was right.
+      4 third-party modules, the smallest adapter footprint after
+      `transport/http`'s zero)*
 - [ ] `broker/rabbitmq`, `broker/nats` — after their manifest entries are written
 
 ### Phase 4 — persistence

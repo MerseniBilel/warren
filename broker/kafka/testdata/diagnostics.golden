@@ -1,0 +1,96 @@
+── no brokers
+✗ kafka has no seed brokers
+
+    kafka.Broker() was declared without kafka.Brokers(...).
+
+  Give it at least one, usually from config:
+
+      kafka.Broker(kafka.Brokers(cfg.Kafka.Brokers...))
+
+  Seeds are only a starting point — the client discovers the rest of
+  the cluster from them, so listing two or three is enough.
+
+── no consumer group
+✗ kafka has no consumer group
+
+    A subscription to "user.registered" needs one, and kafka.Broker() was declared
+    without kafka.ConsumerGroup(...).
+
+  The group is what makes partitions divide between your replicas
+  instead of every replica reading everything:
+
+      kafka.Broker(
+          kafka.Brokers(...),
+          kafka.ConsumerGroup("billing-service"),
+      )
+
+  A service that only publishes needs no group.
+
+── unknown balancer
+✗ unknown partition assignment "nonesuch"
+
+    kafka.PartitionAssignment("nonesuch")
+
+  Available: cooperative (the default), sticky, roundrobin, range.
+
+  Cooperative revokes only the partitions that actually move, so a
+  rebalance does not stop every consumer in the group. Note it cannot
+  coexist with the eager balancers in one group: changing this needs
+  the whole group restarted, not a rolling deploy.
+
+── plain without tls
+✗ SASL/PLAIN without TLS
+
+    kafka.SASL(kafka.Plain(...)) was set with no kafka.TLS(...).
+
+  PLAIN sends the username and password in the CLEAR. This fails the
+  boot rather than let a credential cross an unencrypted network
+  because an option was forgotten.
+
+  Add TLS:
+
+      kafka.TLS(&tls.Config{MinVersion: tls.VersionTLS12})
+
+  or use kafka.SCRAM512(...), which never sends the password itself.
+
+── two mechanisms
+✗ two SASL mechanisms
+
+    Both kafka.SASL(...) and kafka.RawSASL(...) were set.
+
+  Only one authenticates the connection, and which one would win is
+  not something to leave to argument order. Keep kafka.SASL for the
+  mechanisms Warren models — Plain, SCRAM256, SCRAM512 — and
+  kafka.RawSASL only for the ones it does not, such as OAUTHBEARER
+  or AWS MSK IAM.
+
+── cannot connect
+✗ cannot reach kafka
+
+    a:9092, b:9092
+    context deadline exceeded
+
+  The seeds parsed, so this is the cluster, the network, or the
+  credentials. A SASL failure looks the same as an unreachable broker
+  from here — check both.
+
+  This fails the boot deliberately: a service that cannot reach its
+  broker cannot serve, and discovering that on the first publish is
+  worse than discovering it now.
+
+── raw failed
+✗ kafka.Raw failed
+
+    context deadline exceeded
+
+  The client connected and the function passed to kafka.Raw returned
+  an error, so the boot is abandoned and the client closed.
+
+── not started
+✗ kafka client used before it was started
+
+    The client is opened by this module's OnStart hook, at boot step 6.
+
+  Something published or subscribed during CONSTRUCTION instead. A
+  constructor wires; it does not acquire. Move the call into an
+  OnStart hook of your own, which runs after this one.
