@@ -153,20 +153,68 @@ func TestNilHandlerPanicsAtSubscribe(t *testing.T) {
 	_ = memory.New().Subscribe(context.Background(), "t", nil)
 }
 
+// BenchmarkPublishDeliver times one full publish → handler round trip.
+//
+// The channel is UNBUFFERED on purpose, so an iteration cannot finish until
+// the handler has run. A buffered one lets the loop outrun the subscriber
+// and measures enqueueing rather than delivery — and then deadlocks when
+// the buffer fills, which a default -benchtime reaches easily.
 func BenchmarkPublishDeliver(b *testing.B) {
 	br := memory.New()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	received := make(chan struct{}, 1<<20)
+
+	delivered := make(chan struct{})
 	go func() {
 		_ = br.Subscribe(ctx, "t", func(context.Context, broker.Message) error {
-			received <- struct{}{}
+			delivered <- struct{}{}
 			return nil
 		})
 	}()
+
 	m := broker.Message{ID: "evt", Type: "t"}
+	awaitSubscriber(b, br, ctx, delivered, m)
+
 	b.ReportAllocs()
+	b.ResetTimer()
 	for b.Loop() {
-		_ = br.Publish(ctx, "t", m)
+		if err := br.Publish(ctx, "t", m); err != nil {
+			b.Fatal(err)
+		}
+		<-delivered
+	}
+}
+
+// awaitSubscriber publishes until the subscription is delivering, then
+// drains what queued behind the probe so the timed loop starts balanced.
+//
+// It is needed because a topic with no live subscription accepts messages
+// and discards them (see Publish): without it the first publish can vanish
+// and the first receive blocks forever.
+func awaitSubscriber(b *testing.B, br *memory.Broker, ctx context.Context, delivered <-chan struct{}, m broker.Message) {
+	b.Helper()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if err := br.Publish(ctx, "t", m); err != nil {
+			b.Fatal(err)
+		}
+		select {
+		case <-delivered:
+			// Drain the probes that queued while we were waiting; each
+			// receive releases one blocked handler, and the silence means
+			// the subscription is back to waiting on an empty queue.
+			for {
+				select {
+				case <-delivered:
+				case <-time.After(20 * time.Millisecond):
+					return
+				}
+			}
+		case <-time.After(time.Millisecond):
+		}
+		if time.Now().After(deadline) {
+			b.Fatal("the subscription never started delivering")
+		}
 	}
 }
