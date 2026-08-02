@@ -385,6 +385,29 @@ If you are asked to build something with no spec, **write the spec first and say
 so**. If a spec exists but is not approved, say that too rather than
 implementing against an unagreed contract.
 
+### What a skill is
+
+Step 3 above and mistake 8 both make a skill a hard deliverable for a CLI
+command, and until 2026-08-02 nothing defined the artefact. It is:
+
+- **A Markdown file at `.claude/skills/<name>/SKILL.md`**, with `name` and
+  `description` frontmatter. Under version control, so it is reviewed in the
+  same diff as the command it describes — the only mechanism that keeps it
+  true.
+- **One per command group, not per subcommand.** The five `warren g`
+  generators share one mental model; five near-identical files would rot
+  independently.
+- **Agent-facing.** User documentation is `--help` and the generated
+  `README.md`. A skill exists so an agent reaches for the generator instead
+  of hand-writing the file and forgetting the wiring — which is mistake 7.
+- **About the failure modes, not the happy path.** What the command writes
+  *and what it wires*; the guarantees it makes; every refusal diagnostic and
+  what to do about it; and what is still left to do afterwards. A skill that
+  only restates `--help` is not worth the file.
+
+This ruling is recorded, with its reasoning and what it deliberately leaves
+open, in `cli/SPEC.md` open question 1.
+
 ---
 
 ## Before you write code

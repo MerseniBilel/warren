@@ -517,7 +517,9 @@ and not `go/ast`.
 - [x] Idempotency and conflict behaviour tested (generators) — for the five
       that ship, including that `--force` does not duplicate the wiring in
       `module.go`.
-- [ ] **Its skill exists.** *"The command is not done until the skill exists"* —
+- [x] **Its skill exists** (for `g module|entity|command|repository|consumer`;
+      `new` and `lint arch` still owe theirs). *"The command is not done until
+      the skill exists"* —
       AGENT.md states this twice: § Spec-driven development step 3 (*"implement
       to the definition of done — tests, doc comments, and the skill if it is a
       CLI command"*) and mistake 8 (*"Adding a CLI command without its skill"*).
@@ -527,14 +529,39 @@ and not `go/ast`.
 
 ## Open questions
 
-1. **What is a "skill"?** AGENT.md makes it a hard per-command deliverable in two
-   places (§ Spec-driven development step 3, mistake 8) and never defines the
-   artefact; warren.md never mentions skills at all. Needed before the Definition
-   of done above can be satisfied: where does a skill live (a directory in this
-   repo? `.claude/skills/`? shipped in the binary?), what format, what must it
-   contain, is it one per command or one per group (does `warren g` have a skill,
-   or do its five subcommands have five?), and is it published to users or purely
-   an agent-facing artefact?
+1. ~~**What is a "skill"?**~~ **Decided 2026-08-02 — provisional, flagged for
+   the human, because this is a structural choice and CLAUDE.md says those are
+   taken together.** AGENT.md made it a hard per-command deliverable in two
+   places (§ Spec-driven development step 3, mistake 8) and never defined the
+   artefact; warren.md never mentions skills at all.
+
+   The ruling:
+
+   - **Where.** `.claude/skills/<name>/SKILL.md` in this repository, with the
+     usual `name` + `description` frontmatter. It is a plain Markdown file
+     under version control, so it is reviewed in the same diff as the command
+     it documents — which is the only mechanism that keeps it true.
+   - **Granularity: one per command GROUP, not per subcommand.** The five
+     generators share one mental model (write the code, wire it in, atomic,
+     never overwrite), and five near-identical files would rot
+     independently. `warren-generate` covers all of `warren g`.
+   - **Audience: agent-facing.** It is not user documentation; the generated
+     `README.md` and `--help` are. A skill exists so an agent working in a
+     Warren project reaches for the generator instead of hand-writing a file
+     and forgetting the wiring — which is mistake 7.
+   - **Content.** What each command writes AND what it wires; the guarantees
+     (atomicity, no silent overwrite, comment preservation); every refusal
+     diagnostic and what to do about it; and what is still left to do after
+     generating, because every generator emits a skeleton with intent rather
+     than a finished feature.
+
+   **Shipped:** `.claude/skills/warren-generate/SKILL.md`.
+
+   **Deliberately not decided:** whether the CLI should also *install* skills
+   into a scaffolded application, so that an agent working in a user's project
+   gets them too. That is attractive — it would make `warren new` produce a
+   tree an agent can work in competently, which serves goal 3 directly — but
+   it is a change to what `warren new` writes and belongs to the human.
 
 2. **How does §8's design get settled?** warren.md's closing line says
    *"Section 8 (CLI) and the outbox relay design are the parts most likely to
