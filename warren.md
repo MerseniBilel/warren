@@ -256,6 +256,11 @@ func Eager[T any]() ModuleOption       // materialise at boot even if unconsumed
 func Substitute[T any](v T) Substitution  // replace every provider of T
 func Bind[T any](v T) Substitution        // add a root-scope binding
 func (a *App) Substitute(subs ...Substitution) error
+
+// the validator boot step 5 compiles into every route closure; default
+// validate.Required(). Must be called before Start.
+func (a *App) Validator(v validate.Validator) error
+
 func (m Module) Name() string
 func OnStart(fn func(context.Context) error) ModuleOption
 func OnStop(fn func(context.Context) error) ModuleOption
@@ -1102,6 +1107,28 @@ func Post[Req, Res any](...)   // default success 201; Delete 204; the rest 200
 func Method[Req, Res any](r Registrar, fullMethod string, h app.Handler[Req, Res], opts ...RouteOption)
 func OnEvent[Req, Res any](r Registrar, topic string, h app.Handler[Req, Res], opts ...broker.SubscribeOption)
 
+// The escape hatch: a protocol-native handler for what byte-in/byte-out
+// deliberately does not model — upload, download, SSE, WebSocket upgrade.
+// h is opaque to core (the kernel never imports net/http); the adapter
+// serving p type-asserts it and fails the boot, naming the route and the
+// type, if it does not fit. It travels through the sealed Registrar so the
+// MODULE's container builds the handler, with the module's private providers.
+//
+// Unlike Get/Post/… — which name a verb and take a bare path — Raw names no
+// verb, so its PATTERN CARRIES ONE: "POST /uploads".
+func Raw(r Registrar, p Protocol, pattern string, h any, opts ...RouteOption)
+
+type RawRoute struct {
+    Protocol Protocol
+    Pattern  string // the adapter's own syntax — "POST /uploads" for net/http
+    Name     string
+    Guards   []app.AuthorizationPolicy
+    Handler  any
+}
+
+func (t *Table) Raw() []RawRoute
+func (b *Builder) Fill(t *Table) error   // freeze into the Table boot provided at step 2
+
 func Status(code int) RouteOption
 func Guard(p app.AuthorizationPolicy) RouteOption   // runs BEFORE decode
 func Named(name string) RouteOption
@@ -1220,7 +1247,14 @@ http.Server(
 )
 ```
 
-Registers a lifecycle hook: starts after all dependencies are healthy, stops before pools close, drains in-flight requests. Escape hatch: `http.Raw(func(mux *http.ServeMux) { ... })`, plus `http.Handle(pattern, h)` for the streaming cases the typed port deliberately does not model (uploads, downloads, SSE, WebSocket upgrades).
+Registers a lifecycle hook: starts after all dependencies are healthy, stops before pools close, waits `DrainDelay` so the load balancer observes the 503, then drains in-flight requests.
+
+**Two escape hatches for what the typed port deliberately does not model** — uploads, downloads, SSE, WebSocket upgrades:
+
+- `transport.Raw(r, transport.ProtocolHTTP, "POST /uploads", h)` — registered from a **controller**, so the module's own container builds the handler with the module's own private providers. This is the one to reach for: an upload handler needs the repository, and a repository is private to its module. Note the pattern carries the method, unlike `Get`/`Post`, which name one already.
+- `http.Handle("GET /debug/pprof/", h)` — an adapter option, evaluated in `main`, for handlers that need no module-scoped dependency at all: `net/http/pprof`, static assets, a vendor SDK's webhook receiver.
+
+There is no `http.Raw(func(mux *http.ServeMux))`: a `ServeMux`'s entire API is `Handle`, so a mux handle would buy exactly what `http.Handle` already gives, at the cost of a third door and a registration order nobody can reason about.
 
 ---
 

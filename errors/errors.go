@@ -70,8 +70,21 @@ type Error struct {
 
 // Invalid reports that field failed validation or conversion, wrapping err as
 // the reason. The resulting Error carries CodeInvalid.
+//
+// The reason is ALSO recorded as a detail under field, so it reaches the
+// caller. CodeInvalid describes the caller's own input — telling them only
+// "field email is invalid" while the reason sits in a wrapped cause nothing
+// renders is a 400 nobody can act on, and it made hand-written validation
+// less informative than warren/validate's, which fills the same detail.
+//
+// A cause too sensitive to return is not a CodeInvalid: use Internal, which
+// renders nothing and logs everything.
 func Invalid(field string, err error) *Error {
-	return &Error{code: CodeInvalid, msg: "field " + field + " is invalid", cause: err}
+	e := &Error{code: CodeInvalid, msg: "field " + field + " is invalid", cause: err}
+	if err != nil {
+		e.details = map[string]any{field: err.Error()}
+	}
+	return e
 }
 
 // NotFound reports that no resource of the named kind exists with this id.

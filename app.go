@@ -306,8 +306,16 @@ func (a *App) Start(ctx context.Context) error {
 	for _, m := range ordered {
 		scope := scopes[m.name]
 		for _, t := range m.eager {
-			if _, err := resolveDynamic(scope, t); err != nil {
+			v, err := resolveDynamic(scope, t)
+			if err != nil {
 				return err
+			}
+			// An Eager type that IS a controller was never registered — step
+			// 5 only walks Controllers and Consumers. Listing a controller
+			// under Providers boots clean and serves nothing, which is the
+			// silent 404 this whole ordering exists to prevent.
+			if c, ok := v.(transport.Controller); ok {
+				return errControllerNotRegistered(m, t, c)
 			}
 		}
 	}
@@ -527,6 +535,25 @@ func errRegistersNothing(m Module, option string, outs []reflect.Type) error {
 			"  Or, if it registers nothing and only needs building at boot, declare it\n"+
 			"  with warren.Providers and warren.Eager[%s]() instead.",
 		m.name, m.declared, option, what, shortTypeName(outs), what))
+}
+
+// errControllerNotRegistered catches the mirror image of errRegistersNothing:
+// a type that DOES implement transport.Controller, declared with Providers
+// and Eager instead of Controllers. Nothing calls its Register, so its routes
+// do not exist, and with no routes at all Table.Unserved has nothing to
+// report either — both safety nets miss it, and the service ships dead.
+func errControllerNotRegistered(m Module, t reflect.Type, _ transport.Controller) error {
+	return diagnostic(fmt.Sprintf(
+		"✗ controller declared as a plain provider\n\n"+
+			"    module %q (%s)\n"+
+			"      └─ warren.Eager[%s]() builds a type that implements\n"+
+			"           Register(transport.Registrar), but only warren.Controllers\n"+
+			"           and warren.Consumers are registered at boot step 5.\n\n"+
+			"  Its routes would never exist, and with no routes registered nothing\n"+
+			"  else would notice. Move the constructor:\n\n"+
+			"      warren.Controllers(%s)\n\n"+
+			"  and drop the warren.Eager — Controllers instantiates it already.",
+		m.name, m.declared, t, "New"+shortTypeName([]reflect.Type{t})))
 }
 
 // shortTypeName renders the first output's bare type name for the example

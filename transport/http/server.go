@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/MerseniBilel/warren/health"
@@ -103,12 +104,22 @@ func (s *server) build(tbl *transport.Table, reg health.Registry) (err error) {
 			return errNotAHandler(rr)
 		}
 		s.mux.Handle(rr.Pattern, s.wrap(s.raw(rr, h)))
+		// A raw pattern carries its own method — "POST /uploads" — so it
+		// contributes to Allow exactly like a typed route. Without this a
+		// wrong verb on a raw route reports 404, as though the path did not
+		// exist at all.
+		if verb, path, ok := strings.Cut(rr.Pattern, " "); ok {
+			verbs[path] = append(verbs[path], strings.ToUpper(verb))
+		}
 	}
 
 	// Handle(...) options: the main-side door, for handlers with no
 	// module-scoped dependency.
 	for _, e := range s.cfg.extra {
 		s.mux.Handle(e.pattern, s.wrap(e.handler))
+		if verb, path, ok := strings.Cut(e.pattern, " "); ok {
+			verbs[path] = append(verbs[path], strings.ToUpper(verb))
+		}
 	}
 
 	// 405 with a computed Allow. ServeMux already returns 405 with a correct
@@ -161,10 +172,16 @@ func (s *server) start(context.Context) error {
 		var err error
 		ln, err = net.Listen("tcp", s.cfg.addr)
 		if err != nil {
-			return fmt.Errorf("warren/transport/http: listening on %s: %w", s.cfg.addr, err)
+			return errCannotListen(s.cfg.addr, err)
 		}
 	}
 	s.ln = ln
+	// One line on start, and the address it actually bound — which is the
+	// only way to learn it when the port is 0 or a Listener was supplied.
+	slog.Info("http server listening",
+		"addr", ln.Addr().String(),
+		"module", ModuleName,
+		"tls", s.cfg.tls != nil || s.cfg.certFile != "")
 
 	go func() {
 		var err error
@@ -194,6 +211,11 @@ func (s *server) stop(ctx context.Context) error {
 	defer cancel()
 
 	if s.cfg.drainDelay > 0 {
+		// Say so: five seconds of silence between SIGTERM and exit reads as a
+		// hung process to whoever is watching the logs.
+		slog.Info("http server draining",
+			"drain_delay", s.cfg.drainDelay.String(),
+			"reason", "readiness is already 503; waiting for the load balancer to notice")
 		t := time.NewTimer(s.cfg.drainDelay)
 		defer t.Stop()
 		select {
@@ -208,6 +230,7 @@ func (s *server) stop(ctx context.Context) error {
 	if err := s.http.Shutdown(ctx); err != nil {
 		return fmt.Errorf("warren/transport/http: draining: %w", err)
 	}
+	slog.Info("http server stopped", "module", ModuleName)
 	return nil
 }
 
@@ -253,6 +276,32 @@ func errPatternConflict(r any) error {
 			"  \"/users/{uid}\" — are the usual cause: pick one name.\n\n"+
 			"  Both patterns come from a controller's Register method; grep for them.",
 		muxSite.ReplaceAllString(fmt.Sprint(r), "")))
+}
+
+// errCannotListen is the most common operational failure a Go service has, so
+// it gets the same treatment as every boot diagnostic rather than a raw
+// syscall error with the module name in it twice.
+func errCannotListen(addr string, cause error) error {
+	hint := "  Another process holds it, or the address is not one this host can bind."
+	if errors.Is(cause, syscall.EADDRINUSE) {
+		hint = "  Another process is already listening there. Find it with:\n\n" +
+			"      lsof -nP -iTCP" + portOf(addr) + " -sTCP:LISTEN\n\n" +
+			"  or give this one a different port: http.Port(8081)."
+	} else if errors.Is(cause, syscall.EACCES) {
+		hint = "  Binding this port needs privileges the process does not have.\n" +
+			"  Ports below 1024 are restricted; use http.Port(8080) and map it\n" +
+			"  at the ingress."
+	}
+	return diagnostic(fmt.Sprintf(
+		"✗ cannot listen on %s\n\n    %v\n\n%s", addr, cause, hint))
+}
+
+// portOf renders lsof's ":port" filter from a listen address.
+func portOf(addr string) string {
+	if i := strings.LastIndex(addr, ":"); i >= 0 {
+		return addr[i:]
+	}
+	return ""
 }
 
 func errNotAHandler(rr transport.RawRoute) error {

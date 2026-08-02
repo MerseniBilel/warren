@@ -4,15 +4,19 @@
 
 > ⚠️ **Pre-release, v0.1 in progress.** Most of the framework is importable
 > and works today — use cases, errors, domain, config, DI, lifecycle, the
-> module system, the consumer chain, the transactional outbox, the
-> persistence and transport ports, health, and validation. What is *not*
-> built yet are the driver adapters that need third-party libraries:
-> `transport/http`, `transport/grpc`, `persistence/postgres`,
-> `broker/kafka`. Until they land a service serves requests by driving the
-> `transport.Table` itself. The repository is being rebuilt spec-first: every
+> module system, boot step 5, the consumer chain, the transactional outbox,
+> the persistence and transport ports, health, validation, the CLI, and
+> **`transport/http`**, which serves a real HTTP service over
+> `net/http.ServeMux` and adds nothing to your `go.mod` but itself. What is
+> *not* built yet are the driver adapters that need third-party libraries:
+> `transport/grpc`, `persistence/postgres`, `broker/kafka`.
+> The repository is being rebuilt spec-first: every
 > package gets an approved `SPEC.md` before its first line of Go, retired once
 > the package is implemented and reviewed. [warren.md](warren.md) is the
 > design; [AGENT.md](AGENT.md) is the rules.
+>
+> **New here? Start with [GETTING_STARTED.md](GETTING_STARTED.md)** — a
+> complete service, from nothing to a running HTTP API, in one page.
 
 ---
 
@@ -113,7 +117,12 @@ contract now.
       shape; the 1.27 method form is a mechanical call-site rewrite)*
 - [ ] Bump toolchain to Go 1.27; verify generic methods compile as designed
       *(and that inference works — explicit type arguments are needed today)*
-- [ ] `transport/http` — chi-backed adapter, the HTTP error column
+- [x] `transport/http` — the HTTP error column, health probes, the edge ring,
+      drain-before-stop *(implemented on **`net/http.ServeMux`**, not chi:
+      the sealed `Registrar` already discards everything a router is bought
+      for, and chi measured worst of five candidates on this project's own
+      first priority. Zero third-party dependencies; 18 allocations per
+      request, asserted by a test)*
 - [ ] `transport/grpc` — interceptors through the shared chain, the gRPC column
 - [ ] Fallback if 1.27 slips: generic free functions (compiles on 1.26; call
       sites change shape)

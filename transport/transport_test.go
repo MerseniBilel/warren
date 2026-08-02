@@ -495,3 +495,53 @@ func TestNonStructRequestIsRefusedNotSkipped(t *testing.T) {
 		}
 	}
 }
+
+// A verb baked into a typed pattern used to boot clean and serve an
+// unreachable route: the adapter builds "<verb> <pattern>", so
+// transport.Get(r, "GET /x", h) became "GET GET /x" — host "GET", path "/x".
+// Found by field-testing, 2026-08-02.
+func TestTypedPatternWithAMethodIsARegistrationError(t *testing.T) {
+	t.Parallel()
+
+	b := transport.NewBuilder()
+	transport.Get(b.For("user"), "GET /oops", app.HandlerFunc[getUser, userDTO](
+		func(context.Context, getUser) (userDTO, error) { return userDTO{}, nil }))
+
+	_, err := b.Table()
+	if err == nil {
+		t.Fatal("a method inside a typed pattern must be a boot error")
+	}
+	for _, want := range []string{"contains a method", `transport.Get(r, "/oops"`} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("diagnostic must contain %q:\n%s", want, err)
+		}
+	}
+}
+
+func TestTypedPatternMustBeAPath(t *testing.T) {
+	t.Parallel()
+
+	b := transport.NewBuilder()
+	transport.Post(b.For("user"), "users", app.HandlerFunc[registerUser, userDTO](
+		func(context.Context, registerUser) (userDTO, error) { return userDTO{}, nil }))
+
+	_, err := b.Table()
+	if err == nil {
+		t.Fatal("a pattern that is not a path must be a boot error")
+	}
+	if !strings.Contains(err.Error(), "not a path") {
+		t.Errorf("diagnostic:\n%s", err)
+	}
+}
+
+// Raw is the deliberate exception: it names no verb, so its pattern carries
+// one.
+func TestRawPatternMayCarryAMethod(t *testing.T) {
+	t.Parallel()
+
+	b := transport.NewBuilder()
+	transport.Raw(b.For("user"), transport.ProtocolHTTP, "POST /uploads", &uploadHandler{})
+	if _, err := b.Table(); err != nil {
+		t.Fatalf("Raw must accept \"METHOD /path\": %v", err)
+	}
+}

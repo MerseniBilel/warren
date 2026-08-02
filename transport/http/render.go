@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	stderrors "errors"
 	"net/http"
+	"strconv"
 	"sync"
 
 	"github.com/MerseniBilel/warren/errors"
@@ -138,6 +139,22 @@ func (s *server) typed(rt transport.HTTPRoute) http.Handler {
 		defer bodyPool.Put(buf)
 		if r.Body != nil {
 			if _, err := buf.ReadFrom(http.MaxBytesReader(w, r.Body, limit)); err != nil {
+				var tooBig *http.MaxBytesError
+				if stderrors.As(err, &tooBig) {
+					// 413, not the table's 400. MaxBodyBytes is a TRANSPORT
+					// limit, not a domain verdict — the error table maps
+					// semantic codes, and refusing a payload before anything
+					// semantic has happened is not one of them. A 400 here
+					// was also indistinguishable from malformed JSON, which
+					// made the option unobservable to a client.
+					writeJSON(w, http.StatusRequestEntityTooLarge, errorBody{Error: errorPayload{
+						Code: string(errors.CodeInvalid),
+						Message: "request body exceeds the " +
+							strconv.FormatInt(tooBig.Limit, 10) + "-byte limit",
+						CorrelationID: log.CorrelationID(ctx),
+					}})
+					return
+				}
 				writeError(w, r, errors.Invalid("body", err))
 				return
 			}

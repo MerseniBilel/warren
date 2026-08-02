@@ -292,23 +292,6 @@ func TestHandleServesADependencyFreeHandler(t *testing.T) {
 	}
 }
 
-// --- body limit -----------------------------------------------------------
-
-func TestBodyOverTheLimitIsRefused(t *testing.T) {
-	t.Parallel()
-
-	base := serve(t, []warren.Module{userModule()}, whttp.MaxBodyBytes(32))
-	big := `{"email":"` + strings.Repeat("a", 200) + `"}`
-	res, body := do(t, "POST", base+"/users", big)
-
-	if res.StatusCode != 400 {
-		t.Errorf("status = %d, want 400 — the error table chooses the status", res.StatusCode)
-	}
-	if !strings.Contains(body, `"code":"INVALID"`) {
-		t.Errorf("body = %s", body)
-	}
-}
-
 // --- boot ------------------------------------------------------------------
 
 func TestConflictingPatternsFailTheBootNotAPanic(t *testing.T) {
@@ -452,4 +435,54 @@ func waitFor(t *testing.T, what string, cond func() bool) {
 // middleware would.
 func warrenCorrelationID(r *http.Request) string {
 	return wlog.CorrelationID(r.Context())
+}
+
+// --- regressions found by field-testing the framework, 2026-08-02 ----------
+
+// A body over the limit used to render byte-for-byte identically to malformed
+// JSON, which made MaxBodyBytes unobservable to a client.
+func TestOversizedBodyIs413AndSaysSo(t *testing.T) {
+	t.Parallel()
+
+	base := serve(t, []warren.Module{userModule()}, whttp.MaxBodyBytes(32))
+	res, body := do(t, "POST", base+"/users", `{"email":"`+strings.Repeat("a", 200)+`"}`)
+
+	if res.StatusCode != 413 {
+		t.Errorf("status = %d, want 413 — a transport limit is not a domain verdict", res.StatusCode)
+	}
+	if !strings.Contains(body, "32-byte limit") {
+		t.Errorf("body = %s — the message must name the limit, or it is\nindistinguishable from malformed JSON", body)
+	}
+}
+
+// A wrong verb on a raw route reported 404, as though the path did not exist.
+func TestRawRouteGetsA405WithAllow(t *testing.T) {
+	t.Parallel()
+
+	m := warren.NewModule("files", warren.Controllers(func() *rawController { return &rawController{up: &uploader{}} }))
+	base := serve(t, []warren.Module{m})
+
+	res, _ := do(t, "DELETE", base+"/uploads", "")
+	if res.StatusCode != 405 {
+		t.Errorf("status = %d, want 405 — the path exists, the method does not", res.StatusCode)
+	}
+	if got := res.Header.Get("Allow"); got != "POST" {
+		t.Errorf("Allow = %q, want POST", got)
+	}
+}
+
+// Handle's patterns carry a method too, so they contribute to Allow.
+func TestHandlePatternContributesToAllow(t *testing.T) {
+	t.Parallel()
+
+	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+	base := serve(t, []warren.Module{userModule()}, whttp.Handle("GET /ping", h))
+
+	res, _ := do(t, "POST", base+"/ping", "")
+	if res.StatusCode != 405 {
+		t.Errorf("status = %d, want 405", res.StatusCode)
+	}
+	if got := res.Header.Get("Allow"); got != "GET, HEAD" {
+		t.Errorf("Allow = %q", got)
+	}
 }

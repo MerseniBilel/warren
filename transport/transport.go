@@ -425,6 +425,13 @@ func Delete[Req, Res any](r Registrar, pattern string, h app.Handler[Req, Res], 
 // own private providers — which is the whole reason it is not an adapter
 // option.
 //
+// THE PATTERN CARRIES THE METHOD, unlike every other registration here. Get
+// and Post name a verb and take a bare path; Raw names none, so its pattern
+// is the adapter's own syntax and includes one:
+//
+//	transport.Post(r, "/uploads", h)          // typed:  path only
+//	transport.Raw(r, ProtocolHTTP, "POST /uploads", h)   // raw: method + path
+//
 // A raw route gets the edge ring, its Guard policies, and the drain. It gets
 // no decode, no parameter binding, no validation, no encode, no Status
 // default, and no body limit: the handler owns all of it.
@@ -528,6 +535,12 @@ func register[Req, Res any](r Registrar, p Protocol, verb, pattern string, h app
 	if pattern == "" {
 		reg.fail(errEmptyPattern(verb))
 		return
+	}
+	if p == ProtocolHTTP {
+		if err := checkHTTPPattern(verb, pattern); err != nil {
+			reg.fail(err)
+			return
+		}
 	}
 
 	cfg := routeConfig{status: defaultStatus}
@@ -683,6 +696,54 @@ func errDuplicate(route string) error {
 			"  them distinct patterns.", route))
 }
 
+// checkHTTPPattern refuses a typed pattern that carries its own method, or
+// that is not a path at all.
+//
+// Get, Post and the rest already name the verb, and the adapter builds the
+// router pattern as "<verb> <pattern>" — so transport.Get(r, "GET /x", h)
+// becomes "GET GET /x", which net/http reads as host "GET" and path "/x".
+// It boots clean and serves a route nothing can reach. transport.Raw is the
+// opposite by design: it names no verb, so its pattern carries one.
+func checkHTTPPattern(verb, pattern string) error {
+	if i := strings.IndexByte(pattern, ' '); i >= 0 {
+		return diagnostic(fmt.Sprintf(
+			"✗ HTTP route pattern contains a method\n\n    transport.%s(r, %q, …)\n\n"+
+				"  %s already names the method, so the pattern is the path alone:\n\n"+
+				"      transport.%s(r, %q, …)\n\n"+
+				"  Only transport.Raw takes \"METHOD /path\" — it names no method of\n"+
+				"  its own, so the pattern has to carry one.",
+			methodFunc(verb), pattern, methodFunc(verb),
+			methodFunc(verb), strings.TrimSpace(pattern[i+1:])))
+	}
+	if pattern[0] != '/' {
+		return diagnostic(fmt.Sprintf(
+			"✗ HTTP route pattern is not a path\n\n    transport.%s(r, %q, …)\n\n"+
+				"  An HTTP pattern starts with \"/\". Wildcards are net/http's:\n"+
+				"  \"/users/{id}\", \"/files/{path...}\", \"/exact/{$}\".",
+			methodFunc(verb), pattern))
+	}
+	return nil
+}
+
+// methodFunc names the registration function a verb came from, so the
+// diagnostic shows the call the user actually wrote.
+func methodFunc(verb string) string {
+	switch verb {
+	case "GET":
+		return "Get"
+	case "POST":
+		return "Post"
+	case "PUT":
+		return "Put"
+	case "PATCH":
+		return "Patch"
+	case "DELETE":
+		return "Delete"
+	default:
+		return verb
+	}
+}
+
 func errEmptyPattern(what string) error {
 	return diagnostic(fmt.Sprintf(
 		"✗ empty route pattern\n\n    %s was registered with an empty pattern.\n\n"+
@@ -699,7 +760,7 @@ func errCannotValidate(pattern, handler string, cause error) error {
 			"  Either give the handler a struct request type — which is what lets\n"+
 			"  a field carry `validate:\"required\"` and a param tag — or turn\n"+
 			"  validation off for this application with:\n\n"+
-			"      transport.WithValidator(validate.None())",
+			"      warren.New(...).Validator(validate.None())",
 		pattern, handler, cause))
 }
 

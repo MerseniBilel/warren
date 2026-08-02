@@ -11,7 +11,7 @@ POST /users → 400  Content-Type: application/json; charset=utf-8
 
 ── malformed body
 POST /users → 400  Content-Type: application/json; charset=utf-8
-{"error":{"code":"INVALID","message":"field body is invalid","correlation_id":"<id>"}}
+{"error":{"code":"INVALID","message":"field body is invalid","details":{"body":"invalid character 'n' looking for beginning of object key string"},"correlation_id":"<id>"}}
 
 ── invalid
 POST /fail → 400  Content-Type: application/json; charset=utf-8

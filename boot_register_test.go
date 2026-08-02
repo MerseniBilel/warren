@@ -280,3 +280,26 @@ func TestRawRouteRequiresAnAdapterToo(t *testing.T) {
 		t.Errorf("diagnostic must name the fix:\n%s", err)
 	}
 }
+
+// A controller listed under Providers instead of Controllers used to boot
+// clean and serve nothing: step 5 only walks Controllers and Consumers, and
+// with no routes registered Unserved had nothing to report either. Both
+// safety nets missed the most likely way to ship a dead service. Found by
+// field-testing, 2026-08-02.
+func TestControllerUnderProvidersFailsTheBoot(t *testing.T) {
+	t.Parallel()
+
+	m := warren.NewModule("greeter",
+		warren.Providers(func() *echoController { return &echoController{} }),
+		warren.Eager[*echoController](),
+	)
+	err := warren.New(m).Start(context.Background())
+	if err == nil {
+		t.Fatal("a controller under Providers registered nothing, silently")
+	}
+	for _, want := range []string{"declared as a plain provider", "warren.Controllers"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("diagnostic must contain %q:\n%s", want, err)
+		}
+	}
+}
