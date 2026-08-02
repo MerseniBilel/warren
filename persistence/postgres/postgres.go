@@ -69,6 +69,7 @@ type config struct {
 	cacheMode       CacheMode
 	healthTimeout   time.Duration
 	raw             []func(context.Context, *pgxpool.Pool) error
+	configure       []func(*pgxpool.Config) error
 
 	outbox *outboxConfig
 	inbox  *inboxConfig
@@ -217,11 +218,33 @@ func HealthTimeout(d time.Duration) Option {
 // and the ping succeeded, and before any dependent hook starts. An error from
 // fn fails the boot.
 //
-// It is the ONE place a pgx type appears in this package's exported surface
-// (AGENT.md invariant 3), and it is an explicit opt-out: register a custom
-// type, install a tracer, warm a cache. Repositories take DB, not the pool.
+// It is an explicit opt-out: run a warm-up query, inspect the pool's stats,
+// reach a pgx API this package does not model. It CANNOT install a query
+// tracer — ConnConfig.Tracer is read when the pool is constructed, which has
+// already happened by the time this runs. Use Configure for that.
 func Raw(fn func(context.Context, *pgxpool.Pool) error) Option {
 	return Option{apply: func(c *config) { c.raw = append(c.raw, fn) }}
+}
+
+// Configure runs fn against the parsed pool configuration — after
+// pgxpool.ParseConfig and BEFORE the pool is created, which is the only
+// moment ConnConfig.Tracer, a custom type registration, or a dial function
+// can still be set. An error from fn fails the boot as a WIRING failure,
+// because ParseConfig does no I/O and nothing has been dialled yet.
+//
+// It is the second place a pgx type appears in this package's exported
+// surface (AGENT.md invariant 3), and it exists because query spans cannot be
+// wired any other way: the tracer seam is a pgx interface, and
+// warren/observability may not import this module (invariant 4). So database
+// instrumentation is one explicit line in main rather than something this
+// package can do for you:
+//
+//	postgres.Configure(func(c *pgxpool.Config) error {
+//	    c.ConnConfig.Tracer = otelpgx.NewTracer()
+//	    return nil
+//	})
+func Configure(fn func(*pgxpool.Config) error) Option {
+	return Option{apply: func(c *config) { c.configure = append(c.configure, fn) }}
 }
 
 // --- the query handle ------------------------------------------------------
@@ -327,6 +350,13 @@ func newPool(cfg config, lc lifecycle.Lifecycle, reg health.Registry) (*pool, er
 	pgxCfg.ConnConfig.ConnectTimeout = cfg.connectTimeout
 	if cfg.cacheMode == StatementCacheDescribe {
 		pgxCfg.ConnConfig.DefaultQueryExecMode = pgx.QueryExecModeDescribeExec
+	}
+	// Configure runs HERE, before the pool exists: a query tracer is read at
+	// construction and cannot be installed afterwards.
+	for _, fn := range cfg.configure {
+		if err := fn(pgxCfg); err != nil {
+			return nil, fmt.Errorf("postgres.Configure: %w", err)
+		}
 	}
 
 	p := &pool{cfg: cfg, pgxCfg: pgxCfg}

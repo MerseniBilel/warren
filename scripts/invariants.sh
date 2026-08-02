@@ -59,6 +59,22 @@ for pkg in di lifecycle config log errors validate health; do
 	fi
 done
 
+# OpenTelemetry is confined to warren/observability.
+#
+# It costs 16 third-party modules, including grpc and protobuf — an order of
+# magnitude more than anything else in the repository — so it is opt-in, in
+# its own module, and a service that does not import it must pay nothing. The
+# seam is core-shaped (app.Telemetry, log.ContextAttrs), so nothing else has
+# any reason to reach for the SDK; this is what stops one convenient import
+# putting grpc in every user's go.sum.
+otel=$(find . -name go.mod -not -path './.git/*' -not -path './observability/*' -exec grep -l 'go.opentelemetry.io' {} + 2>/dev/null || true)
+if [ -n "$otel" ]; then
+	echo "OpenTelemetry outside warren/observability:"
+	echo "$otel"
+	echo "  The seam is app.Telemetry and log.ContextAttrs — both core-shaped."
+	fail=1
+fi
+
 # Invariant 8 — no committed replace directive, in any module.
 replaces=$(find . -name go.mod -not -path './.git/*' -exec grep -l '^replace' {} + 2>/dev/null || true)
 if [ -n "$replaces" ]; then

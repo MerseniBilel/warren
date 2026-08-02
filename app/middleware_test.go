@@ -260,6 +260,24 @@ func (r *recordingTelemetry) Span(ctx context.Context, name string) (context.Con
 	return ctx, func(err error) { r.ended = append(r.ended, err) }
 }
 
+// The propagation half of the port. This fake carries the trace as one
+// header, which is enough to prove the seam is wired without core knowing
+// what a real propagator writes.
+func (r *recordingTelemetry) Inject(ctx context.Context, set func(key, value string)) {
+	if v, ok := ctx.Value(fakeTraceKey{}).(string); ok {
+		set("x-fake-trace", v)
+	}
+}
+
+func (r *recordingTelemetry) Extract(ctx context.Context, get func(key string) string) context.Context {
+	if v := get("x-fake-trace"); v != "" {
+		return context.WithValue(ctx, fakeTraceKey{}, v)
+	}
+	return ctx
+}
+
+type fakeTraceKey struct{}
+
 func (r *recordingTelemetry) Record(name string, _ time.Duration, err error) {
 	r.recorded = append(r.recorded, struct {
 		name string

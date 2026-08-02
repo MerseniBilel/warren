@@ -13,6 +13,7 @@ import (
 	"sync"
 	"syscall"
 
+	"github.com/MerseniBilel/warren/app"
 	"github.com/MerseniBilel/warren/di"
 	"github.com/MerseniBilel/warren/health"
 	"github.com/MerseniBilel/warren/lifecycle"
@@ -30,6 +31,7 @@ type App struct {
 	booted    bool
 	stopping  bool
 	validator validate.Validator
+	telemetry app.Telemetry
 	lc        lifecycle.Lifecycle
 	scopes    map[string]di.Container
 }
@@ -68,6 +70,24 @@ func (a *App) Validator(v validate.Validator) error {
 		return errors.New("warren: Validator after Start — the validator is compiled into routes at boot")
 	}
 	a.validator = v
+	return nil
+}
+
+// Telemetry sets the instrumentation compiled into every route at boot: with
+// one bound, boot step 5 wraps app.Traced and app.Metered around every
+// handler once, and the request path decides nothing.
+//
+// It is the non-DI path — a test, or a main that constructs its own. A
+// service that lists observability.Module needs none of it: the bootstrapper
+// resolves an exported app.Telemetry from the graph and uses that. It must be
+// called before Start.
+func (a *App) Telemetry(t app.Telemetry) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.booted {
+		return errors.New("warren: Telemetry after Start — instrumentation is compiled into routes at boot")
+	}
+	a.telemetry = t
 	return nil
 }
 
@@ -280,10 +300,35 @@ func (a *App) Start(ctx context.Context) error {
 	// step 2. Every registration problem is reported together.
 	a.mu.Lock()
 	validator := a.validator
+	telemetry := a.telemetry
 	a.mu.Unlock()
+	// A service that lists observability.Module exports an app.Telemetry;
+	// resolving it here is what makes "one import instruments every handler"
+	// true without the user decorating anything.
+	//
+	// The scan is over module SCOPES, not the root: a module's providers are
+	// private to it, so an exported app.Telemetry lives in the exporting
+	// module's scope and in those that import it. The first that resolves
+	// wins, and they are all the same instance. Boot-time reflection, which
+	// invariant 7 is explicitly not about.
+	if telemetry == nil {
+		for _, m := range ordered {
+			v, err := resolveDynamic(scopes[m.name], telemetryType)
+			if err != nil {
+				continue
+			}
+			if t, ok := v.(app.Telemetry); ok && t != nil {
+				telemetry = t
+				break
+			}
+		}
+	}
 	var bopts []transport.BuilderOption
 	if validator != nil {
 		bopts = append(bopts, transport.WithValidator(validator))
+	}
+	if telemetry != nil {
+		bopts = append(bopts, transport.WithTelemetry(telemetry))
 	}
 	b := transport.NewBuilder(bopts...)
 	for _, ep := range built {

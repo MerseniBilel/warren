@@ -501,3 +501,31 @@ func attemptsOf(err error) int {
 	}
 	return 1
 }
+
+// InjectTrace writes the trace context on ctx into each message's Headers,
+// allocating a map only for a message that has none. A publisher adapter
+// calls it as its first act, and it is what makes a span survive the trip
+// through a broker into the consumer — the other half of the chain's
+// TraceExtract stage.
+//
+// It is a no-op when no telemetry is bound, so an uninstrumented service
+// pays one nil check per publish.
+//
+// The OUTBOX calls it when the row is WRITTEN, not when it is relayed: the
+// relay runs long after the request's span ended, and a span parented to the
+// relay's own context is a trace nobody can follow back to the request that
+// caused it.
+func InjectTrace(ctx context.Context, msgs []Message) {
+	tel := app.TelemetryFromContext(ctx)
+	if tel == nil {
+		return
+	}
+	for i := range msgs {
+		tel.Inject(ctx, func(k, v string) {
+			if msgs[i].Headers == nil {
+				msgs[i].Headers = map[string]string{}
+			}
+			msgs[i].Headers[k] = v
+		})
+	}
+}

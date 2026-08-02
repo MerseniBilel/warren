@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/MerseniBilel/warren/app"
 	"github.com/MerseniBilel/warren/health"
 	"github.com/MerseniBilel/warren/lifecycle"
 	"github.com/MerseniBilel/warren/transport"
@@ -24,6 +25,7 @@ import (
 // closures, and a lifecycle hook that opens and drains the listener.
 type server struct {
 	cfg  config
+	tel  app.Telemetry
 	mux  *http.ServeMux
 	http *http.Server
 	ln   net.Listener
@@ -37,7 +39,10 @@ type server struct {
 func newServer(cfg config, tbl *transport.Table, lc lifecycle.Lifecycle, reg health.Registry) (*server, error) {
 	tbl.Claim(transport.ProtocolHTTP, ModuleName)
 
-	s := &server{cfg: cfg, mux: http.NewServeMux()}
+	// Off the Table, not out of the container: injecting app.Telemetry would
+	// make it a required dependency, and an application with no telemetry
+	// would fail to resolve it.
+	s := &server{cfg: cfg, tel: tbl.Telemetry(), mux: http.NewServeMux()}
 	if err := s.build(tbl, reg); err != nil {
 		return nil, err
 	}
@@ -156,12 +161,17 @@ func (s *server) build(tbl *transport.Table, reg health.Registry) (err error) {
 // opt out of everything but recover while every other route still pays for
 // exactly one mux dispatch.
 //
-// Order: recover (outermost, not removable) → correlation ID → user
-// middleware in argument order → the handler. User middleware cannot precede
-// correlation-ID seeding or its log lines would have none.
+// Order: recover (outermost, not removable) → correlation ID → trace
+// continuation → user middleware in argument order → the handler. User
+// middleware cannot precede correlation-ID seeding or its log lines would
+// have none, and it follows trace extraction so a middleware's own span is
+// parented to the caller's.
 func (s *server) wrap(h http.Handler) http.Handler {
 	for i := len(s.cfg.middleware) - 1; i >= 0; i-- {
 		h = s.cfg.middleware[i](h)
+	}
+	if s.tel != nil {
+		h = s.telemetry(h)
 	}
 	return s.recoverer(s.correlate(h))
 }

@@ -158,7 +158,11 @@ contract now.
 
 - [x] Core policy ports decided: `RetryPolicy`/`AuthorizationPolicy`/
       `Telemetry` live in `app`, telemetry rides the context
-- [ ] `observability` — OTel wiring *(spec approved)*
+- [x] `observability` — OTel wiring: handlers, HTTP and broker propagation
+      instrumented by one import, composed at BOOT so the request path decides
+      nothing *(implemented; DB spans need one explicit `postgres.Configure`
+      line. 16 third-party modules, confined here by an invariant — a service
+      that does not import it pays nothing)*
 - [ ] `validate` — port in core, implementation in a submodule
 - [x] `health` — check registry, liveness/readiness verdicts, root-scope
       binding *(implemented; the routes land with the transport adapters)*

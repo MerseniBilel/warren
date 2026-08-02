@@ -1595,7 +1595,18 @@ Same `Repository` and `UnitOfWork` ports. Mongo's UoW uses sessions; Redis provi
 
 - **Wraps** OpenTelemetry Go SDK · **Mode** Wrap (wiring, not abstraction)
 
-One import instruments HTTP, gRPC, consumers, DB calls, and handlers. `trace.Tracer` stays directly accessible — this wraps setup, not the API.
+**Amended 2026-08-02, on implementation.** One import instruments handlers, HTTP requests and broker propagation — three of the boundaries automatically, plus gRPC when that adapter ships. **Database query spans need one explicit line**, because the pgx tracer seam is a pgx type and an adapter may not import another adapter (invariant 4):
+
+```go
+postgres.Configure(func(c *pgxpool.Config) error {
+    c.ConnConfig.Tracer = otelpgx.NewTracer()
+    return nil
+})
+```
+
+Handler instrumentation is composed at BOOT — `buildInvoker` wraps `app.Traced` and `app.Metered` around every route once, at step 5 — so the request path decides nothing, and a service with no telemetry bound has byte-identical route closures. `trace.Tracer` stays directly accessible through OTel's own global provider: this wraps setup, not the API, and **no OpenTelemetry type appears in any Warren signature**.
+
+**List `observability.Module` FIRST in `warren.New`.** Declared hooks unwind in reverse module order, so first-listed flushes last — after consumers stop, after the outbox relay, after the pool closes. The spans emitted during teardown are the ones nobody can reproduce.
 
 ```go
 observability.Module(
@@ -1736,7 +1747,7 @@ All generators support `--dry-run` and `--force`.
 | Postgres | `jackc/pgx/v5` | Wrap | no ORM, by design. **Audited 2026-08-02**: v5.10.0, MIT, 14 087 stars, pushed 2026-08-01, not archived. Six modules compiled in — `pgpassfile`, `pgservicefile`, `pgx`, `puddle`, `x/sync`, `x/text` — measured with `go list -deps`, not read off a README. One pgx type in one exported signature: `postgres.Raw` |
 | Migrations | **none — Build** | Build | **`pressly/goose` REJECTED 2026-08-02.** Healthy (MIT, v3.27.3 2026-07-22, 11.3k stars) and only 5 modules as a library import — but once migrating at boot is banned it buys nothing an ordered applier and a version table do not, and against goal 2 a contributor debugging a migration reads 100 lines of ours instead of goose's dialect/locker/provider layering. `postgres.Schema` ships in goose's FILE format, so a project already running goose, atlas or dbmate applies it with one line |
 | Redis | `redis/go-redis/v9` | Wrap | cache + lock |
-| Telemetry | OpenTelemetry Go | Wrap | wiring only |
+| Telemetry | OpenTelemetry Go | Wrap | **Audited 2026-08-02**: v1.44.0 (2026-05-27), Apache-2.0, 6 500 stars, pushed 2026-08-02, not archived. **16 third-party modules compiled in**, including grpc, protobuf and genproto — an order of magnitude above anything else here (core 1, transport/http 0, postgres 6), which is why it is opt-in in its own module and `scripts/invariants.sh` refuses `go.opentelemetry.io` in any other go.mod. OTLP over gRPC only: the HTTP exporter reaches grpc through its own config package and is not lighter. Wiring only — no OTel type in any Warren signature |
 | Auth | `golang-jwt/jwt/v5`, `coreos/go-oidc` | Wrap | |
 | Resilience | `sony/gobreaker`, `cenkalti/backoff/v4` | Wrap | one `Policy` interface |
 | Cron | `robfig/cron/v3` | Wrap | lifecycle-aware |

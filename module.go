@@ -16,6 +16,8 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+
+	"github.com/MerseniBilel/warren/app"
 )
 
 // Module is an inert declaration of one module: its name, its imports, its
@@ -215,6 +217,11 @@ func outputsOf(ctor any) []reflect.Type {
 }
 
 var errType = reflect.TypeFor[error]()
+
+// telemetryType is what the bootstrapper looks for in the root scope before
+// step 5: an exported app.Telemetry means instrumentation is composed into
+// every route.
+var telemetryType = reflect.TypeFor[app.Telemetry]()
 
 // diagnostic carries a rendered multi-line block; the text is the contract,
 // covered by golden files like every other Warren diagnostic.

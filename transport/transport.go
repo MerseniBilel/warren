@@ -200,6 +200,7 @@ type Table struct {
 	events []EventRoute
 	raw    []RawRoute
 	claims map[Protocol]string
+	tel    app.Telemetry
 }
 
 // HTTP returns the registered HTTP routes.
@@ -210,6 +211,16 @@ func (t *Table) GRPC() []GRPCRoute { return t.grpc }
 
 // Events returns the registered subscriptions.
 func (t *Table) Events() []EventRoute { return t.events }
+
+// Telemetry returns the instrumentation boot bound, or nil.
+//
+// It travels on the Table rather than through the container because an
+// adapter must be constructible in an application that has no telemetry at
+// all: injecting app.Telemetry would make it a REQUIRED dependency and every
+// uninstrumented service would fail to resolve it. The Table is already the
+// boot-to-adapter channel — provided empty at step 2, filled at step 5, read
+// by adapters at step 5b — so it carries this too.
+func (t *Table) Telemetry() app.Telemetry { return t.tel }
 
 // Raw returns the escape-hatch registrations, in registration order. An
 // adapter serves the entries whose Protocol is its own and type-asserts each
@@ -258,12 +269,25 @@ type BuilderOption struct{ apply func(*builderConfig) }
 
 type builderConfig struct {
 	validator validate.Validator
+	telemetry app.Telemetry
 }
 
 // WithValidator sets the validator whose rules are compiled into every route
 // closure. The default is validate.Required().
 func WithValidator(v validate.Validator) BuilderOption {
 	return BuilderOption{apply: func(c *builderConfig) { c.validator = v }}
+}
+
+// WithTelemetry binds the instrumentation every route is composed with at
+// boot: app.Traced and app.Metered wrap each handler ONCE, here, and the
+// request path consults nothing and decides nothing.
+//
+// This is what makes warren.md §7.1's "one import instruments … handlers"
+// true without a user decorating anything. A nil Telemetry composes nothing,
+// so an uninstrumented service's route closures are byte-identical to what
+// they were before this option existed.
+func WithTelemetry(t app.Telemetry) BuilderOption {
+	return BuilderOption{apply: func(c *builderConfig) { c.telemetry = t }}
 }
 
 // Builder is the accumulator boot step 5 drives: it hands each controller a
@@ -302,6 +326,7 @@ func (b *Builder) Fill(t *Table) error {
 		t.claims = map[Protocol]string{}
 	}
 	t.http, t.grpc, t.events, t.raw = nil, nil, nil, nil
+	t.tel = b.cfg.telemetry
 	seenHTTP := map[string]bool{}
 	seenGRPC := map[string]bool{}
 	seenEvent := map[string]bool{}
@@ -515,7 +540,7 @@ func OnEvent[Req, Res any](r Registrar, topic string, h app.Handler[Req, Res], o
 		req:        reflect.TypeFor[Req](),
 		res:        reflect.TypeFor[Res](),
 		bindHandler: func(c Codec) broker.MessageHandler {
-			invoke := buildInvoker(c, h, rule, setters, name)
+			invoke := buildInvoker(c, h, rule, setters, name, reg.b.cfg.telemetry)
 			return func(ctx context.Context, msg broker.Message) error {
 				_, err := invoke(ctx, msg.Payload)
 				return err
@@ -572,7 +597,7 @@ func register[Req, Res any](r Registrar, p Protocol, verb, pattern string, h app
 		req:      reflect.TypeFor[Req](),
 		res:      reflect.TypeFor[Res](),
 		bindInvoker: func(c Codec) Invoker {
-			return buildInvoker(c, h, rule, setters, name)
+			return buildInvoker(c, h, rule, setters, name, reg.b.cfg.telemetry)
 		},
 	})
 }
@@ -580,9 +605,18 @@ func register[Req, Res any](r Registrar, p Protocol, verb, pattern string, h app
 // buildInvoker is the erasure: everything that needs Req and Res happens
 // here, at boot, inside a generic function. What escapes is a closure over
 // bytes.
-func buildInvoker[Req, Res any](c Codec, h app.Handler[Req, Res], rule func(*Req) error, setters []setter, name string) Invoker {
-	// Boxed once, here, rather than on every request — see StampHandlerName.
-	stamp := app.StampHandlerName(name)
+func buildInvoker[Req, Res any](c Codec, h app.Handler[Req, Res], rule func(*Req) error, setters []setter, name string, tel app.Telemetry) Invoker {
+	// Instrumentation is composed HERE, at boot, once per route: this is the
+	// single place every typed route and every event route passes through,
+	// and it is generic, so Traced and Metered are instantiable. With no
+	// Telemetry bound nothing is composed and the closure is what it always
+	// was.
+	if app.InstrumentsHandlers(tel) {
+		h = app.Traced[Req, Res]()(app.Metered[Req, Res]()(h))
+	}
+	// Boxed once, here, rather than on every request. One key carries the
+	// handler name and the Telemetry together — see app.Stamp.
+	stamp := app.Stamp(name, tel)
 	return func(ctx context.Context, raw []byte) ([]byte, error) {
 		var req Req
 		if len(raw) > 0 {

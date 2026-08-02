@@ -101,3 +101,18 @@ func randomPrefix() string {
 func nextCorrelationID() string {
 	return idPrefix + strconv.FormatUint(idCounter.Add(1), 36)
 }
+
+// telemetry continues the CALLER's trace: it reads the W3C traceparent off
+// the request through the core seam and seeds the context, so the handler's
+// span is a child of the caller's rather than the root of an orphan trace.
+//
+// It is composed into the edge ring only when a Telemetry is bound at boot.
+// An uninstrumented service has no such stage and pays nothing — not a nil
+// check, not a closure.
+func (s *server) telemetry(h http.Handler) http.Handler {
+	tel := s.tel
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ctx := tel.Extract(r.Context(), r.Header.Get)
+		h.ServeHTTP(w, r.WithContext(ctx))
+	})
+}

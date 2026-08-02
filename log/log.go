@@ -70,3 +70,65 @@ func CorrelationID(ctx context.Context) string {
 func WithCorrelationID(ctx context.Context, id string) context.Context {
 	return context.WithValue(ctx, correlationKey{}, id)
 }
+
+// ContextAttrs derives log attributes from a context at the moment a record
+// is emitted. It is the seam an adapter uses to put values core cannot
+// compute — trace IDs, a tenant — on every record without core importing
+// that adapter's SDK.
+type ContextAttrs func(ctx context.Context, add func(slog.Attr))
+
+// Handler wraps h so that every record carries the correlation ID on its
+// context, plus whatever extra derives.
+//
+// The resolution happens in Handle, which is where slog is designed to do it
+// and is the whole point: a request that logs nothing pays nothing, and a
+// request that logs ten lines pays no per-request logger derivation.
+// Deriving one at the edge instead — log.With(ctx, "correlation_id", id) —
+// costs 8 allocations on EVERY request, measured, which is more than a
+// transport's entire decode-validate-handle-encode path. That is why
+// warren/transport/http seeds the ID and does not build a logger, and this
+// is the other half of that decision.
+//
+// Install it once, in main:
+//
+//	slog.SetDefault(slog.New(log.Handler(
+//	    slog.NewJSONHandler(os.Stdout, nil), observability.LogAttrs())))
+//
+// warren/observability does this for you unless you tell it not to.
+func Handler(h slog.Handler, extra ...ContextAttrs) slog.Handler {
+	if h == nil {
+		panic("warren/log: Handler wraps a nil slog.Handler")
+	}
+	return &contextHandler{inner: h, extra: extra}
+}
+
+type contextHandler struct {
+	inner slog.Handler
+	extra []ContextAttrs
+}
+
+func (c *contextHandler) Enabled(ctx context.Context, l slog.Level) bool {
+	return c.inner.Enabled(ctx, l)
+}
+
+func (c *contextHandler) Handle(ctx context.Context, r slog.Record) error {
+	// Below the threshold nothing reaches here, so the extractors never run
+	// for a record that would be dropped.
+	if id := CorrelationID(ctx); id != "" {
+		r.AddAttrs(slog.String("correlation_id", id))
+	}
+	for _, fn := range c.extra {
+		if fn != nil {
+			fn(ctx, func(a slog.Attr) { r.AddAttrs(a) })
+		}
+	}
+	return c.inner.Handle(ctx, r)
+}
+
+func (c *contextHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
+	return &contextHandler{inner: c.inner.WithAttrs(attrs), extra: c.extra}
+}
+
+func (c *contextHandler) WithGroup(name string) slog.Handler {
+	return &contextHandler{inner: c.inner.WithGroup(name), extra: c.extra}
+}

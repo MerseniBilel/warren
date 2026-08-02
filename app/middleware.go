@@ -54,6 +54,45 @@ type Telemetry interface {
 	// error — nil on success. Implementations key error counters by the
 	// warren/errors code.
 	Record(name string, d time.Duration, err error)
+
+	// Inject writes the trace context on ctx through set, one key/value pair
+	// at a time.
+	//
+	// The carrier is a FUNCTION rather than a map so an HTTP header, a
+	// broker.Message.Headers and a gRPC metadata block are all reachable
+	// without an intermediate allocation — and, more importantly, so that
+	// core never names a header key. Which keys carry trace context is the
+	// W3C spec's business and the implementation's; the kernel's business is
+	// only that they travel.
+	Inject(ctx context.Context, set func(key, value string))
+
+	// Extract returns a context continuing the trace the key/value pairs get
+	// answers describe, or ctx unchanged when there is none. get returns ""
+	// for an absent key.
+	Extract(ctx context.Context, get func(key string) string) context.Context
+}
+
+// HandlerInstrumentation is the optional interface a Telemetry implements to
+// decline boot-time composition of Traced and Metered around every route.
+//
+// It is optional because the common case has no opinion: a Telemetry that
+// does not implement it is instrumented. An implementation returning false
+// still carries trace context — the transport edge and the broker still use
+// Inject and Extract — it just leaves handler middleware to the user.
+type HandlerInstrumentation interface {
+	InstrumentHandlers() bool
+}
+
+// InstrumentsHandlers reports whether t wants boot to compose Traced and
+// Metered around each route. A nil t does not.
+func InstrumentsHandlers(t Telemetry) bool {
+	if t == nil || isTypedNil(t) {
+		return false
+	}
+	if h, ok := t.(HandlerInstrumentation); ok {
+		return h.InstrumentHandlers()
+	}
+	return true
 }
 
 type telemetryKey struct{}
@@ -89,6 +128,12 @@ func isTypedNil(t Telemetry) bool {
 
 // TelemetryFromContext returns the Telemetry carried by ctx, or nil.
 func TelemetryFromContext(ctx context.Context) Telemetry {
+	// The fused stamp first: an instrumented route carries both values under
+	// one key, and WithTelemetry's own key is the seeding path an edge or a
+	// test uses.
+	if s, ok := ctx.Value(stampKey{}).(*stamp); ok {
+		return s.tel
+	}
 	t, _ := ctx.Value(telemetryKey{}).(Telemetry)
 	return t
 }
@@ -121,8 +166,37 @@ func StampHandlerName(name string) func(context.Context) context.Context {
 
 // HandlerName returns the qualified handler name carried by ctx, or "".
 func HandlerName(ctx context.Context) string {
+	if s, ok := ctx.Value(stampKey{}).(*stamp); ok {
+		return s.name
+	}
 	name, _ := ctx.Value(handlerNameKey{}).(string)
 	return name
+}
+
+type stampKey struct{}
+
+// stamp is the boot-fixed pair every instrumented route carries: the
+// handler's qualified name and the Telemetry to report it to.
+type stamp struct {
+	name string
+	tel  Telemetry
+}
+
+// Stamp returns the per-request context stamp for one route: the handler's
+// qualified name and the Telemetry, both fixed at boot, stored under ONE key.
+//
+// One key, not two, because both values are known at boot and an instrumented
+// request would otherwise pay two context.WithValue allocations to carry a
+// pair that never varies. A nil t stamps the name alone, through
+// StampHandlerName, so an uninstrumented service's request path is unchanged.
+func Stamp(name string, t Telemetry) func(context.Context) context.Context {
+	if t == nil || isTypedNil(t) {
+		return StampHandlerName(name)
+	}
+	boxed := &stamp{name: name, tel: t}
+	return func(ctx context.Context) context.Context {
+		return context.WithValue(ctx, stampKey{}, boxed)
+	}
 }
 
 // Retrying re-invokes the handler when the error's OUTERMOST code is

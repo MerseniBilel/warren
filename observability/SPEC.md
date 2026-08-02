@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | **Approved (2026-08-01)** — `Module` and the three options are binding; condition: the `app.Traced()`/`app.Metered()` mechanism (Open question 1, the same question as app's carve-out) settled before handler instrumentation is built |
+| **Status** | **APPROVED AND IMPLEMENTED (2026-08-02)** — the approval condition is met: `app.Telemetry` shipped as the core seam, so open question 1 is answered by code. The architect round ruled on questions 2–8, the dependency audit is done, and the module is built and tested. |
 | **Source** | [warren.md §7.1](../warren.md) |
 | **Module** | own module (`github.com/MerseniBilel/warren/observability`) |
 | **Mode** | Wrap (wiring, not abstraction) |
@@ -62,12 +62,30 @@ comparison: §7.1 wants one import that instruments five boundaries and a
 propagation format that survives a broker hop, and §9 classes it Wrap with the
 note "wiring only". No alternative is evaluated anywhere in warren.md.
 
-**Outstanding.** warren.md records **no observation date, no archived check, no
-last-release date, no transitive footprint, and no licence check** for the OTel
-Go SDK — nor for the exporter §1.7 implies. AGENT.md § Adding a dependency makes
-that audit mandatory *before* the dependency lands in a `go.mod`, and the same
-section notes two widely-recommended packages that turned out to be archived. The
-audit must be run, recorded here, and added to the §9 ledger before any code.
+**Done, 2026-08-02.**
+
+| Package | Version | Licence | Stars | Last push | Archived |
+|---|---|---|---|---|---|
+| `open-telemetry/opentelemetry-go` | v1.44.0 (2026-05-27) | Apache-2.0 | 6 500 | 2026-08-02 | no |
+
+**Transitive footprint: 16 third-party modules**, measured with `go list -deps`
+on this module as built — not read off a README. Among them
+`google.golang.org/grpc`, `google.golang.org/protobuf`,
+`google.golang.org/genproto` and `grpc-ecosystem/grpc-gateway`.
+
+**There is no lighter exporter.** OTLP-over-HTTP was measured too, on the
+assumption it would avoid gRPC, and it does not: `otlptracehttp` reaches
+`google.golang.org/grpc` through its own `otlpconfig` package, compiling 65
+gRPC packages either way. Both exporters cost the same, so shipping two would
+buy a second code path to test for nothing. **OTLP over gRPC ships; the HTTP
+exporter is not offered.**
+
+For scale, in this repository: core costs 1 third-party module (`dig`),
+`transport/http` 0, `persistence/postgres` 6, and this module 16. That gap is
+why it is opt-in, in its own module, and why `scripts/invariants.sh` now
+refuses `go.opentelemetry.io` in any other `go.mod` — a service that does not
+import it must pay nothing, and one convenient import elsewhere would put gRPC
+in every user's `go.sum`.
 
 One placement note that is already settled: §1.7's dependency budget puts "OTel
 SDK + exporter" in the **user's** direct dependency list for the
@@ -93,27 +111,38 @@ visible in the calls: a string name, a string endpoint, a float ratio. **The
 option type's name is not fixed by warren.md**, nor is whether these are the only
 options.
 
-Provisional, to be approved before implementation:
+**As implemented** (the full surface is in the package doc comments; this is
+the shape):
 
 ```go
-// Package observability wires OpenTelemetry into a Warren application: HTTP,
-// gRPC, consumers, DB calls, and handlers are instrumented by importing this
-// module. It wraps setup, not the API — trace.Tracer stays directly accessible.
-package observability
-
-// Module returns a Warren module that installs tracing and metrics across
-// every instrumented boundary of the application.
 func Module(opts ...Option) warren.Module
 
-// ServiceName sets the service name reported on every span and metric.
-func ServiceName(name string) Option
+func ServiceName(name string) Option        // required when exporting
+func ServiceVersion(version string) Option
+func ResourceAttr(key, value string) Option
+func OTLPEndpoint(addr string) Option       // "host:port"; empty disables export
+func Insecure() Option
+func OTLPHeader(key, value string) Option
+func SampleRatio(ratio float64) Option      // default 1; parent-based
+func MetricInterval(d time.Duration) Option // default 60s
+func ExportTimeout(d time.Duration) Option  // default 10s
 
-// OTLPEndpoint sets the OTLP collector endpoint telemetry is exported to.
-func OTLPEndpoint(endpoint string) Option
+func WithoutMetrics() Option
+func WithoutHandlerInstrumentation() Option
+func WithoutLogCorrelation() Option
 
-// SampleRatio sets the trace sampling ratio, between 0 and 1.
-func SampleRatio(ratio float64) Option
+func LogAttrs() log.ContextAttrs
 ```
+
+Twelve options, not three. Three cannot configure an OTLP exporter: auth
+headers, TLS and the metric interval are all required in practice. warren.md
+§7.1 is amended in the same change.
+
+**No OpenTelemetry type appears in any signature.** `LogAttrs` returns
+`log.ContextAttrs`, a core function type. Open question 3 is ruled that way:
+`trace.Tracer` stays accessible through OTel's own global provider —
+`otel.Tracer("billing").Start(ctx, …)` — so a user holds the SDK by choice,
+one call site at a time, and invariant 3 needs no exemption.
 
 ## Behaviour
 
@@ -127,13 +156,19 @@ func SampleRatio(ratio float64) Option
 - **Edge ring for transports.** Transport-shaped instrumentation is the
   adapter's: §4.2 shows `grpc.Tracing()` registered as an interceptor, which is
   an edge-ring concern (§1.4).
-- **The `app.Traced()` / `app.Metered()` mechanism is not specified.** `app` is a
-  contract package in the core module: stdlib-and-dig only (invariant 1), zero
-  implementations (invariant 5). A span and a histogram are implementations, and
-  they need the OTel SDK, which core may never import. So `app.Traced()` cannot
-  be made real inside `app` — something in this module must supply it, and
-  **warren.md never says how**. This is the single largest gap in §7.1 and is
-  raised in Open questions.
+- **`app.Traced()` and `app.Metered()` become real through `app.Telemetry`**,
+  the core-ring seam that shipped with `app`: a two-method port core declares
+  and this module implements. Core holds the interface, never an
+  implementation, so invariants 1 and 5 both hold. Answered — open question 1
+  is closed.
+- **Instrumentation is automatic, composed at BOOT.** `transport.WithTelemetry`
+  binds it, and `buildInvoker` — the one place every typed route and every
+  event route passes through, and generic, so `Traced[Req,Res]` is
+  instantiable — wraps each handler once at step 5. The request path decides
+  nothing and consults nothing, which is invariant 7 exactly. With no
+  telemetry bound nothing is composed and the closure is byte-identical to a
+  service that never heard of this package; `transport/http`'s allocation test
+  still measures 17. Opt out with `WithoutHandlerInstrumentation()`.
 - **Trace context crosses the broker.** §3.4: `Message.Headers` is
   `map[string]string` and "trace context propagates here". §1.5 and §3.4 place
   `TraceExtract` immediately after `Recover` in the consumer chain. The injection
@@ -178,39 +213,96 @@ func SampleRatio(ratio float64) Option
       change that implements them.
 - [ ] `make ci` passes (once the Makefile exists — AGENT.md § Repository state).
 
-## Open questions
+## Rulings — architect round, 2026-08-02
 
-1. **How do `app.Traced()` and `app.Metered()` become real?** They are declared
-   in `app` (§3.2), a core contract package that may not import OTel (invariant
-   1) and may hold no implementations (invariant 5). Is `app.Traced()` a
-   constructor over a core-defined port that this module provides? Is the
-   middleware actually exported from `observability` and the §3.2 table
-   aspirational? warren.md does not say, and nothing can be built until it does.
-2. **How do `trace_id` and `span_id` reach the logger?** §2.5 says they are
-   "already attached" to the context-carried logger. `log` is core and cannot
-   import OTel; this module is an adapter. Which side owns the seam?
-3. **What does "`trace.Tracer` stays directly accessible" mean concretely?** That
-   users reach it through OTel's own API (a global provider), or that Warren
-   exports something returning a `trace.Tracer`? The second puts a third-party
-   type in a Warren exported signature, which invariant 3 forbids for driver
-   types. Which is intended, and is OTel exempt from invariant 3 by virtue of
-   being wiring-mode?
-4. **Does this module register lifecycle hooks, and where in the §2.3 shutdown
-   order does the exporter flush?** After consumers stop (step 3) and before
-   connections close (step 5) would keep the last spans, but warren.md's shutdown
-   list does not mention telemetry at all.
-5. **Metrics and logs, or traces only?** §3.2's `app.Metered()` implies a meter
-   provider, but §7.1's surface names only `OTLPEndpoint` and `SampleRatio`
-   (a trace concern). Is there one endpoint for both signals? Are OTel logs in
-   scope at all, given §2.5 owns logging?
-6. **Which propagator and which header keys?** §3.4 says trace context lives in
-   `Message.Headers` but fixes no format. W3C `traceparent`? Is the choice
-   configurable, and who owns the key names — this module or `broker`?
-7. **Is instrumentation opt-out?** If a service imports this module, are
-   `app.Traced()` and `app.Metered()` applied to every handler automatically, or
-   does the user still decorate handlers explicitly? §7.1's "one import
-   instruments … handlers" suggests automatic; §3.2 presents them as middleware
-   one chains.
-8. **Which exporter ships?** §1.7 says "OTel SDK + exporter" enters the user's
-   `go.mod`. OTLP over gRPC and OTLP over HTTP are different modules with
-   different transitive trees.
+**2. `trace_id` and `span_id` reach the logger through a `slog.Handler`, not a
+derived logger.** Core gains `log.ContextAttrs` (a function type) and
+`log.Handler(h, extra...)`, which resolves context fields in `Handle` — where
+`slog` is designed to do it. This module supplies `LogAttrs()`, and `Module`
+installs the wrapper unless told not to.
+
+It also closes `transport/http/SPEC.md` open question 6 and vindicates that
+adapter's refusal to derive a per-request logger: `log.With` costs **8
+allocations on every request**, measured, whether or not the request logs
+anything. Resolving at emit time means a request that logs nothing pays
+nothing, and one that logs ten lines pays no derivation either.
+
+**3. Through OTel's own global API.** See Public API above.
+
+**4. The exporter flushes LAST.** `Module` registers declared hooks, which
+unwind in reverse module order — so listing it FIRST in `warren.New` makes it
+stop last: after consumers, after the outbox relay, after the pool closes. The
+spec's earlier guess (between consumers and connections) is strictly worse,
+because it would drop the spans emitted *during* teardown, which are exactly
+the ones nobody can reproduce. `ExportTimeout` bounds the flush and a timeout
+logs rather than failing shutdown: a saturated collector must not hold a pod
+in Terminating.
+
+**5. Traces and metrics; OTel logs are out.** `app.Metered` ships in core
+today and would be permanently inert with traces alone. One `OTLPEndpoint`
+serves both signals, which is what every collector expects.
+`WithoutMetrics()` opts out. Logs stay out because §2.5 owns logging and
+ruling 2 already puts the trace ID on every record — which is what a
+log-to-trace jump actually needs.
+
+**6. W3C `traceparent`/`tracestate` plus `baggage`, not configurable.** The
+key names are the W3C spec's, not Warren's, and every collector and hosted
+backend already speaks them. `broker.Message.Headers` stays an opaque
+`map[string]string` and `broker` never learns a key name — which is what its
+field comment already promised. B3 and Jaeger are deferred; a shop that needs
+them has a collector that translates.
+
+**7. Automatic and opt-out.** See Behaviour above.
+
+**8. OTLP over gRPC, hard-wired.** See the audit: the HTTP exporter is not
+lighter. Taking an exporter from the user was rejected — the parameter type
+would be `sdktrace.SpanExporter`, the invariant 3 breach ruling 3 refused.
+`OTLPEndpoint("")` is the escape hatch for tests and local runs, and it costs
+no API.
+
+## Divergences — what the implementation changed
+
+**1. `app.Telemetry` grew from two methods to four.** `Inject` and `Extract`
+were added, because propagation cannot be expressed without a core-shaped
+seam: the adapters carry trace context, and an adapter may not import this
+module (invariant 4). The carrier is a **function**, not a map, so an HTTP
+header, a `broker.Message.Headers` and gRPC metadata are all reachable with no
+intermediate allocation — and so core never names a header key.
+
+**2. `app.Stamp(name, tel)` fuses two context values into one.** Handler name
+and telemetry are both boot-fixed, so carrying them separately would cost an
+instrumented request two `context.WithValue` allocations for a pair that never
+varies. `StampHandlerName` remains for the telemetry-absent path.
+
+**3. Telemetry travels on `transport.Table`, not through the container.**
+Injecting `app.Telemetry` into an adapter's constructor would make it a
+REQUIRED dependency, and every uninstrumented service would fail to resolve
+it. The Table is already the boot-to-adapter channel — provided empty at step
+2, filled at step 5, read by adapters at step 5b — so it carries this too.
+Found by building it the other way first and watching a telemetry-free app
+fail to boot.
+
+**4. `postgres.Configure(func(*pgxpool.Config) error) Option` is new, and
+`postgres.Raw`'s doc comment was wrong.** `Raw` runs at `OnStart`, *after*
+`pgxpool.NewWithConfig`, so it cannot install a query tracer —
+`ConnConfig.Tracer` is read at construction. The comment said it could.
+`Configure` runs before the pool exists, which is the only moment that seam is
+open.
+
+**5. Database spans need one explicit line**, so warren.md §7.1's "one import
+instruments HTTP, gRPC, consumers, DB calls, and handlers" is amended: it is
+four of five automatically, and the fifth is one `postgres.Configure` call in
+`main`. The pgx tracer seam is a pgx type and this module may not import that
+adapter; the alternative would break invariant 4.
+
+**6. `broker.InjectTrace(ctx, msgs)` is new** — the publish side, which
+nothing implemented. It is a no-op when no telemetry is bound. The outbox must
+call it when the row is WRITTEN, not when it is relayed: the relay runs long
+after the request's span ended, and a span parented to the relay's own context
+is a trace nobody can follow back to the request that caused it.
+
+**7. `scripts/invariants.sh` refuses `go.opentelemetry.io` in any `go.mod` but
+this one.** With 16 modules behind it, one convenient import elsewhere would
+put gRPC and protobuf in every user's `go.sum`.
+
+## Open questions
