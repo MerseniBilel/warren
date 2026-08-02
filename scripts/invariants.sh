@@ -24,6 +24,25 @@ if [ -n "$offenders" ]; then
 	fail=1
 fi
 
+# Ring direction — the root warren package is the kernel's composition root
+# and may import the contracts ring (it drives boot step 5). No OTHER kernel
+# package may: a kernel package that knows what a route is has collapsed the
+# ring, and the composition-root carve-out exists to be exactly one package
+# wide. The kernel is §1.1's list, minus the root package itself. Import
+# lines only — a doc comment naming an adapter is not an import.
+for pkg in di lifecycle config log errors validate health; do
+	[ -d "$pkg" ] || continue
+	leaks=$(grep -rlnE --include='*.go' \
+		'^[[:space:]]*([A-Za-z_][A-Za-z0-9_]* )?"github.com/MerseniBilel/warren/(transport|persistence|broker|app)("|/)' \
+		"$pkg" | grep -v '_test\.go$' || true)
+	if [ -n "$leaks" ]; then
+		echo "ring direction: kernel package $pkg imports the contracts ring:"
+		echo "$leaks"
+		echo "  Only the root warren package may — it is the composition root."
+		fail=1
+	fi
+done
+
 # Invariant 8 — no committed replace directive, in any module.
 replaces=$(find . -name go.mod -not -path './.git/*' -exec grep -l '^replace' {} + 2>/dev/null || true)
 if [ -n "$replaces" ]; then

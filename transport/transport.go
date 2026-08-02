@@ -105,8 +105,9 @@ type routeConfig struct {
 	name   string
 }
 
-// Status sets the success status an HTTP adapter writes. The default is 201
-// for Post and 200 for every other verb.
+// Status sets the success status an HTTP adapter writes. The defaults are 201
+// for Post, 204 for Delete, and 200 for every other verb. It is ignored on the
+// error path, where the code's own row in the error table decides.
 func Status(code int) RouteOption {
 	return RouteOption{apply: func(c *routeConfig) { c.status = code }}
 }
@@ -157,6 +158,16 @@ type EventRoute struct {
 	Bind    func(Codec) broker.MessageHandler
 }
 
+// RawRoute is one escape-hatch registration: a protocol-native handler for
+// what the typed byte-in/byte-out port deliberately does not model.
+type RawRoute struct {
+	Protocol Protocol
+	Pattern  string // the adapter's own syntax — "POST /uploads" for net/http
+	Name     string // "<module>.<handler>"
+	Guards   []app.AuthorizationPolicy
+	Handler  any // opaque to core; the adapter type-asserts it
+}
+
 // Protocol names one of the three exposures.
 type Protocol uint8
 
@@ -187,6 +198,7 @@ type Table struct {
 	http   []HTTPRoute
 	grpc   []GRPCRoute
 	events []EventRoute
+	raw    []RawRoute
 	claims map[Protocol]string
 }
 
@@ -198,6 +210,12 @@ func (t *Table) GRPC() []GRPCRoute { return t.grpc }
 
 // Events returns the registered subscriptions.
 func (t *Table) Events() []EventRoute { return t.events }
+
+// Raw returns the escape-hatch registrations, in registration order. An
+// adapter serves the entries whose Protocol is its own and type-asserts each
+// Handler, failing the boot — naming the route and the concrete type — when
+// the assertion fails.
+func (t *Table) Raw() []RawRoute { return t.raw }
 
 // Claim records that an adapter is serving a protocol.
 func (t *Table) Claim(p Protocol, by string) {
@@ -211,15 +229,20 @@ func (t *Table) Claim(p Protocol, by string) {
 // three gRPC methods in an application with no gRPC server is detectable at
 // boot, so it fails at boot.
 func (t *Table) Unserved() error {
+	// A raw route nobody serves 404s exactly like a typed one, so it counts.
+	rawFor := map[Protocol]int{}
+	for _, r := range t.raw {
+		rawFor[r.Protocol]++
+	}
 	var missing []string
-	if len(t.http) > 0 && t.claims[ProtocolHTTP] == "" {
-		missing = append(missing, fmt.Sprintf("%d HTTP route(s) — add http.Server(...) to warren.New", len(t.http)))
+	if n := len(t.http) + rawFor[ProtocolHTTP]; n > 0 && t.claims[ProtocolHTTP] == "" {
+		missing = append(missing, fmt.Sprintf("%d HTTP route(s) — add http.Server(...) to warren.New", n))
 	}
-	if len(t.grpc) > 0 && t.claims[ProtocolGRPC] == "" {
-		missing = append(missing, fmt.Sprintf("%d gRPC method(s) — add grpc.Server(...) to warren.New", len(t.grpc)))
+	if n := len(t.grpc) + rawFor[ProtocolGRPC]; n > 0 && t.claims[ProtocolGRPC] == "" {
+		missing = append(missing, fmt.Sprintf("%d gRPC method(s) — add grpc.Server(...) to warren.New", n))
 	}
-	if len(t.events) > 0 && t.claims[ProtocolEvent] == "" {
-		missing = append(missing, fmt.Sprintf("%d event subscription(s) — add a broker module to warren.New", len(t.events)))
+	if n := len(t.events) + rawFor[ProtocolEvent]; n > 0 && t.claims[ProtocolEvent] == "" {
+		missing = append(missing, fmt.Sprintf("%d event subscription(s) — add a broker module to warren.New", n))
 	}
 	if len(missing) == 0 {
 		return nil
@@ -263,15 +286,41 @@ func NewBuilder(opts ...BuilderOption) *Builder {
 // For returns the Registrar passed to one module's controllers.
 func (b *Builder) For(module string) Registrar { return &registrar{b: b, module: module} }
 
-// Table freezes the registrations. Every registration problem is reported
-// together, so one boot names them all.
+// Table freezes the registrations into a new Table.
 func (b *Builder) Table() (*Table, error) {
-	t := &Table{claims: map[Protocol]string{}}
+	t := &Table{}
+	return t, b.Fill(t)
+}
+
+// Fill freezes the accumulated registrations into t — the Table the
+// bootstrapper provided in the root scope at boot step 2, before the graph was
+// validated, so that an adapter could inject it. Any claim already recorded on
+// t survives. Every registration problem is reported together, so one boot
+// names them all.
+func (b *Builder) Fill(t *Table) error {
+	if t.claims == nil {
+		t.claims = map[Protocol]string{}
+	}
+	t.http, t.grpc, t.events, t.raw = nil, nil, nil, nil
 	seenHTTP := map[string]bool{}
 	seenGRPC := map[string]bool{}
 	seenEvent := map[string]bool{}
+	seenRaw := map[string]bool{}
 
 	for _, e := range b.entries {
+		if e.rawHandler != nil {
+			key := e.protocol.String() + " " + e.pattern
+			if seenRaw[key] {
+				b.errs = append(b.errs, errDuplicate(key))
+				continue
+			}
+			seenRaw[key] = true
+			t.raw = append(t.raw, RawRoute{
+				Protocol: e.protocol, Pattern: e.pattern, Name: e.name,
+				Guards: e.guards, Handler: e.rawHandler,
+			})
+			continue
+		}
 		switch e.protocol {
 		case ProtocolHTTP:
 			key := e.verb + " " + e.pattern
@@ -308,12 +357,13 @@ func (b *Builder) Table() (*Table, error) {
 		}
 	}
 	if len(b.errs) > 0 {
-		return nil, errRegistration(b.errs)
+		return errRegistration(b.errs)
 	}
-	return t, nil
+	return nil
 }
 
-// entry is one registration, protocol-tagged and already type-erased.
+// entry is one registration, protocol-tagged and already type-erased. A raw
+// entry carries rawHandler and nothing else the typed path needs.
 type entry struct {
 	protocol    Protocol
 	verb        string
@@ -325,6 +375,7 @@ type entry struct {
 	req, res    reflect.Type
 	bindInvoker func(Codec) Invoker
 	bindHandler func(Codec) broker.MessageHandler
+	rawHandler  any
 }
 
 type registrar struct {
@@ -360,6 +411,63 @@ func Patch[Req, Res any](r Registrar, pattern string, h app.Handler[Req, Res], o
 // Delete registers an HTTP DELETE route.
 func Delete[Req, Res any](r Registrar, pattern string, h app.Handler[Req, Res], opts ...RouteOption) {
 	register(r, ProtocolHTTP, "DELETE", pattern, h, 204, opts...)
+}
+
+// Raw registers a protocol-native handler — the escape hatch for what the
+// typed byte-in/byte-out port deliberately does not model: multipart upload,
+// file download, SSE, WebSocket upgrade, NDJSON export.
+//
+// h is opaque to core: the kernel and the contracts ring never import
+// net/http, so the adapter serving p type-asserts it (warren/transport/http
+// asserts http.Handler) and fails the boot, naming the route and the concrete
+// type, when the assertion fails. It travels through the sealed Registrar so
+// that the handler is built by the MODULE's own container, with the module's
+// own private providers — which is the whole reason it is not an adapter
+// option.
+//
+// A raw route gets the edge ring, its Guard policies, and the drain. It gets
+// no decode, no parameter binding, no validation, no encode, no Status
+// default, and no body limit: the handler owns all of it.
+func Raw(r Registrar, p Protocol, pattern string, h any, opts ...RouteOption) {
+	reg, ok := r.(*registrar)
+	if !ok {
+		panic("transport: Raw with a foreign Registrar — the interface is sealed")
+	}
+	if h == nil {
+		panic("transport: Raw registered a nil handler for " + pattern)
+	}
+	if pattern == "" {
+		reg.fail(errEmptyPattern("Raw"))
+		return
+	}
+	cfg := routeConfig{}
+	for _, opt := range opts {
+		opt.apply(&cfg)
+	}
+	name := cfg.name
+	if name == "" {
+		name = reg.moduleName() + "." + rawName(h)
+	}
+	reg.record(entry{
+		protocol:   p,
+		pattern:    pattern,
+		name:       name,
+		guards:     cfg.guards,
+		rawHandler: h,
+	})
+}
+
+// rawName is the handler's own type name — the raw route has no request type
+// to fall back on, and no app.Handler to read a method value from.
+func rawName(h any) string {
+	t := reflect.TypeOf(h)
+	for t != nil && t.Kind() == reflect.Pointer {
+		t = t.Elem()
+	}
+	if t != nil && t.Name() != "" {
+		return t.Name()
+	}
+	return "raw"
 }
 
 // Method registers a gRPC method, named "package.Service/Method".

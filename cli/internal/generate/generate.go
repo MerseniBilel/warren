@@ -221,7 +221,16 @@ func Consumer(opts Options) (string, error) {
 				path: base + "/module.go",
 				what: "consume " + data["Topic"],
 				fn: func(src []byte) ([]byte, error) {
-					return astedit.AddArgument(src, "warren.Consumers", "new"+opts.Name+"Subscription")
+					// Providers plus Eager, not Consumers: the generated
+					// subscription wires its own pipeline and lifecycle hook
+					// rather than registering through transport.OnEvent, so
+					// it is not a transport.Controller. Eager is what builds
+					// a type at boot that nothing else depends on.
+					src, err := astedit.AddArgument(src, "warren.Providers", "new"+opts.Name+"Subscription")
+					if err != nil {
+						return nil, err
+					}
+					return astedit.AddArgument(src, "warren.NewModule", "warren.Eager[*"+data["Lower"]+"Subscription]()")
 				},
 			},
 		},

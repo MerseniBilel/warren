@@ -16,6 +16,8 @@ import (
 	"github.com/MerseniBilel/warren/di"
 	"github.com/MerseniBilel/warren/health"
 	"github.com/MerseniBilel/warren/lifecycle"
+	"github.com/MerseniBilel/warren/transport"
+	"github.com/MerseniBilel/warren/validate"
 )
 
 // App is a bootstrapped application: the flattened module graph, its scoped
@@ -24,11 +26,12 @@ type App struct {
 	modules []Module
 	subs    []Substitution
 
-	mu       sync.Mutex
-	booted   bool
-	stopping bool
-	lc       lifecycle.Lifecycle
-	scopes   map[string]di.Container
+	mu        sync.Mutex
+	booted    bool
+	stopping  bool
+	validator validate.Validator
+	lc        lifecycle.Lifecycle
+	scopes    map[string]di.Container
 }
 
 // New builds an App from the given module declarations. It does no fallible
@@ -48,6 +51,23 @@ func (a *App) Substitute(subs ...Substitution) error {
 		return errors.New("warren: Substitute after Start — substitutions are boot-time")
 	}
 	a.subs = append(a.subs, subs...)
+	return nil
+}
+
+// Validator sets the validator whose rules are compiled into every route
+// closure at boot step 5. The default is validate.Required(). It must be
+// called before Start.
+//
+// It is the reachable form of the fix transport's own diagnostic promises:
+// "transport.WithValidator(validate.None())" names a Builder that, until this
+// existed, only the bootstrapper held.
+func (a *App) Validator(v validate.Validator) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.booted {
+		return errors.New("warren: Validator after Start — the validator is compiled into routes at boot")
+	}
+	a.validator = v
 	return nil
 }
 
@@ -106,6 +126,13 @@ func (a *App) Start(ctx context.Context) error {
 	// two can never drift. Adapters register their pings against this
 	// registry from their own constructors.
 	if err := root.Provide(func() health.Registry { return health.New(lc.Ready) }); err != nil {
+		return err
+	}
+	// The route table is provided EMPTY here and filled at step 5. An adapter
+	// injects it, so its constructor's input must resolve at step 3 — long
+	// before any controller has registered. The pointer is the seam.
+	table := &transport.Table{}
+	if err := root.Provide(func() *transport.Table { return table }); err != nil {
 		return err
 	}
 
@@ -201,31 +228,94 @@ func (a *App) Start(ctx context.Context) error {
 		return err
 	}
 
-	// Steps 4–6 — instantiate each module's entry points in dependency
-	// order (singletons materialise topologically behind them), append its
-	// hooks, then start everything.
+	// Step 4 — instantiate each module's entry points in dependency order
+	// (singletons materialise topologically behind them), KEEPING the values:
+	// step 5 registers them, and a discarded controller can register nothing.
+	type entryPoints struct {
+		module      string
+		controllers []transport.Controller
+	}
+	var built []entryPoints
 	for _, m := range ordered {
 		scope := scopes[m.name]
-		for _, group := range [][]any{m.controllers, m.consumers} {
+		found := entryPoints{module: m.name}
+		for i, group := range [][]any{m.controllers, m.consumers} {
+			option := "warren.Controllers"
+			if i == 1 {
+				option = "warren.Consumers"
+			}
 			for _, ctor := range group {
+				registers := false
 				for _, t := range outputsOf(ctor) {
-					if err := resolveDynamic(scope, t); err != nil {
+					v, err := resolveDynamic(scope, t)
+					if err != nil {
 						return err
 					}
+					if c, ok := v.(transport.Controller); ok {
+						found.controllers = append(found.controllers, c)
+						registers = true
+					}
+				}
+				if !registers {
+					return errRegistersNothing(m, option, outputsOf(ctor))
 				}
 			}
 		}
-		for _, t := range m.eager {
-			if err := resolveDynamic(scope, t); err != nil {
-				return err
-			}
-		}
+		built = append(built, found)
+
+		// Declared hooks are appended HERE, in module order and after this
+		// module's own entry points, so a consumer that appends its drain
+		// from its constructor still precedes the platform module's — the
+		// ordering §1.3 fixes, unchanged by the pass split.
 		for _, fn := range m.onStart {
 			lc.Append(lifecycle.Hook{Name: m.name, OnStart: fn})
 		}
 		for _, fn := range m.onStop {
 			lc.Append(lifecycle.Hook{Name: m.name, OnStop: fn})
 		}
+	}
+
+	// Step 5 — registration. Every controller in the graph builds its routes
+	// into ONE builder, which is then frozen into the table provided at
+	// step 2. Every registration problem is reported together.
+	a.mu.Lock()
+	validator := a.validator
+	a.mu.Unlock()
+	var bopts []transport.BuilderOption
+	if validator != nil {
+		bopts = append(bopts, transport.WithValidator(validator))
+	}
+	b := transport.NewBuilder(bopts...)
+	for _, ep := range built {
+		r := b.For(ep.module)
+		for _, c := range ep.controllers {
+			c.Register(r)
+		}
+	}
+	if err := b.Fill(table); err != nil {
+		return err
+	}
+
+	// Step 5b — eager singletons, LAST. A transport or broker adapter is an
+	// eager singleton whose constructor injects the table, claims its
+	// protocol, and appends its own lifecycle hook. Building them here means
+	// two things: an adapter reads a COMPLETE table, and its hook lands after
+	// every other module's — which is what makes §1.3's
+	// "pool → repos → consumers → servers" true by construction rather than
+	// by the order the user happened to list modules in New.
+	for _, m := range ordered {
+		scope := scopes[m.name]
+		for _, t := range m.eager {
+			if _, err := resolveDynamic(scope, t); err != nil {
+				return err
+			}
+		}
+	}
+
+	// A route nobody serves is a route that silently 404s in production, and
+	// it is detectable here — so it fails here, not there.
+	if err := table.Unserved(); err != nil {
+		return err
 	}
 
 	// Steps 6–7 — OnStart in registration order; readiness opens when every
@@ -393,13 +483,67 @@ func forwarder(t reflect.Type, from di.Container) any {
 	}).Interface()
 }
 
-// resolveDynamic materialises the singleton of type t from scope — how entry
-// points (controllers, consumers) are instantiated at boot step 4 without
-// constructing a second instance outside the container.
-func resolveDynamic(scope di.Container, t reflect.Type) error {
+// resolveDynamic materialises the singleton of type t from scope and returns
+// it — how entry points (controllers, consumers) are instantiated at boot
+// step 4 without constructing a second instance outside the container. The
+// value is what step 5 calls Register on; discarding it is why step 5 did not
+// exist.
+func resolveDynamic(scope di.Container, t reflect.Type) (any, error) {
+	var out any
 	captureType := reflect.FuncOf([]reflect.Type{t}, nil, false)
-	capture := reflect.MakeFunc(captureType, func([]reflect.Value) []reflect.Value { return nil })
-	return scope.Invoke(capture.Interface())
+	capture := reflect.MakeFunc(captureType, func(args []reflect.Value) []reflect.Value {
+		if args[0].IsValid() && args[0].CanInterface() {
+			out = args[0].Interface()
+		}
+		return nil
+	})
+	return out, scope.Invoke(capture.Interface())
+}
+
+// errRegistersNothing names the type, the option the user actually wrote, and
+// the two ways out. A controller whose Register has the wrong signature is
+// accepted by the compiler, registers nothing, and every route it meant to
+// declare 404s in production — which is the exact failure boot step 3 exists
+// to prevent, one step further along.
+func errRegistersNothing(m Module, option string, outs []reflect.Type) error {
+	what := "nothing"
+	if len(outs) > 0 {
+		names := make([]string, 0, len(outs))
+		for _, t := range outs {
+			names = append(names, t.String())
+		}
+		what = strings.Join(names, ", ")
+	}
+	return diagnostic(fmt.Sprintf(
+		"✗ controller registers nothing\n\n"+
+			"    module %q (%s)\n"+
+			"      └─ %s lists a constructor returning %s,\n"+
+			"           which has no Register(transport.Registrar) method.\n\n"+
+			"  A controller whose Register has the wrong signature compiles, registers\n"+
+			"  no routes, and 404s in production. Add:\n\n"+
+			"      func (c *%s) Register(r transport.Registrar) {\n"+
+			"          transport.Post(r, \"/things\", c.create)\n"+
+			"      }\n\n"+
+			"  Or, if it registers nothing and only needs building at boot, declare it\n"+
+			"  with warren.Providers and warren.Eager[%s]() instead.",
+		m.name, m.declared, option, what, shortTypeName(outs), what))
+}
+
+// shortTypeName renders the first output's bare type name for the example
+// receiver in the diagnostic above — "*user.Controller" reads badly inside a
+// method declaration.
+func shortTypeName(outs []reflect.Type) string {
+	if len(outs) == 0 {
+		return "Controller"
+	}
+	t := outs[0]
+	for t.Kind() == reflect.Pointer {
+		t = t.Elem()
+	}
+	if t.Name() == "" {
+		return "Controller"
+	}
+	return t.Name()
 }
 
 // splitSite turns "module.go:14" back into DeclaredAt's (file, line) pair.

@@ -16,6 +16,7 @@ import (
 	"github.com/MerseniBilel/warren/config"
 	"github.com/MerseniBilel/warren/health"
 	"github.com/MerseniBilel/warren/lifecycle"
+	"github.com/MerseniBilel/warren/transport"
 )
 
 var update = flag.Bool("update", false, "rewrite golden files")
@@ -68,6 +69,14 @@ func (r *pgUserRepository) Kind() string { return "pg" }
 type userService struct{}
 
 type invoiceService struct{ repo userRepository }
+
+// These three stand in for entry points throughout this file, so they carry
+// the Register the boot now requires of everything listed in Controllers or
+// Consumers. Registering nothing is the point: these tests are about the
+// module graph, not about routes.
+func (*pool) Register(transport.Registrar)           {}
+func (*userService) Register(transport.Registrar)    {}
+func (*invoiceService) Register(transport.Registrar) {}
 
 func TestNewModuleIsInert(t *testing.T) {
 	t.Parallel()

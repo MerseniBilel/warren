@@ -207,8 +207,19 @@ func TestGenerateConsumer(t *testing.T) {
 		t.Errorf("the topic was not derived from the event name:\n%s", sub)
 	}
 
+	// Providers plus Eager, not Consumers: the subscription wires its own
+	// pipeline and lifecycle hook rather than registering through
+	// transport.OnEvent, so it is not a transport.Controller — and boot now
+	// refuses a Consumers entry that registers nothing.
 	mod := read(t, dir, "internal/modules/user/module.go")
-	for _, want := range []string{"application.NewOnOrderPlacedHandler", "warren.Consumers", "newOrderPlacedSubscription"} {
+	if strings.Contains(mod, "warren.Consumers") {
+		t.Errorf("the subscription is not a transport.Controller and must not be listed in Consumers:\n%s", mod)
+	}
+	for _, want := range []string{
+		"application.NewOnOrderPlacedHandler",
+		"newOrderPlacedSubscription",
+		"warren.Eager[*orderPlacedSubscription]()",
+	} {
 		if !strings.Contains(mod, want) {
 			t.Errorf("module.go is missing %q:\n%s", want, mod)
 		}

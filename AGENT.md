@@ -101,6 +101,18 @@ KERNEL      warren · di · lifecycle · config          stdlib + dig only
 - **Tooling** is a one-way street: the CLI imports the runtime to analyse it;
   the runtime never imports the CLI.
 
+**The one carve-out: the root `warren` package is the composition root, and it
+may import the contracts ring.** Boot step 5 hands every controller a
+`transport.Registrar` and freezes the result into a `*transport.Table`, so the
+bootstrapper has to know that `transport.Controller` exists — there is nowhere
+else that knowledge could live, because only the bootstrapper holds the module
+scopes the controllers were built in. **No other kernel package may**, and
+`scripts/invariants.sh` enforces the second half: a `di`, `lifecycle`, `config`,
+`log`, `errors`, `validate`, or `health` that knows what a route is has
+collapsed the ring. The carve-out is exactly one package wide, and adding to it
+is an architecture decision, not an implementation detail. (Added 2026-08-02
+with boot step 5; the reasoning is recorded in `transport/http/SPEC.md` ⚠1.)
+
 Inside a user's application the rule is the familiar one, and `warren lint arch`
 is the thing that enforces it:
 

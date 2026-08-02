@@ -101,14 +101,18 @@ The design rule: **every error the framework can detect surfaces at boot, never 
  0  load config          layered: defaults → file → env → flags, validated
  1  flatten module graph resolve imports, detect cycles → fail
  2  build scopes         one child container per module, copy exported bindings
+                          + an EMPTY *transport.Table in the root scope
  3  VALIDATE GRAPH       every dep resolvable? ambiguous? unused? → fail
- 4  instantiate          singletons, topological order
- 5  register             controllers + consumers build route tables in memory
+ 4  instantiate          controllers + consumers, topological order
+ 5  register             they build ONE route table, frozen into step 2's
+ 5b instantiate eager    adapters read the finished table and claim a protocol
+                          → a route nobody serves fails HERE
  6  OnStart              dependency order: pool → repos → consumers → servers
  7  readiness opens      health endpoint flips green
  8  serve
 ──────────────────────── SIGTERM
  9  readiness closes     LB drains BEFORE anything stops
+ 9b drain delay          LB observes the 503 before the listener goes away
 10  OnStop               reverse order, per-hook timeout, force-kill deadline
 ```
 
@@ -290,8 +294,21 @@ never built. `lifecycle.Lifecycle` is provided in the root container, so any
 constructor can inject it and adapters can register hooks. An `App` boots
 once; `Run` returns the boot error or, after a signal, `Stop`'s joined errors,
 and a second signal during shutdown cancels the drain — the force-exit
-short-circuit. Step 5 (route registration) arrives with the transport
-adapters; until then controllers and consumers are constructed, not routed.
+short-circuit.
+
+**Step 5 registers.** Every controller and consumer is instantiated at step 4
+and *kept*; step 5 hands each module's own `transport.Registrar` to them and
+freezes the result into the `*transport.Table` the root scope has held, empty,
+since step 2 — empty because an adapter injects it, so its constructor's input
+must resolve at step 3, long before any route exists. Adapters are eager
+singletons, so they build at step 5b: each reads a complete table and claims
+its protocol, and a route no adapter claims fails the boot right there rather
+than 404ing in production. Everything listed in `Controllers` or `Consumers`
+must implement `transport.Controller`; one that does not fails the boot naming
+the type, the option, and the module's declaration site, because a `Register`
+with a typo'd signature compiles and registers nothing. A type that genuinely
+registers nothing belongs in `Providers` with `Eager[T]()`.
+`App.Validator(v)` sets the validator those route closures compile in.
 
 Three rules the 2026-08-01 adversarial review of this package pinned down:
 **modules are deduplicated by identity, not call site** — copies of one

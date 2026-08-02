@@ -21,8 +21,12 @@ import (
 var Module = sync.OnceValue(func() warren.Module {
 	return warren.NewModule("notification",
 		warren.Imports(platform.Module()),
-		warren.Providers(application.NewOnUserRegisteredHandler),
-		warren.Consumers(newSubscription),
+		warren.Providers(application.NewOnUserRegisteredHandler, newSubscription),
+		// Eager, not Consumers: this subscription wires its own pipeline and
+		// its own lifecycle hook rather than registering through
+		// transport.OnEvent, so it is not a transport.Controller. Eager is
+		// what builds a type at boot that nothing else depends on.
+		warren.Eager[*subscription](),
 	)
 })
 

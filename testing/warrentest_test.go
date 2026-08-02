@@ -16,6 +16,7 @@ import (
 	werrors "github.com/MerseniBilel/warren/errors"
 	"github.com/MerseniBilel/warren/health"
 	warrentest "github.com/MerseniBilel/warren/testing"
+	"github.com/MerseniBilel/warren/transport"
 )
 
 var _ = flag.Bool("update", false, "rewrite golden files")
@@ -81,7 +82,12 @@ func userModule() warren.Module {
 	)
 }
 
+// probe stands in for a consumer: it exists to be constructed at boot and to
+// register its health check. It registers no subscription, but everything
+// listed in warren.Consumers must still be a transport.Controller.
 type probe struct{}
+
+func (*probe) Register(transport.Registrar) {}
 
 // --- the harness ----------------------------------------------------------
 

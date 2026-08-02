@@ -1,0 +1,15 @@
+✗ controller registers nothing
+
+    module "greeter" (warren/module.go:14)
+      └─ warren.Controllers lists a constructor returning *warren_test.silentController,
+           which has no Register(transport.Registrar) method.
+
+  A controller whose Register has the wrong signature compiles, registers
+  no routes, and 404s in production. Add:
+
+      func (c *silentController) Register(r transport.Registrar) {
+          transport.Post(r, "/things", c.create)
+      }
+
+  Or, if it registers nothing and only needs building at boot, declare it
+  with warren.Providers and warren.Eager[*warren_test.silentController]() instead.
