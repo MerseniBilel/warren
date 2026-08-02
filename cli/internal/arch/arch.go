@@ -102,7 +102,11 @@ func Check(dir string, opts Options) (*Report, error) {
 			return err
 		}
 		if d.IsDir() {
-			if name := d.Name(); name == "testdata" || name == "vendor" || strings.HasPrefix(name, ".") && name != "." {
+			if path == dir {
+				return nil // never skip the root, whatever it is called
+			}
+			name := d.Name()
+			if name == "testdata" || name == "vendor" || strings.HasPrefix(name, ".") {
 				return filepath.SkipDir
 			}
 			return nil

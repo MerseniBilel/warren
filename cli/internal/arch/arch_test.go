@@ -236,3 +236,26 @@ func TestGeneratedAppIsClean(t *testing.T) {
 		t.Errorf("the scaffold the CLI generates breaks the rules the CLI enforces:\n%s", report)
 	}
 }
+
+// TestRelativeRootIsNotSkipped pins a vacuous pass this linter shipped with
+// for one commit: a root named ".." or "." starts with a dot, and the
+// hidden-directory skip swallowed the whole tree — reporting "no violations
+// in 0 packages", which reads like success.
+func TestRelativeRootIsNotSkipped(t *testing.T) {
+	dir := fixture(t, map[string]string{
+		"internal/modules/user/domain/user.go": "package domain\n\ntype User struct{}\n",
+	})
+	sub := filepath.Join(dir, "sub")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(sub)
+
+	report, err := arch.Check("..", arch.Options{Rules: arch.Layers})
+	if err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	if report.Packages == 0 {
+		t.Error(`Check("..") analysed 0 packages — a vacuous pass that reads like success`)
+	}
+}
