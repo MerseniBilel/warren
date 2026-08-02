@@ -1298,27 +1298,55 @@ dedupe is the guarantee; §5.1's stronger wording is corrected here.
 
 - **Path** `warren/inbox` · **Module** core · **Mode** Build
 
-Idempotent consumption. The dedupe-store port, keyed on `Message.ID` with a
-per-call TTL, plus the stdlib memory store that makes dedupe-by-default cost
-neither Docker nor a database. Enabled by default — at-least-once delivery
-means duplicates are certain, not hypothetical. Durable stores ship with the
-persistence adapters (Postgres joining the unit of work, Redis with native
-TTLs).
+The dedupe-store port, plus the stdlib memory store that makes
+dedupe-by-default cost neither Docker nor a database. Enabled by default —
+at-least-once delivery means duplicates are certain, not hypothetical.
+Durable stores ship with the persistence adapters (Postgres joining the unit
+of work, Redis with native TTLs).
+
+**What it does and does not promise.** It **suppresses redelivery of a
+message that has already been disposed of**. It is not exactly-once, and it
+does not close the concurrent window: the same ID delivered to two workers
+at the same time runs the handler twice, because `Seen` and `MarkSeen` are
+separate calls and nothing claims. That is deliberate — an atomic
+claim-and-release trades a rare duplicate for a rare *loss*, since a crash
+between claim and release suppresses the redelivery and the message is gone,
+and every other disposition rule here chooses duplicates over loss.
+**At-least-once remains the guarantee.** The Postgres store closes the
+crash-after-success window by writing its row inside the handler's own
+`UnitOfWork` transaction, which is why `ctx` is on both methods.
 
 ```go
 type Store interface {
-    Seen(ctx context.Context, id string) (bool, error)
-    MarkSeen(ctx context.Context, id string, ttl time.Duration) error
+    Seen(ctx context.Context, key string) (bool, error)
+    MarkSeen(ctx context.Context, key string, ttl time.Duration) error
 }
 func NewMemoryStore(opts ...MemoryOption) Store // map + mutex + injectable clock
 func WithClock(now func() time.Time) MemoryOption
+func WithMaxRecords(n int) MemoryOption
 ```
+
+**The key is scoped by subscription**, `"<subscription>\x00<Message.ID>"`,
+built by `broker.Pipeline` from the name it is given. Keyed on the message ID
+alone, two features consuming one topic through one store would suppress each
+other: whichever handler ran first marks it seen and the second never sees the
+message at all. `Message.ID` is therefore **required** — `broker`'s
+`RequireMessageID` stage refuses a message without one as `INVALID`, so it is
+dead-lettered rather than filed under the empty key and destroyed.
 
 The protocol is `broker.Deduplicate`'s (§3.4): `Seen` before the handler,
 `MarkSeen` only after a nil disposition — a nacked message must not count as
 its own duplicate — and store failures fail closed. TTL is per call because
 the window is per *subscription* (it must exceed that subscription's
 redelivery window), while one `Store` serves them all.
+
+**The memory store is bounded** (200k records by default) and evicts the
+earliest deadline first: the sweep can only reclaim what has already expired,
+so an unbounded map under a default-on middleware is throughput × TTL — tens
+of millions of entries at a modest rate. Eviction trades certainty for
+memory, and per-process state means a redelivery landing on another replica
+after a rebalance is not deduplicated at all. Both are why a real deployment
+wants a durable store.
 
 ---
 

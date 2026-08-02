@@ -120,7 +120,7 @@ func (e expBackoff) Next(attempt int) (time.Duration, bool) {
 // Pipeline assembles the full consumer chain around h for one subscription,
 // in the fixed wrapping order:
 //
-//	Recover → Drain → TraceExtract → Deduplicate → DeadLetter → Retry → ConcurrencyLimit → handler
+//	Recover → Drain → TraceExtract → Deduplicate → DeadLetter → RequireMessageID → Retry → ConcurrencyLimit → handler
 //
 // and returns the composed handler plus the drain-wait the lifecycle calls
 // at shutdown step 3. Recover guards twice: innermost around the handler, so
@@ -130,9 +130,17 @@ func (e expBackoff) Next(attempt int) (time.Duration, bool) {
 // it names the default DLQ ("<topic>.dlq") and the origin-topic header on
 // dead-lettered messages. A nil handler, store (unless WithoutDedupe), or
 // dead-letter publisher panics here, at boot.
-func Pipeline(topic string, h MessageHandler, store inbox.Store, dlq Publisher, opts ...SubscribeOption) (MessageHandler, func(context.Context) error) {
+//
+// subscription names THIS subscription and must be unique in the process.
+// It scopes the deduplication key, which is what lets two features consume
+// one topic: keyed on the message id alone, whichever handler ran first
+// marked the message seen and the second never saw it.
+func Pipeline(subscription, topic string, h MessageHandler, store inbox.Store, dlq Publisher, opts ...SubscribeOption) (MessageHandler, func(context.Context) error) {
 	if h == nil {
 		panic("broker: Pipeline composed around a nil handler")
+	}
+	if subscription == "" {
+		panic("broker: Pipeline composed with an empty subscription name — it scopes the deduplication key and must be unique in the process")
 	}
 	if dlq == nil {
 		panic("broker: Pipeline composed with a nil dead-letter publisher — terminal messages must be preserved, never dropped")
@@ -155,9 +163,14 @@ func Pipeline(topic string, h MessageHandler, store inbox.Store, dlq Publisher, 
 		inner = ConcurrencyLimit(cfg.concurrency)(inner)
 	}
 	inner = Retry(cfg.retry)(inner)
+	if cfg.dedupe {
+		// Inside DeadLetter, so a message with no id is preserved rather
+		// than returned to the broker for ever.
+		inner = RequireMessageID()(inner)
+	}
 	inner = DeadLetter(dlq, topic, cfg.dlqTopic)(inner)
 	if cfg.dedupe {
-		inner = Deduplicate(store, cfg.dedupeTTL)(inner)
+		inner = Deduplicate(subscription, store, cfg.dedupeTTL)(inner)
 	}
 	inner = TraceExtract()(inner)
 	drainMw, wait := Drain()
@@ -286,13 +299,34 @@ func DeliveryHeaders(ctx context.Context) map[string]string {
 // nack, duplicates over loss, but never silently. A MarkSeen failure after
 // success is acked — the work is done; refusing the ack would guarantee the
 // duplicate it failed to prevent.
-func Deduplicate(store inbox.Store, ttl time.Duration) Middleware {
+func Deduplicate(subscription string, store inbox.Store, ttl time.Duration) Middleware {
 	if store == nil {
 		panic("broker: Deduplicate composed with a nil inbox store")
 	}
+	if subscription == "" {
+		panic("broker: Deduplicate composed with an empty subscription name — the dedupe key is scoped by it, and an empty scope makes two subscriptions suppress each other")
+	}
+	if ttl <= 0 {
+		panic("broker: Deduplicate composed with a non-positive TTL — pass a positive one, or opt out with WithoutDedupe()")
+	}
+	// The scope is fixed at composition, so the request path concatenates
+	// rather than formats. NUL cannot appear in either half, so the join is
+	// unambiguous without escaping.
+	prefix := subscription + "\x00"
+
 	return func(next MessageHandler) MessageHandler {
 		return func(ctx context.Context, msg Message) error {
-			seen, err := store.Seen(ctx, msg.ID)
+			// A message with no ID has no key to dedupe on, so this stage
+			// passes it through untouched — RequireMessageID, which sits
+			// inside the dead-letter ring, is what refuses it. Touching the
+			// store here would file every such message under the empty key
+			// and destroy all but the first.
+			if msg.ID == "" {
+				return next(ctx, msg)
+			}
+			key := prefix + msg.ID
+
+			seen, err := store.Seen(ctx, key)
 			if err != nil {
 				return errors.Unavailable("inbox store", err)
 			}
@@ -304,11 +338,37 @@ func Deduplicate(store inbox.Store, ttl time.Duration) Middleware {
 			}
 			// Marking failure is logged by the store's own instrumentation;
 			// the disposition stands.
-			_ = store.MarkSeen(ctx, msg.ID, ttl)
+			_ = store.MarkSeen(ctx, key, ttl)
 			return nil
 		}
 	}
 }
+
+// RequireMessageID refuses a message that carries no ID, as INVALID — which
+// is terminal, so the message is dead-lettered and preserved rather than
+// dropped or redelivered for ever.
+//
+// Pipeline installs it only when deduplication is on, because that is when
+// the ID is load-bearing: it IS the key. Without this, every message on the
+// topic shares the empty key, the first is handled, and every one after it
+// is silently acked and destroyed.
+//
+// It sits INSIDE the dead-letter ring and outside Retry: retrying a message
+// that will never grow an ID achieves nothing.
+func RequireMessageID() Middleware {
+	return func(next MessageHandler) MessageHandler {
+		return func(ctx context.Context, msg Message) error {
+			if msg.ID == "" {
+				return errors.Invalid("message id", errNoMessageID)
+			}
+			return next(ctx, msg)
+		}
+	}
+}
+
+// errNoMessageID is the cause under the INVALID a message with no id gets.
+var errNoMessageID = stderrors.New(
+	"a message carries no ID, and the ID is the deduplication key — without one every message on the topic would share a key and all but the first would be discarded")
 
 // DeadLetter is the disposition stage: it maps the inner chain's final error
 // by its outermost warren/errors code to the §2.6 consumer column. Terminal

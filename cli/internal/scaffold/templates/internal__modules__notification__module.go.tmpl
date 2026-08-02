@@ -41,6 +41,10 @@ func newSubscription(
 	store inbox.Store,
 	lc lifecycle.Lifecycle,
 ) *subscription {
+	// This subscription's name, unique in the process. It scopes the
+	// deduplication key, which is what lets another feature consume this
+	// same topic without one of them suppressing the other.
+	const name = "notification.user_registered"
 	const topic = "user.registered"
 
 	// Decode the payload into the typed event; a malformed message is
@@ -54,8 +58,9 @@ func newSubscription(
 		return err
 	}
 
-	// The chain: recover, drain, trace, dedupe, dead-letter, retry, limit.
-	pipeline, wait := broker.Pipeline(topic, handle, store, pub)
+	// The chain: recover, drain, trace, dedupe, dead-letter, require-id,
+	// retry, limit.
+	pipeline, wait := broker.Pipeline(name, topic, handle, store, pub)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	lc.Append(lifecycle.Hook{

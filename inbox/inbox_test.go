@@ -2,6 +2,7 @@ package inbox_test
 
 import (
 	"context"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -73,4 +74,69 @@ func TestMemoryStore(t *testing.T) {
 		}
 		wg.Wait()
 	})
+}
+
+// TestMemoryStoreIsBounded — the sweep can only reclaim records that have
+// already expired, so with the 24h default TTL the live set is throughput ×
+// 24h. At a thousand messages a second that is ~86 million map entries: an
+// OOM in someone's production, from a middleware that is on by default.
+func TestMemoryStoreIsBounded(t *testing.T) {
+	t.Parallel()
+
+	store := inbox.NewMemoryStore(inbox.WithMaxRecords(100))
+	ctx := context.Background()
+
+	for i := range 1000 {
+		if err := store.MarkSeen(ctx, strconv.Itoa(i), time.Hour); err != nil {
+			t.Fatalf("MarkSeen: %v", err)
+		}
+	}
+	if n := inbox.Len(store); n > 100 {
+		t.Errorf("the store holds %d records with a cap of 100", n)
+	}
+
+	// The most recent marks survive: eviction drops the oldest, so an
+	// immediate redelivery — the case dedupe exists for — is still caught.
+	seen, err := store.Seen(ctx, "999")
+	if err != nil {
+		t.Fatalf("Seen: %v", err)
+	}
+	if !seen {
+		t.Error("the most recently marked record was evicted first")
+	}
+}
+
+// TestMemoryStoreDefaultIsBounded — the default must be finite too, or the
+// fix only helps people who already knew about it.
+func TestMemoryStoreDefaultIsBounded(t *testing.T) {
+	t.Parallel()
+
+	store := inbox.NewMemoryStore()
+	ctx := context.Background()
+	for i := range 200_001 {
+		if err := store.MarkSeen(ctx, strconv.Itoa(i), time.Hour); err != nil {
+			t.Fatalf("MarkSeen: %v", err)
+		}
+	}
+	if n := inbox.Len(store); n > 200_000 {
+		t.Errorf("the default store grew to %d records", n)
+	}
+}
+
+// BenchmarkMarkSeenOverCapacity is the reason eviction batches. Dropping one
+// record per write costs a full scan of the map, so sustained overflow would
+// be O(max) per message.
+func BenchmarkMarkSeenOverCapacity(b *testing.B) {
+	store := inbox.NewMemoryStore(inbox.WithMaxRecords(10_000))
+	ctx := context.Background()
+	for i := range 10_000 {
+		_ = store.MarkSeen(ctx, strconv.Itoa(i), time.Hour)
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	i := 0
+	for b.Loop() {
+		i++
+		_ = store.MarkSeen(ctx, strconv.Itoa(1_000_000+i), time.Hour)
+	}
 }

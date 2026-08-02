@@ -30,6 +30,10 @@ func new{{.Name}}Subscription(
 	store inbox.Store,
 	lc lifecycle.Lifecycle,
 ) *{{.Lower}}Subscription {
+	// This subscription's name, unique in the process. It scopes the
+	// deduplication key, which is what lets another feature consume this
+	// same topic without one of them suppressing the other.
+	const name = "{{.Feature}}.{{.Snake}}"
 	const topic = {{.TopicLiteral}}
 
 	// Decode the payload into the typed event; a malformed message is
@@ -43,8 +47,9 @@ func new{{.Name}}Subscription(
 		return herr
 	}
 
-	// The chain: recover, drain, trace, dedupe, dead-letter, retry, limit.
-	pipeline, wait := broker.Pipeline(topic, handle, store, pub)
+	// The chain: recover, drain, trace, dedupe, dead-letter, require-id,
+	// retry, limit.
+	pipeline, wait := broker.Pipeline(name, topic, handle, store, pub)
 
 	// The loop's context must not be OnStart's: that one is the boot
 	// context, cancelled as soon as boot finishes under Start/Stop.

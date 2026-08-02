@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -49,7 +50,7 @@ func (z zeroDelay) Next(attempt int) (time.Duration, bool) { return 0, attempt <
 func pipelineFor(t *testing.T, h broker.MessageHandler, opts ...broker.SubscribeOption) (broker.MessageHandler, *capturePublisher) {
 	t.Helper()
 	dlq := &capturePublisher{}
-	composed, _ := broker.Pipeline("user.events", h, inbox.NewMemoryStore(), dlq, opts...)
+	composed, _ := broker.Pipeline("sub-user-events", "user.events", h, inbox.NewMemoryStore(), dlq, opts...)
 	return composed, dlq
 }
 
@@ -150,7 +151,7 @@ func TestDLQPublishFailureNacksNeverAcks(t *testing.T) {
 	t.Parallel()
 
 	dlq := &capturePublisher{failed: stderrors.New("broker gone")}
-	h, _ := broker.Pipeline("t", func(context.Context, broker.Message) error {
+	h, _ := broker.Pipeline("sub-t", "t", func(context.Context, broker.Message) error {
 		return werrors.Invalid("payload", stderrors.New("bad"))
 	}, inbox.NewMemoryStore(), dlq)
 
@@ -170,7 +171,7 @@ func TestDedupe(t *testing.T) {
 		t.Parallel()
 		calls := 0
 		store := inbox.NewMemoryStore()
-		h, _ := broker.Pipeline("t", func(context.Context, broker.Message) error {
+		h, _ := broker.Pipeline("sub-t", "t", func(context.Context, broker.Message) error {
 			calls++
 			return nil
 		}, store, &capturePublisher{})
@@ -189,7 +190,7 @@ func TestDedupe(t *testing.T) {
 		t.Parallel()
 		calls := 0
 		store := inbox.NewMemoryStore()
-		h, _ := broker.Pipeline("t", func(context.Context, broker.Message) error {
+		h, _ := broker.Pipeline("sub-t", "t", func(context.Context, broker.Message) error {
 			calls++
 			return werrors.Unavailable("db", stderrors.New("down"))
 		}, store, &capturePublisher{}, broker.WithRetry(zeroDelay{max: 1}))
@@ -204,7 +205,7 @@ func TestDedupe(t *testing.T) {
 		t.Parallel()
 		calls := 0
 		store := inbox.NewMemoryStore()
-		h, _ := broker.Pipeline("t", func(context.Context, broker.Message) error {
+		h, _ := broker.Pipeline("sub-t", "t", func(context.Context, broker.Message) error {
 			calls++
 			return werrors.Invalid("payload", stderrors.New("bad"))
 		}, store, &capturePublisher{})
@@ -218,7 +219,7 @@ func TestDedupe(t *testing.T) {
 	t.Run("a store error fails closed: nack, handler never runs", func(t *testing.T) {
 		t.Parallel()
 		calls := 0
-		h, _ := broker.Pipeline("t", func(context.Context, broker.Message) error {
+		h, _ := broker.Pipeline("sub-t", "t", func(context.Context, broker.Message) error {
 			calls++
 			return nil
 		}, failingStore{}, &capturePublisher{})
@@ -234,7 +235,7 @@ func TestDedupe(t *testing.T) {
 	t.Run("WithoutDedupe skips the store entirely", func(t *testing.T) {
 		t.Parallel()
 		calls := 0
-		h, _ := broker.Pipeline("t", func(context.Context, broker.Message) error {
+		h, _ := broker.Pipeline("sub-t", "t", func(context.Context, broker.Message) error {
 			calls++
 			return nil
 		}, failingStore{}, &capturePublisher{}, broker.WithoutDedupe())
@@ -383,7 +384,7 @@ func TestDrain(t *testing.T) {
 	started := make(chan struct{})
 	gate := make(chan struct{})
 	var once sync.Once
-	h, wait := broker.Pipeline("t", func(context.Context, broker.Message) error {
+	h, wait := broker.Pipeline("sub-t", "t", func(context.Context, broker.Message) error {
 		once.Do(func() { close(started) })
 		<-gate
 		return nil
@@ -486,7 +487,7 @@ func TestDrainWaitsForDLQPublish(t *testing.T) {
 	started := make(chan struct{})
 	var once sync.Once
 	slow := &slowPublisher{gate: gate, started: func() { once.Do(func() { close(started) }) }}
-	h, wait := broker.Pipeline("t", func(context.Context, broker.Message) error {
+	h, wait := broker.Pipeline("sub-t", "t", func(context.Context, broker.Message) error {
 		return werrors.Invalid("payload", stderrors.New("bad"))
 	}, inbox.NewMemoryStore(), slow)
 
@@ -547,13 +548,13 @@ func TestPipelineCompositionGuards(t *testing.T) {
 	}
 
 	assertPanics(t, "nil handler", func() {
-		_, _ = broker.Pipeline("t", nil, inbox.NewMemoryStore(), &capturePublisher{})
+		_, _ = broker.Pipeline("sub-t", "t", nil, inbox.NewMemoryStore(), &capturePublisher{})
 	})
 	assertPanics(t, "nil dead-letter publisher", func() {
-		_, _ = broker.Pipeline("t", func(context.Context, broker.Message) error { return nil }, inbox.NewMemoryStore(), nil)
+		_, _ = broker.Pipeline("sub-t", "t", func(context.Context, broker.Message) error { return nil }, inbox.NewMemoryStore(), nil)
 	})
 	assertPanics(t, "nil inbox store", func() {
-		_, _ = broker.Pipeline("t", func(context.Context, broker.Message) error { return nil }, nil, &capturePublisher{})
+		_, _ = broker.Pipeline("sub-t", "t", func(context.Context, broker.Message) error { return nil }, nil, &capturePublisher{})
 	})
 }
 
@@ -587,7 +588,7 @@ func (p *slowPublisher) Publish(context.Context, string, ...broker.Message) erro
 func BenchmarkPipelineFullChain(b *testing.B) {
 	// Dedupe on, unique IDs — the real per-message cost.
 	store := inbox.NewMemoryStore()
-	h, _ := broker.Pipeline("t", func(context.Context, broker.Message) error { return nil },
+	h, _ := broker.Pipeline("sub-t", "t", func(context.Context, broker.Message) error { return nil },
 		store, &capturePublisher{})
 	ctx := context.Background()
 	b.ReportAllocs()
@@ -600,7 +601,7 @@ func BenchmarkPipelineFullChain(b *testing.B) {
 
 func BenchmarkPipelineDedupeSuppressed(b *testing.B) {
 	store := inbox.NewMemoryStore()
-	h, _ := broker.Pipeline("t", func(context.Context, broker.Message) error { return nil },
+	h, _ := broker.Pipeline("sub-t", "t", func(context.Context, broker.Message) error { return nil },
 		store, &capturePublisher{})
 	ctx := context.Background()
 	m := broker.Message{ID: "same", Type: "t"}
@@ -613,12 +614,104 @@ func BenchmarkPipelineDedupeSuppressed(b *testing.B) {
 
 func BenchmarkPipelineSuccessPath(b *testing.B) {
 	store := inbox.NewMemoryStore()
-	h, _ := broker.Pipeline("t", func(context.Context, broker.Message) error { return nil },
+	h, _ := broker.Pipeline("sub-t", "t", func(context.Context, broker.Message) error { return nil },
 		store, &capturePublisher{}, broker.WithoutDedupe())
 	ctx := context.Background()
 	m := broker.Message{ID: "evt", Type: "t"}
 	b.ReportAllocs()
 	for b.Loop() {
 		_ = h(ctx, m)
+	}
+}
+
+// TestDedupeIsScopedToTheSubscription is the fan-out defect: two features
+// subscribing to one topic through one inbox store. Keyed on the message id
+// alone, whichever handler ran first marked the message seen and the second
+// never saw it — silent message loss in the exact shape §5.6 documents as
+// supported.
+func TestDedupeIsScopedToTheSubscription(t *testing.T) {
+	t.Parallel()
+
+	store := inbox.NewMemoryStore()
+	dlq := &capturePublisher{}
+	var billing, email atomic.Int32
+
+	b, _ := broker.Pipeline("billing", "order.placed", func(context.Context, broker.Message) error {
+		billing.Add(1)
+		return nil
+	}, store, dlq)
+	e, _ := broker.Pipeline("notification", "order.placed", func(context.Context, broker.Message) error {
+		email.Add(1)
+		return nil
+	}, store, dlq)
+
+	msg := broker.Message{ID: "evt-1", Type: "order.placed"}
+	for _, h := range []broker.MessageHandler{b, e} {
+		if err := h(context.Background(), msg); err != nil {
+			t.Fatalf("handling: %v", err)
+		}
+	}
+	if got := billing.Load(); got != 1 {
+		t.Errorf("billing ran %d times, want 1", got)
+	}
+	if got := email.Load(); got != 1 {
+		t.Errorf("notification ran %d times, want 1 — the other subscription's mark suppressed it", got)
+	}
+
+	// And redelivery to the SAME subscription is still suppressed.
+	if err := b(context.Background(), msg); err != nil {
+		t.Fatalf("redelivery: %v", err)
+	}
+	if got := billing.Load(); got != 1 {
+		t.Errorf("billing ran %d times after redelivery, want 1", got)
+	}
+}
+
+// TestMessageWithoutAnIDIsDeadLettered — Message.ID is the idempotency key,
+// and nothing enforced it. Five distinct messages carrying no id collapsed
+// to one: the first was handled, the other four were silently acked and
+// destroyed.
+func TestMessageWithoutAnIDIsDeadLettered(t *testing.T) {
+	t.Parallel()
+
+	store := inbox.NewMemoryStore()
+	dlq := &capturePublisher{}
+	var handled atomic.Int32
+
+	h, _ := broker.Pipeline("billing", "t", func(context.Context, broker.Message) error {
+		handled.Add(1)
+		return nil
+	}, store, dlq)
+
+	for i := range 5 {
+		if err := h(context.Background(), broker.Message{Type: "t", Payload: []byte{byte(i)}}); err != nil {
+			t.Fatalf("handling %d: %v", i, err)
+		}
+	}
+	if got := handled.Load(); got != 0 {
+		t.Errorf("the handler ran %d times on messages with no id, want 0", got)
+	}
+	// Dead-lettered, never dropped: an unusable message is preserved.
+	if got := len(dlq.dlq("t.dlq")); got != 5 {
+		t.Errorf("%d messages reached the dead-letter topic, want 5", got)
+	}
+}
+
+// TestNonPositiveDedupeTTLPanics — WithDedupeTTL(0) silently disabled
+// deduplication, while WithConcurrency(0) panics. A boot-time refusal is
+// the documented shape for both.
+func TestNonPositiveDedupeTTLPanics(t *testing.T) {
+	t.Parallel()
+
+	for _, ttl := range []time.Duration{0, -time.Hour} {
+		func() {
+			defer func() {
+				if recover() == nil {
+					t.Errorf("WithDedupeTTL(%v) did not panic — it silently disabled dedupe", ttl)
+				}
+			}()
+			_, _ = broker.Pipeline("s", "t", func(context.Context, broker.Message) error { return nil },
+				inbox.NewMemoryStore(), &capturePublisher{}, broker.WithDedupeTTL(ttl))
+		}()
 	}
 }
