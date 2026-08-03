@@ -639,3 +639,38 @@ func serveWithTelemetry(t *testing.T, tel app.Telemetry, modules ...warren.Modul
 	t.Cleanup(func() { _ = a.Stop(context.Background()) })
 	return "http://" + ln.Addr().String()
 }
+
+// TestAPanicKeepsTheCorrelationID locks the property a field test reported
+// as broken and which did NOT reproduce: the 500 body a panic produces
+// carries the same correlation ID as the header, so an operator handed the
+// body has a way back to the log line.
+//
+// It is regression-locked rather than dismissed because the claim was
+// specific and the mechanism is subtle — the recoverer is composed OUTSIDE
+// correlate, and the only thing populating this field is
+// log.CorrelationID(ctx) inside the recoverer. If that ever stops seeing
+// the correlated context, the body silently loses the one identifier that
+// joins a user's complaint to a stack trace.
+//
+// What the same report got RIGHT is the log record, which carries no
+// correlation_id — and that is not this ordering. The recoverer already
+// calls ErrorContext(ctx, …); what is missing is a log.Handler resolving
+// the ID at Handle time, which is transport/http/SPEC.md open question 6
+// and affects every log line in the service, not only panics.
+func TestAPanicKeepsTheCorrelationID(t *testing.T) {
+	t.Parallel()
+
+	base := serve(t, []warren.Module{userModule()})
+	res, body := do(t, "POST", base+"/fail", `{"email":"boom@example.com"}`)
+
+	if res.StatusCode != 500 {
+		t.Fatalf("status = %d, want 500", res.StatusCode)
+	}
+	header := res.Header.Get("X-Correlation-Id")
+	if header == "" {
+		t.Fatal("no X-Correlation-Id header on a panicking request")
+	}
+	if !strings.Contains(body, header) {
+		t.Errorf("the response body does not carry the correlation ID %q:\n%s\n\nAn operator handed this body has no way back to the log line.", header, body)
+	}
+}
