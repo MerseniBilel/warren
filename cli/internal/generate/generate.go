@@ -75,6 +75,7 @@ func Module(opts Options) (string, error) {
 
 	files := map[string]string{
 		base + "/module.go":             "module.go.tmpl",
+		base + "/controller.go":         "controller.go.tmpl",
 		base + "/module_test.go":        "module_test.go.tmpl",
 		base + "/domain/doc.go":         "layer_domain.go.tmpl",
 		base + "/application/doc.go":    "layer_app.go.tmpl",
@@ -151,31 +152,13 @@ func Command(opts Options) (string, error) {
 			base + "/application/" + data["Snake"] + ".go":      handler,
 			base + "/application/" + data["Snake"] + "_test.go": test,
 		},
-		edits: []edit{provide(data, base, "application", "New"+opts.Name+"Handler")},
+		edits: []edit{
+			provide(data, base, "application", "New"+opts.Name+"Handler"),
+			expose(data, base),
+		},
 		declares: []decl{{base + "/application", []string{
 			opts.Name, opts.Name + "Result", data["Lower"], "New" + opts.Name + "Handler",
 		}}},
-		// The handler is wired into the container but reachable by nothing:
-		// exposing it is three lines in the feature's controller, and this
-		// generator cannot write them without editing a struct, a
-		// constructor and a method body it did not create.
-		next: fmt.Sprintf(`  Still to do — the handler is built, but nothing serves it yet.
-  In %s/controller.go:
-
-      type Controller struct {
-          %s app.Handler[application.%s, application.%sResult]   // add
-      }
-
-      func NewController(
-          %s app.Handler[application.%s, application.%sResult],   // add
-      ) *Controller { ... }
-
-      func (c *Controller) Register(r transport.Registrar) {
-          transport.Post(r, "/%s", c.%s)                          // add
-      }
-`, base, data["Lower"], opts.Name, opts.Name,
-			data["Lower"], opts.Name, opts.Name,
-			data["Snake"], data["Lower"]),
 	}
 	return p.apply()
 }
@@ -372,6 +355,51 @@ func provide(data map[string]string, base, layer, ctor string) edit {
 				return nil, err
 			}
 			return astedit.AddArgument(out, "warren.Providers", qualified)
+		},
+	}
+}
+
+// expose wires a generated handler into the feature's controller: the field
+// that holds it, the constructor parameter that injects it, and the route
+// that serves it.
+//
+// All three are one edit because any one alone leaves controller.go
+// uncompilable — an unused parameter, a field assigned from nothing, a
+// route referring to a field that does not exist.
+//
+// Until this existed the generator printed a twelve-line patch and asked
+// the user to make all three by hand, every time, in a file no generator
+// creates. Four commands meant four patches, and a handler nobody patched
+// in was wired into the container and reachable by nothing.
+func expose(data map[string]string, base string) edit {
+	field := data["Lower"]
+	handler := fmt.Sprintf("app.Handler[application.%s, application.%sResult]", data["Name"], data["Name"])
+	route := fmt.Sprintf("transport.Post(r, %q, c.%s)", "/"+data["Snake"], field)
+	appPkg := data["Module"] + "/internal/modules/" + data["Feature"] + "/application"
+
+	return edit{
+		path: base + "/controller.go",
+		what: fmt.Sprintf("serve POST /%s from Controller.Register", data["Snake"]),
+		fn: func(src []byte) ([]byte, error) {
+			for _, path := range []string{
+				"github.com/MerseniBilel/warren/app",
+				"github.com/MerseniBilel/warren/transport",
+				appPkg,
+			} {
+				out, err := astedit.AddImport(src, path)
+				if err != nil {
+					return nil, err
+				}
+				src = out
+			}
+			out, err := astedit.AddStructField(src, "Controller", field, handler)
+			if err != nil {
+				return nil, err
+			}
+			if out, err = astedit.AddConstructorParam(out, "NewController", "Controller", field, handler); err != nil {
+				return nil, err
+			}
+			return astedit.AddStatement(out, "Register", route)
 		},
 	}
 }

@@ -18,5 +18,6 @@ import (
 var Module = sync.OnceValue(func() warren.Module {
 	return warren.NewModule("{{.Name}}",
 		warren.Imports(platform.Module()),
+		warren.Controllers(NewController),
 	)
 })

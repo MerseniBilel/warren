@@ -1,0 +1,29 @@
+package {{.Name}}
+
+import (
+	"github.com/MerseniBilel/warren/transport"
+)
+
+// Controller exposes this feature's use cases. It holds HANDLERS, never
+// repositories: a controller that reaches past the application layer has
+// made the layering decorative.
+//
+// It is empty until the first `warren g command`, which adds the handler as
+// a field, injects it through NewController, and declares its route below.
+type Controller struct {
+}
+
+// NewController is listed in warren.Controllers, so boot builds it and calls
+// Register exactly once, at step 5 — never per request.
+func NewController() *Controller {
+	return &Controller{}
+}
+
+// Register declares the routes. One method, and every protocol added later
+// reads from the same table: a handler registered here serves HTTP today and
+// would serve gRPC or a queue with no change to itself.
+//
+// The pattern is the PATH ALONE — Post already names the method. Post
+// defaults to 201, Get to 200, Delete to 204; transport.Status overrides.
+func (c *Controller) Register(r transport.Registrar) {
+}

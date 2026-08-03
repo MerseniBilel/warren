@@ -20,6 +20,7 @@ import (
 var Module = sync.OnceValue(func() warren.Module {
 	return warren.NewModule("billing",
 		warren.Imports(platform.Module()),
+		warren.Controllers(NewController),
 		warren.Providers(
 			infrastructure.NewInvoiceRepository,
 			application.NewVoidInvoiceHandler,

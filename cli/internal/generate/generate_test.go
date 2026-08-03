@@ -299,3 +299,56 @@ func TestForceOverwritesWithoutDuplicatingWiring(t *testing.T) {
 		t.Errorf("the application layer is imported %d times, want 1:\n%s", n, mod)
 	}
 }
+
+// TestCommandWiresItsOwnRoute — `warren g command` used to end with a
+// twelve-line patch: add a field, add a constructor parameter, add a route,
+// all by hand, in internal/modules/<f>/controller.go — a file no generator
+// created. Four commands meant four patches, and a handler nobody patched
+// in was wired into the container and reachable by nothing. The field test
+// called it the single biggest gap in the generator set.
+func TestCommandWiresItsOwnRoute(t *testing.T) {
+	t.Parallel()
+
+	dir := app(t)
+	if _, err := generate.Module(generate.Options{Dir: dir, Name: "catalog"}); err != nil {
+		t.Fatalf("g module: %v", err)
+	}
+	if _, err := generate.Command(generate.Options{Dir: dir, Module: "catalog", Name: "CreateProduct"}); err != nil {
+		t.Fatalf("g command: %v", err)
+	}
+
+	got := read(t, dir, "internal/modules/catalog/controller.go")
+	for _, want := range []string{
+		"createProduct",
+		"app.Handler[application.CreateProduct, application.CreateProductResult]",
+		`transport.Post(r, "/create_product", c.createProduct)`,
+		"/internal/modules/catalog/application",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("controller.go is missing %q:\n%s", want, got)
+		}
+	}
+
+	// A second command joins the first rather than replacing it.
+	if _, err := generate.Command(generate.Options{Dir: dir, Module: "catalog", Name: "Discontinue"}); err != nil {
+		t.Fatalf("second g command: %v", err)
+	}
+	got = read(t, dir, "internal/modules/catalog/controller.go")
+	for _, want := range []string{"createProduct", "discontinue", `c.discontinue)`} {
+		if !strings.Contains(got, want) {
+			t.Errorf("after the second command, controller.go is missing %q:\n%s", want, got)
+		}
+	}
+
+	// And the plan no longer tells the user to do it themselves.
+	plan, err := generate.Command(generate.Options{Dir: dir, Module: "catalog", Name: "Restock"})
+	if err != nil {
+		t.Fatalf("third g command: %v", err)
+	}
+	if strings.Contains(plan, "Still to do") {
+		t.Errorf("the plan still asks the user to wire the controller by hand:\n%s", plan)
+	}
+	if !strings.Contains(plan, "controller.go") {
+		t.Errorf("the plan does not mention the controller edit it made:\n%s", plan)
+	}
+}
