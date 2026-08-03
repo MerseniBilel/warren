@@ -146,10 +146,26 @@ func Check(dir string, opts Options) (*Report, error) {
 
 		for _, spec := range f.Imports {
 			imported, uerr := strconv.Unquote(spec.Path.Value)
-			if uerr != nil || !strings.HasPrefix(imported, modPath) {
-				continue // third party and stdlib are not this rule's business
+			if uerr != nil {
+				continue
 			}
 			pos := fset.Position(spec.Pos())
+
+			// The transport rule is the one that looks OUTSIDE the project:
+			// what a handler must not import is the framework's transport
+			// port, a driver, or net/http — none of which carry the project's
+			// module path. Skipping every foreign import, as the layer rules
+			// do, is why invariant 5 went unchecked.
+			if opts.Rules&Layers != 0 && isTransportPackage(imported) && slices.Contains(handlerLayers, layer) {
+				report.Violations = append(report.Violations, Violation{
+					File: rel, Line: pos.Line, Package: pkgPath, Layer: layer,
+					Imported: imported, Rule: "transport",
+				})
+				continue
+			}
+			if !strings.HasPrefix(imported, modPath) {
+				continue // otherwise third party and stdlib are not this rule's business
+			}
 
 			if opts.Rules&Layers != 0 {
 				if l := layerOf(imported); layer != "" && l != "" && slices.Contains(forbidden[layer], l) {
@@ -183,6 +199,42 @@ func Check(dir string, opts Options) (*Report, error) {
 	return report, nil
 }
 
+// handlerLayers are the layers a use case lives in. The controller is
+// unlayered — it sits at the module root, and it is precisely where a use
+// case is allowed to meet a protocol — so it is exempt by construction
+// rather than by exception.
+//
+// infrastructure is exempt too, and deliberately: an adapter calling a
+// third-party API over net/http is the ordinary reason it exists.
+var handlerLayers = []string{"domain", "application"}
+
+// transportPackages are the import prefixes that make a package a transport
+// concern. The list is explicit rather than heuristic: a linter that guesses
+// is one people switch off.
+var transportPackages = []string{
+	"net/http",
+	"net/http/httputil",
+	"github.com/MerseniBilel/warren/transport",
+	"github.com/go-chi/chi",
+	"github.com/gin-gonic/gin",
+	"github.com/labstack/echo",
+	"github.com/gorilla/mux",
+	"github.com/gofiber/fiber",
+	"google.golang.org/grpc",
+	"github.com/gorilla/websocket",
+}
+
+// isTransportPackage reports whether path is one of them, or lives beneath
+// one — warren/transport/http is as much a transport package as its parent.
+func isTransportPackage(path string) bool {
+	for _, p := range transportPackages {
+		if path == p || strings.HasPrefix(path, p+"/") {
+			return true
+		}
+	}
+	return false
+}
+
 // modulePath reads the module path from go.mod.
 func modulePath(dir string) (string, error) {
 	src, err := os.ReadFile(filepath.Join(dir, "go.mod"))
@@ -214,6 +266,9 @@ func (r *Report) String() string {
 		case "cross-module":
 			fmt.Fprintf(&b, "✗ cross-module import\n\n    %s:%d\n      package %s\n        imports %s\n\n%s\n\n",
 				v.File, v.Line, v.Package, v.Imported, explain(v))
+		case "transport":
+			fmt.Fprintf(&b, "✗ handler imports a transport package\n\n    %s:%d\n      package %s          (layer: %s)\n        imports %s\n\n%s\n\n",
+				v.File, v.Line, v.Package, v.Layer, v.Imported, explain(v))
 		}
 	}
 	fmt.Fprintf(&b, "%d violation(s) in %d packages.\n", len(r.Violations), r.Packages)
@@ -221,6 +276,19 @@ func (r *Report) String() string {
 }
 
 func explain(v Violation) string {
+	if v.Rule == "transport" {
+		return "  A handler knows nothing about how it is reached. It takes a request\n" +
+			"  type and returns a response type; whether that arrived over HTTP,\n" +
+			"  gRPC or a queue is the controller's business and the adapter's.\n\n" +
+			"  That rule is what lets one Register call serve three protocols, and\n" +
+			"  what makes the handler testable without a server.\n\n" +
+			"  Fix one of:\n" +
+			"    • Move the routing to the feature's controller.go, which is\n" +
+			"      unlayered and is exactly where a use case meets a protocol.\n" +
+			"    • If the handler CALLS an external service, declare a port in the\n" +
+			"      domain and put the HTTP client in infrastructure, where net/http\n" +
+			"      is allowed."
+	}
 	if v.Rule == "cross-module" {
 		return "  This reaches into another feature module's internals. Modules talk\n" +
 			"  through published events or an exported port, never by importing each\n" +

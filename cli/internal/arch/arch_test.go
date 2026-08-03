@@ -259,3 +259,86 @@ func TestRelativeRootIsNotSkipped(t *testing.T) {
 		t.Error(`Check("..") analysed 0 packages — a vacuous pass that reads like success`)
 	}
 }
+
+// TestHandlerImportingTransportIsAViolation — invariant 5, "handlers import
+// no transport package", is the rule Warren repeats most often and the one
+// `lint arch` did not check. A field test put both `warren/transport` and
+// `net/http` into an application-layer file and got:
+//
+//	$ warren lint arch
+//	No violations in 17 packages.   EXIT=0
+//
+// The layer and cross-module rules only ever examined imports beginning
+// with the project's OWN module path; everything else was waved through as
+// "third party and stdlib are not this rule's business". For this rule they
+// are exactly its business.
+func TestHandlerImportingTransportIsAViolation(t *testing.T) {
+	t.Parallel()
+
+	for _, imported := range []string{
+		"github.com/MerseniBilel/warren/transport",
+		"github.com/MerseniBilel/warren/transport/http",
+		"net/http",
+		"github.com/go-chi/chi/v5",
+		"google.golang.org/grpc",
+	} {
+		t.Run(imported, func(t *testing.T) {
+			t.Parallel()
+			dir := fixture(t, map[string]string{
+				"internal/modules/user/application/register.go": "package application\n\nimport _ \"" + imported + "\"\n",
+			})
+			report, err := arch.Check(dir, arch.Options{Rules: arch.Layers})
+			if err != nil {
+				t.Fatalf("Check: %v", err)
+			}
+			if len(report.Violations) != 1 {
+				t.Fatalf("importing %q from the application layer reported %d violations, want 1:\n%s",
+					imported, len(report.Violations), report)
+			}
+			if got := report.Violations[0].Rule; got != "transport" {
+				t.Errorf("rule = %q, want %q", got, "transport")
+			}
+			for _, want := range []string{"transport", imported, "register.go"} {
+				if !strings.Contains(report.String(), want) {
+					t.Errorf("the report does not mention %q:\n%s", want, report)
+				}
+			}
+		})
+	}
+}
+
+// TestTheControllerMayImportTransport — the controller is where a use case
+// meets a protocol, and it lives at the module root, unlayered. A rule that
+// refused it would refuse the framework's own generated code.
+func TestTheControllerMayImportTransport(t *testing.T) {
+	t.Parallel()
+
+	dir := fixture(t, map[string]string{
+		"internal/modules/user/controller.go": "package user\n\nimport _ \"github.com/MerseniBilel/warren/transport\"\n",
+	})
+	report, err := arch.Check(dir, arch.Options{Rules: arch.Layers})
+	if err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	if len(report.Violations) != 0 {
+		t.Errorf("the controller was refused for importing transport:\n%s", report)
+	}
+}
+
+// TestInfrastructureMayUseNetHTTP — an adapter calling a third-party API
+// over HTTP is the ordinary reason infrastructure exists. Refusing it would
+// make the rule wrong more often than right.
+func TestInfrastructureMayUseNetHTTP(t *testing.T) {
+	t.Parallel()
+
+	dir := fixture(t, map[string]string{
+		"internal/modules/user/infrastructure/pricing.go": "package infrastructure\n\nimport _ \"net/http\"\n",
+	})
+	report, err := arch.Check(dir, arch.Options{Rules: arch.Layers})
+	if err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	if len(report.Violations) != 0 {
+		t.Errorf("an infrastructure adapter was refused for using net/http:\n%s", report)
+	}
+}
