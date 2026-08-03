@@ -1731,25 +1731,36 @@ jobs.Worker(reconcileHandler, jobs.Interval(30*time.Second))
 
 ### 7.5 `warren/testing`
 
-**Vendors** `testcontainers-go`, `stretchr/testify`.
+**Vendors nothing.** Standard library plus core — no testify, no
+testcontainers, matching §1.6. Container fixtures, when they exist, land in
+`warren/testing/containers`, its own module, so Docker never enters this
+one's graph.
 
 ```go
 func TestRegisterUser(t *testing.T) {
-    app := warrentest.NewModuleTest(t, user.Module(),
+    a := warrentest.NewModuleTest(t, user.Module(),
         warrentest.Replace[domain.UserRepository](fakes.NewUserRepo()),
         warrentest.WithMemoryBroker(),
     )
-    defer app.Close()
+    // NewModuleTest registers Close with t.Cleanup; calling it is optional.
 
-    res, err := warrentest.Invoke[RegisterUser, UserDTO](app, ctx,
+    res, err := warrentest.Invoke[RegisterUser, UserDTO](t.Context(), a,
         RegisterUser{Email: "a@b.com", Name: "Ada"})
 
-    require.NoError(t, err)
-    warrentest.AssertPublished[domain.UserRegistered](t, app)
+    if err != nil {
+        t.Fatalf("Invoke: %v", err)
+    }
+    warrentest.AssertPublished[domain.UserRegistered](t, a)
 }
 ```
 
-Integration helpers spin real Postgres/Kafka behind a build tag. Every CLI generator has golden-file tests — templates break silently otherwise.
+Context is FIRST, as everywhere else in Warren. `InvokeIn` takes a module
+name for a test spanning several features, and `WithValidator` compiles the
+routes against another validator — how a module whose requests carry tags
+core refuses is tested at all.
+
+Every CLI generator has golden-file tests — templates break silently
+otherwise.
 
 ---
 
@@ -1764,10 +1775,10 @@ Integration helpers spin real Postgres/Kafka behind a build tag. Every CLI gener
 | Subsystem | Purpose |
 |---|---|
 | **Templates** | `embed.FS`, ejectable via `warren templates eject` for per-org forks |
-| **AST editor** | `dst` (comment-preserving) — wiring a provider into `module.go` is a real AST edit, not marker-comment string surgery |
-| **Analyzer** | One `go/packages` load, shared by `lint arch`, `doctor`, and all three `graph` commands |
+| **AST editor** | Stdlib: the insertion point is located with `go/parser` and the new text is spliced into the original bytes, so comments survive by construction. `dave/dst` was rejected — see the paragraph above and §9. |
+| **Analyzer** | Syntactic — `go/parser` in `ImportsOnly` mode. `go/packages` was budgeted and dropped, which is what lets `lint arch` run on a project that does not compile. |
 
-That shared analyzer is why the governance commands are cheap once the first exists — and it works on any Go project, Warren or not. If the framework stalls, that piece stands alone.
+That analyzer is why the governance commands are cheap once the first exists — and it works on any Go project, Warren or not. If the framework stalls, that piece stands alone.
 
 ### Command surface
 
@@ -1833,7 +1844,7 @@ All generators support `--dry-run` and `--force`.
 | Auth | `golang-jwt/jwt/v5`, `coreos/go-oidc` | Wrap | |
 | Resilience | `sony/gobreaker`, `cenkalti/backoff/v4` | Wrap | one `Policy` interface |
 | Cron | `robfig/cron/v3` | Wrap | lifecycle-aware |
-| Testing | `testcontainers-go`, `testify` | Vendor | |
+| Testing | none — stdlib + core | Build | `testify` and `testcontainers-go` were both budgeted and neither adopted: assertions are `if got != want`, and Docker fixtures wait for `warren/testing/containers`, its own module. |
 | CLI | `cobra` | Vendor | build-time only |
 
 ---

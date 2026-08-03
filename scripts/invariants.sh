@@ -91,4 +91,30 @@ if [ -n "$withtypes" ]; then
 	fail=1
 fi
 
+# Documentation drift — warren.md is the manifest, and a manifest that
+# contradicts the code is worse than no manifest. A field test read §7.5,
+# wrote a test against `require.NoError` and an Invoke argument order that
+# does not exist, and reasonably concluded the docs were untrustworthy.
+#
+# Only the CHECKABLE claims are enforced here: an assertion library core
+# does not have, and a Docker fixture library no module imports. Both are
+# statements about the dependency graph, which grep can see; the rest of the
+# manifest binds in review.
+for lib in stretchr/testify testcontainers-go; do
+	# A DIRECT require is adoption; an "// indirect" line is not. testify
+	# reaches transport/http's module graph through dig's own tests
+	# (go mod why -m: warren/di -> dig -> dig.test -> testify), which puts
+	# it in a user's go.sum and in no user's binary. Counting that as
+	# adoption would let the manifest claim a vendor nobody chose.
+	if grep -h "$lib" go.mod */go.mod */*/go.mod 2>/dev/null | grep -qv '// indirect'; then
+		continue
+	fi
+	claims=$(grep -nE "^\*\*Vendors\*\*.*$lib|^\| .*\| .*$lib.*\| Vendor" warren.md || true)
+	if [ -n "$claims" ]; then
+		echo "doc drift: warren.md claims $lib is vendored, but no go.mod requires it:"
+		echo "$claims"
+		fail=1
+	fi
+done
+
 exit $fail
