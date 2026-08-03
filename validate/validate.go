@@ -284,9 +284,20 @@ func errUnsupported(t reflect.Type, tokens []string) error {
 			"    %s uses constraints the standard-library validator cannot enforce:\n"+
 			"    %s\n\n"+
 			"  Core enforces validate:\"required\" only — refusing the rest rather than\n"+
-			"  silently under-validating. Two ways forward:\n"+
-			"    • install github.com/MerseniBilel/warren/validate/playground and pass\n"+
-			"      playground.New() where the validator is configured, or\n"+
-			"    • opt out explicitly with validate.None() and validate in the handler.",
+			"  silently under-validating. Two ways forward:\n\n"+
+			"    • install github.com/MerseniBilel/warren/validate/playground:\n\n"+
+			"          go get github.com/MerseniBilel/warren/validate/playground\n\n"+
+			"      then in main, before Run:\n\n"+
+			"          a := warren.New(...)\n"+
+			"          if err := a.Validator(playground.New()); err != nil {\n"+
+			"              return err\n"+
+			"          }\n"+
+			"          return a.Run()\n\n"+
+			"      or provide it from a module, which is what makes it reach a\n"+
+			"      warrentest.NewModuleTest as well:\n\n"+
+			"          warren.Providers(func() validate.Validator { return playground.New() }),\n"+
+			"          warren.Exports[validate.Validator](),\n\n"+
+			"      and in a module test: warrentest.WithValidator(playground.New())\n\n"+
+			"    • or opt out explicitly with validate.None() and validate in the handler.",
 		t, strings.Join(tokens, ", ")))
 }

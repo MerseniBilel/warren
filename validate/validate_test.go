@@ -352,3 +352,34 @@ func TestMissingFieldsDetailsAreOnlyRealFields(t *testing.T) {
 		}
 	}
 }
+
+// TestTheSuggestedFixesAreValidGo — every fix Warren prints is meant to be
+// pasted. "warren.New(...).Validator(validate.None())" was not: Validator
+// returns error, not *App, so it cannot chain with .Run(), and pasted over a
+// main's Run line it compiles into a service that exits 0 and serves
+// nothing. A copy-pasteable fix that deletes your server is a defect, not a
+// nit — this project treats diagnostics as a deliverable with golden files.
+func TestTheSuggestedFixesAreValidGo(t *testing.T) {
+	t.Parallel()
+
+	type tagged struct {
+		Name string `validate:"required,min=3"`
+	}
+	_, err := validate.PlanFor[tagged](validate.Required())
+	if err == nil {
+		t.Fatal("min=3 was accepted by the core validator")
+	}
+	got := err.Error()
+
+	if strings.Contains(got, "warren.New(...).Validator(") {
+		t.Errorf("the diagnostic suggests a chained Validator call, which does not compile with .Run():\n%s", got)
+	}
+	// It must say WHERE the validator is configured — "where the validator is
+	// configured" was the whole of the old advice, and there is no such place
+	// to look.
+	for _, want := range []string{"a := warren.New(...)", "a.Validator(playground.New())", "warrentest.WithValidator"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("the diagnostic does not show %q:\n%s", want, got)
+		}
+	}
+}

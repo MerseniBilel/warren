@@ -801,8 +801,12 @@ func errCannotValidate(pattern, handler string, cause error) error {
 		"✗ cannot validate the request for %s\n\n    handler: %s\n    %v\n\n"+
 			"  Either give the handler a struct request type — which is what lets\n"+
 			"  a field carry `validate:\"required\"` and a param tag — or turn\n"+
-			"  validation off for this application with:\n\n"+
-			"      warren.New(...).Validator(validate.None())",
+			"  validation off for this application:\n\n"+
+			"      a := warren.New(...)\n"+
+			"      if err := a.Validator(validate.None()); err != nil {\n"+
+			"          return err\n"+
+			"      }\n"+
+			"      return a.Run()",
 		pattern, handler, cause))
 }
 
