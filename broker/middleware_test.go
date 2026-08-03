@@ -4,6 +4,7 @@ import (
 	"context"
 	stderrors "errors"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -695,6 +696,99 @@ func TestMessageWithoutAnIDIsDeadLettered(t *testing.T) {
 	if got := len(dlq.dlq("t.dlq")); got != 5 {
 		t.Errorf("%d messages reached the dead-letter topic, want 5", got)
 	}
+}
+
+// TestDedupeKeysAreStorableByADurableStore — the dedupe key is written to
+// an inbox.Store, and Postgres `text` rejects a NUL byte outright, so a
+// NUL-separated key is unstorable in the first durable store anyone writes.
+// The memory store swallows it, which is the worst pairing: it works in
+// development and fails in production.
+//
+// This test watches the key the pipeline actually hands to a Store rather
+// than asserting on the separator constant, so it still holds if the
+// scoping scheme is rewritten.
+func TestDedupeKeysAreStorableByADurableStore(t *testing.T) {
+	t.Parallel()
+
+	store := &keySpy{Store: inbox.NewMemoryStore()}
+	dlq := &capturePublisher{}
+	h, _ := broker.Pipeline("billing", "order.placed", func(context.Context, broker.Message) error {
+		return nil
+	}, store, dlq)
+
+	if err := h(context.Background(), broker.Message{ID: "evt-1", Type: "order.placed"}); err != nil {
+		t.Fatalf("handling: %v", err)
+	}
+
+	keys := store.seen()
+	if len(keys) == 0 {
+		t.Fatal("the pipeline never touched the store")
+	}
+	for _, k := range keys {
+		if strings.ContainsRune(k, 0) {
+			t.Errorf("the dedupe key %q contains a NUL byte — Postgres text cannot store it, so a durable inbox store would error where the memory store does not", k)
+		}
+		if !strings.Contains(k, "evt-1") || !strings.Contains(k, "billing") {
+			t.Errorf("dedupe key %q no longer carries both the subscription and the message id", k)
+		}
+	}
+}
+
+// TestMessageIDWithANULIsDeadLettered — the other half of the guarantee
+// above. The separator is Warren's to choose; the id comes off the wire, so
+// a producer can put a NUL in it, and then the key is unstorable through no
+// fault of the store. It is refused as INVALID — terminal, so preserved.
+func TestMessageIDWithANULIsDeadLettered(t *testing.T) {
+	t.Parallel()
+
+	store := inbox.NewMemoryStore()
+	dlq := &capturePublisher{}
+	var handled atomic.Int32
+
+	h, _ := broker.Pipeline("billing", "t", func(context.Context, broker.Message) error {
+		handled.Add(1)
+		return nil
+	}, store, dlq)
+
+	if err := h(context.Background(), broker.Message{ID: "evt\x001", Type: "t"}); err != nil {
+		t.Fatalf("handling: %v", err)
+	}
+	if got := handled.Load(); got != 0 {
+		t.Errorf("the handler ran %d times on a message whose id holds a NUL, want 0", got)
+	}
+	if got := len(dlq.dlq("t.dlq")); got != 1 {
+		t.Errorf("%d messages reached the dead-letter topic, want 1 — it must be preserved, not dropped", got)
+	}
+}
+
+// keySpy records every key the pipeline builds, without changing what the
+// wrapped store does with it.
+type keySpy struct {
+	inbox.Store
+	mu   sync.Mutex
+	keys []string
+}
+
+func (s *keySpy) Seen(ctx context.Context, key string) (bool, error) {
+	s.record(key)
+	return s.Store.Seen(ctx, key)
+}
+
+func (s *keySpy) MarkSeen(ctx context.Context, key string, ttl time.Duration) error {
+	s.record(key)
+	return s.Store.MarkSeen(ctx, key, ttl)
+}
+
+func (s *keySpy) record(key string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.keys = append(s.keys, key)
+}
+
+func (s *keySpy) seen() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return slices.Clone(s.keys)
 }
 
 // TestNonPositiveDedupeTTLPanics — WithDedupeTTL(0) silently disabled

@@ -421,8 +421,15 @@ Both corrected, and `GETTING_STARTED.md` gained the Postgres path it never had.
 3. **A `warren/testing` seam for a real database.** The schema-per-test
    harness in this package's integration suite is the right shape and is not
    exported, so every project reimplements it.
-4. **A `warren/inbox/inboxtest` contract suite is owed.** It belongs to the
-   port package, and it blocks a Redis driver as much as this one.
+4. ~~**A `warren/inbox/inboxtest` contract suite is owed.**~~ **DONE
+   (2026-08-03)** — it ships in the port package, and a Postgres store runs it
+   in one line. Three of its checks are aimed squarely here: `MarkSeen` must
+   be `ON CONFLICT … DO UPDATE` (a `DO NOTHING` keeps the first deadline and a
+   `GREATEST(…)` cannot shorten one — both are refresh violations); `Seen`
+   must not upsert; and the key column must be `text`, not `VARCHAR(n)`, on a
+   case-sensitive collation. Note also that the key can hold no NUL — Postgres
+   rejects `0x00` in `text` — which core now guarantees (U+001F separator,
+   `RequireMessageID` refuses a NUL id).
 5. **pgbouncer beyond `StatementCacheDescribe`.** `LISTEN`/`NOTIFY` and
    session-level advisory locks both need session pooling; that is a
    documentation section, but it is not written yet.

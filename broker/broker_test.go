@@ -130,7 +130,8 @@ func TestRingPosition(t *testing.T) {
 	// CONTRACTS package may see (§1.1). No kgo, no amqp, no OTel, ever.
 	allowed := map[string]bool{
 		"context": true, "errors": true, "fmt": true, "maps": true,
-		"math/rand/v2": true, "strconv": true, "sync": true, "time": true,
+		"math/rand/v2": true, "strconv": true, "strings": true,
+		"sync": true, "time": true,
 		"github.com/MerseniBilel/warren/app":    true,
 		"github.com/MerseniBilel/warren/errors": true,
 		"github.com/MerseniBilel/warren/inbox":  true,

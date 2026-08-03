@@ -7,6 +7,7 @@ import (
 	"maps"
 	"math/rand/v2"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -310,9 +311,16 @@ func Deduplicate(subscription string, store inbox.Store, ttl time.Duration) Midd
 		panic("broker: Deduplicate composed with a non-positive TTL — pass a positive one, or opt out with WithoutDedupe()")
 	}
 	// The scope is fixed at composition, so the request path concatenates
-	// rather than formats. NUL cannot appear in either half, so the join is
-	// unambiguous without escaping.
-	prefix := subscription + "\x00"
+	// rather than formats.
+	//
+	// The separator is U+001F UNIT SEPARATOR, not NUL, and the difference is
+	// load-bearing: the joined string becomes a key in an inbox.Store, and
+	// Postgres `text` rejects 0x00 outright — a NUL-separated key is
+	// unstorable in the first durable store anyone writes. Neither half
+	// carries U+001F (a subscription name is a developer-chosen identifier;
+	// RequireMessageID refuses an ID with a NUL and nothing generates a
+	// separator byte), so the join stays unambiguous without escaping.
+	prefix := subscription + keySeparator
 
 	return func(next MessageHandler) MessageHandler {
 		return func(ctx context.Context, msg Message) error {
@@ -344,31 +352,50 @@ func Deduplicate(subscription string, store inbox.Store, ttl time.Duration) Midd
 	}
 }
 
-// RequireMessageID refuses a message that carries no ID, as INVALID — which
-// is terminal, so the message is dead-lettered and preserved rather than
-// dropped or redelivered for ever.
+// RequireMessageID refuses a message whose ID cannot serve as a dedupe key,
+// as INVALID — which is terminal, so the message is dead-lettered and
+// preserved rather than dropped or redelivered for ever.
+//
+// Two IDs are refused. An EMPTY one, because it is not a key: without this
+// every message on the topic shares it, the first is handled, and every one
+// after it is silently acked and destroyed. And one carrying a NUL byte,
+// because the key must be storable by any inbox.Store — Postgres `text`
+// rejects 0x00 outright, so such an ID would be a store error on a durable
+// deployment and no error at all on the memory store, which is the worst
+// pairing there is. Refusing it here makes the guarantee inboxtest states
+// (keys hold no NUL) true by construction rather than by hope.
 //
 // Pipeline installs it only when deduplication is on, because that is when
-// the ID is load-bearing: it IS the key. Without this, every message on the
-// topic shares the empty key, the first is handled, and every one after it
-// is silently acked and destroyed.
+// the ID is load-bearing: it IS the key.
 //
 // It sits INSIDE the dead-letter ring and outside Retry: retrying a message
-// that will never grow an ID achieves nothing.
+// whose ID will never change achieves nothing.
 func RequireMessageID() Middleware {
 	return func(next MessageHandler) MessageHandler {
 		return func(ctx context.Context, msg Message) error {
 			if msg.ID == "" {
 				return errors.Invalid("message id", errNoMessageID)
 			}
+			if strings.ContainsRune(msg.ID, 0) {
+				return errors.Invalid("message id", errNULInMessageID)
+			}
 			return next(ctx, msg)
 		}
 	}
 }
 
+// keySeparator joins the subscription scope to the message ID in a dedupe
+// key. See Deduplicate for why it is U+001F and not NUL.
+const keySeparator = "\x1f"
+
 // errNoMessageID is the cause under the INVALID a message with no id gets.
 var errNoMessageID = stderrors.New(
 	"a message carries no ID, and the ID is the deduplication key — without one every message on the topic would share a key and all but the first would be discarded")
+
+// errNULInMessageID is the cause under the INVALID a message whose id holds
+// a NUL byte gets.
+var errNULInMessageID = stderrors.New(
+	"a message ID contains a NUL byte, and the ID is the deduplication key — a durable inbox store cannot hold one (Postgres text rejects 0x00), so the message would be deduplicated in development and fail in production")
 
 // DeadLetter is the disposition stage: it maps the inner chain's final error
 // by its outermost warren/errors code to the §2.6 consumer column. Terminal

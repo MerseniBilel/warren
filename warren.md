@@ -1522,11 +1522,26 @@ its own duplicate — and store failures fail closed. TTL is per call because
 the window is per *subscription* (it must exceed that subscription's
 redelivery window), while one `Store` serves them all.
 
-**A `warren/inbox/inboxtest` contract suite is owed** before a second store
-exists, as `broker/brokertest` is for the broker port — otherwise Postgres and
-Redis each re-derive the semantics, and the one that catches people is that
-**re-marking refreshes the TTL** (Redis `SET … EX` does it natively; Postgres
-needs an explicit `ON CONFLICT … DO UPDATE`).
+**`warren/inbox/inboxtest` is the contract suite**, written before the second
+store as `broker/brokertest` was for the broker port, so Postgres and Redis do
+not each re-derive the semantics. A driver runs it in one line
+(`inboxtest.Run(t, newStore)`); ten checks bind, and the two that catch people
+are silent ones: **re-marking refreshes the TTL in both directions** (Redis
+`SET … EX` does it natively, Postgres needs `ON CONFLICT … DO UPDATE` — a
+`DO NOTHING` expires a hot id mid-window, and a `GREATEST(…)` cannot shorten
+one), and **`Seen` must not record** — a store that upserts on read reports
+every first delivery as its own duplicate and the handler never runs at all.
+The suite's own tests point nine deliberately broken stores at it and assert
+each check is the one that catches its violation.
+
+**Keys are opaque and hold no NUL.** A store must not truncate, case-fold or
+normalise a key — a `VARCHAR(n)`, a MySQL `*_ci` collation, and a 255-byte
+index prefix each collide distinct keys and silently discard live messages —
+but it MAY assume no NUL byte, because Postgres `text` rejects `0x00` outright.
+Warren upholds that end: the scope separator is U+001F, not NUL, and
+`RequireMessageID` refuses an id carrying one as INVALID, so it is
+dead-lettered rather than becoming a store error in production and nothing at
+all on the memory store.
 
 **The memory store is bounded** (200k records by default) and evicts the
 earliest deadline first: the sweep can only reclaim what has already expired,
