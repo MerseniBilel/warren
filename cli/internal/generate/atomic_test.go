@@ -18,6 +18,12 @@ func TestAFailedEditLeavesNothingBehind(t *testing.T) {
 	t.Parallel()
 
 	dir := app(t)
+	// The aggregate first: a repository for an entity that does not exist is
+	// refused before any of this runs, and this test is about the rollback
+	// underneath.
+	if _, err := generate.Entity(generate.Options{Dir: dir, Module: "user", Name: "Order"}); err != nil {
+		t.Fatalf("g entity: %v", err)
+	}
 	modPath := filepath.Join(dir, "internal/modules/user/module.go")
 	before, err := os.ReadFile(modPath)
 	if err != nil {

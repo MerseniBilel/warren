@@ -379,3 +379,55 @@ func TestTelemetryFlushesLastWhereverItIsListed(t *testing.T) {
 		})
 	}
 }
+
+// TestControllerUnderPlainProvidersFailsTheBoot — GETTING_STARTED.md §5
+// promised "A controller under `Providers` would register no routes — so the
+// boot refuses it by name rather than letting you ship a dead service." It
+// did not. The guard existed but only walked warren.Eager, and a plain
+// provider nothing depends on is never constructed, so nothing looked at it:
+// the app booted, logged "http server listening", and every route 404'd.
+//
+// That is the exact failure the whole boot-validation pitch exists to
+// prevent, and it is the form a user actually mistypes.
+func TestControllerUnderPlainProvidersFailsTheBoot(t *testing.T) {
+	t.Parallel()
+
+	m := warren.NewModule("catalog",
+		warren.Providers(func() *deadController { return &deadController{} }),
+	)
+	err := warren.New(m).Start(context.Background())
+	if err == nil {
+		t.Fatal("a controller declared under Providers booted — it registers no routes and every one of them 404s")
+	}
+	for _, want := range []string{"controller declared as a plain provider", "catalog", "warren.Controllers"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("diagnostic does not mention %q:\n%s", want, err)
+		}
+	}
+}
+
+// TestAControllerSomethingDependsOnIsNotRefused — the check must not break
+// composition. A sub-controller listed under Providers and injected into the
+// controller that delegates to it IS constructed and IS registered, through
+// its parent. Refusing it would make the guard worse than the bug.
+func TestAControllerSomethingDependsOnIsNotRefused(t *testing.T) {
+	t.Parallel()
+
+	m := warren.NewModule("catalog",
+		warren.Providers(func() *deadController { return &deadController{} }),
+		warren.Controllers(func(sub *deadController) *parentController {
+			return &parentController{sub: sub}
+		}),
+	)
+	if err := warren.New(m).Start(context.Background()); err != nil {
+		t.Fatalf("a sub-controller its parent depends on was refused:\n%v", err)
+	}
+}
+
+type deadController struct{}
+
+func (*deadController) Register(transport.Registrar) {}
+
+type parentController struct{ sub *deadController }
+
+func (p *parentController) Register(r transport.Registrar) { p.sub.Register(r) }

@@ -195,6 +195,13 @@ func Repository(opts Options) (string, error) {
 	if !ok {
 		return "", errUnknownDriver(driver)
 	}
+	// The repository implements the port the ENTITY declares and stores the
+	// aggregate the entity defines. Without it the generated file cannot
+	// compile — and until this check existed the generator wrote it anyway,
+	// spliced a provider and an import into module.go, and reported success.
+	if err := checkEntityExists(opts.Dir, base, opts.Module, opts.Name); err != nil {
+		return "", err
+	}
 	content, err := render(tmpl, data)
 	if err != nil {
 		return "", err
@@ -714,6 +721,25 @@ func errConflict(paths []string) error {
 			"  Nothing was written and nothing was wired. Delete them, choose another\n"+
 			"  name, or pass --force to overwrite.",
 		strings.Join(paths, "\n      ")))
+}
+
+// checkEntityExists refuses a repository for an aggregate that has not been
+// generated. `warren g repository --help` already told the user to run
+// `warren g entity` first; this is that sentence enforced.
+//
+// It looks for the DECLARATION rather than the file, so an entity a user
+// hand-wrote into a differently-named file still counts — the check is about
+// whether the code will compile, not about who wrote it.
+func checkEntityExists(dir, base, module, name string) error {
+	if err := checkNotDeclared(dir, base+"/domain", nil, name); err != nil {
+		return nil // it IS declared: checkNotDeclared reports the collision
+	}
+	return diagnostic(fmt.Sprintf(
+		"✗ no such entity: %q\n\n    Module %q has no %s aggregate in its domain layer.\n\n"+
+			"    The repository stores that aggregate and implements the port the\n"+
+			"    entity declares, so it could not compile. Nothing was written.\n\n"+
+			"  Create it first:\n\n      warren g entity %s %s",
+		name, module, name, module, name))
 }
 
 func errUnknownModule(name, dir string) error {

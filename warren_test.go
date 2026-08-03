@@ -68,6 +68,14 @@ func (r *pgUserRepository) Kind() string { return "pg" }
 
 type userService struct{}
 
+// privateService is a module's own application service: no Register method,
+// because a type that HAS one is a controller by definition, and boot now
+// refuses a controller declared under Providers that nothing depends on.
+// userService carries Register only so other fixtures can list it under
+// warren.Consumers, which is why it cannot stand in for a private service
+// here.
+type privateService struct{}
+
 type invoiceService struct{ repo userRepository }
 
 // These three stand in for entry points throughout this file, so they carry
@@ -109,7 +117,7 @@ func section12App(j *journal) (*warren.App, *bool) {
 		warren.Imports(platform),
 		warren.Providers(
 			func(p *pool) userRepository { j.add("build repo"); return &pgUserRepository{p: p} },
-			func() *userService { j.add("build service"); return &userService{} },
+			func() *privateService { j.add("build service"); return &privateService{} },
 		),
 		warren.Exports[userRepository](),
 	)

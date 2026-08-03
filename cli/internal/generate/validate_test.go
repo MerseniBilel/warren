@@ -262,3 +262,61 @@ func TestDirThatIsNotADirectorySaysSo(t *testing.T) {
 		t.Errorf("the diagnostic does not say the path is a file:\n%v", err)
 	}
 }
+
+// TestRepositoryRequiresTheEntity — `warren g repository --help` says "Run
+// `warren g entity` first: the port has to exist for this to compile." It
+// did not check. The generator wrote a repository against domain.Widget,
+// spliced a provider and an import into module.go, and reported success:
+//
+//	infrastructure/widget_repository.go:16:46: undefined: domain.Widget
+//	... 8 errors
+//
+// And `warren generate --help` claims "there is no half-generated state to
+// clean up" — there was: the file, the provider line, and the now-unused
+// import all had to be removed by hand. The module-exists check three lines
+// away proves the shape was already understood.
+func TestRepositoryRequiresTheEntity(t *testing.T) {
+	t.Parallel()
+
+	dir := app(t)
+	if _, err := generate.Module(generate.Options{Dir: dir, Name: "catalog"}); err != nil {
+		t.Fatalf("g module: %v", err)
+	}
+	before := read(t, dir, "internal/modules/catalog/module.go")
+
+	_, err := generate.Repository(generate.Options{Dir: dir, Module: "catalog", Name: "Widget"})
+	if err == nil {
+		t.Fatal("a repository for an entity that does not exist was generated — it cannot compile")
+	}
+	for _, want := range []string{"no such entity", "Widget", "warren g entity catalog Widget"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("diagnostic does not mention %q:\n%v", want, err)
+		}
+	}
+
+	// Nothing was written, and module.go is byte-for-byte what it was.
+	if _, serr := os.Stat(filepath.Join(dir, "internal/modules/catalog/infrastructure/widget_repository.go")); serr == nil {
+		t.Error("the repository file was written despite the refusal")
+	}
+	if after := read(t, dir, "internal/modules/catalog/module.go"); after != before {
+		t.Errorf("module.go was mutated by a refused generator:\n%s", after)
+	}
+}
+
+// TestRepositoryAfterTheEntityStillWorks — the check must not refuse the
+// documented order.
+func TestRepositoryAfterTheEntityStillWorks(t *testing.T) {
+	t.Parallel()
+
+	dir := app(t)
+	if _, err := generate.Module(generate.Options{Dir: dir, Name: "catalog"}); err != nil {
+		t.Fatalf("g module: %v", err)
+	}
+	if _, err := generate.Entity(generate.Options{Dir: dir, Module: "catalog", Name: "Widget"}); err != nil {
+		t.Fatalf("g entity: %v", err)
+	}
+
+	if _, err := generate.Repository(generate.Options{Dir: dir, Module: "catalog", Name: "Widget"}); err != nil {
+		t.Fatalf("a repository for an entity that DOES exist was refused: %v", err)
+	}
+}

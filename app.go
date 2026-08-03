@@ -395,6 +395,17 @@ func (a *App) Start(ctx context.Context) error {
 		}
 	}
 
+	// A controller listed under Providers that nothing depends on can never
+	// be constructed, so step 5 never registers it and every route it meant
+	// to declare 404s. The Eager scan above catches the variant that IS
+	// built; this catches the one a user actually mistypes, and it is a
+	// static fact about the declarations, not about any value.
+	for _, m := range ordered {
+		if err := checkUnreachableControllers(m); err != nil {
+			return err
+		}
+	}
+
 	// A route nobody serves is a route that silently 404s in production, and
 	// it is detectable here — so it fails here, not there.
 	if err := table.Unserved(); err != nil {
@@ -659,4 +670,93 @@ func splitSite(site string) (string, int) {
 		return site, 0
 	}
 	return site[:i], line
+}
+
+// controllerType is what a constructor's return value is measured against
+// when deciding whether a plain provider is a controller in disguise.
+var controllerType = reflect.TypeFor[transport.Controller]()
+
+// checkUnreachableControllers refuses a controller declared under
+// warren.Providers that nothing in the module can consume.
+//
+// The rule is deliberately narrow. Merely being a controller under Providers
+// is not an error — a sub-controller its parent delegates to is constructed
+// and registered THROUGH that parent, and refusing it would make the guard
+// worse than the bug it prevents. What cannot be right is a controller
+// nothing depends on: dig builds a provider only on demand, so it is never
+// constructed, step 5 never registers it, and every route it meant to
+// declare 404s while the app logs a clean boot.
+//
+// Reachability is read off the declarations — the parameter types of every
+// constructor in the module, plus its eager list — so nothing is
+// instantiated to find out.
+func checkUnreachableControllers(m Module) error {
+	if len(m.providers) == 0 {
+		return nil
+	}
+	consumed := map[reflect.Type]bool{}
+	for _, group := range [][]any{m.providers, m.controllers, m.consumers} {
+		for _, ctor := range group {
+			t := reflect.TypeOf(ctor)
+			if t == nil || t.Kind() != reflect.Func {
+				continue
+			}
+			for i := range t.NumIn() {
+				consumed[t.In(i)] = true
+			}
+		}
+	}
+	for _, t := range m.eager {
+		consumed[t] = true
+	}
+
+	for _, ctor := range m.providers {
+		t := reflect.TypeOf(ctor)
+		if t == nil || t.Kind() != reflect.Func || t.NumOut() == 0 {
+			continue
+		}
+		out := t.Out(0)
+		if !out.Implements(controllerType) || consumed[out] {
+			continue
+		}
+		// An EXPORTED type is reachable from outside: an importing module's
+		// constructor can consume it, and this module cannot see that. The
+		// export list is the only way out of a module, so it is the complete
+		// escape — and a type that carries a Register method for a consumer's
+		// benefit is exactly the shape that would otherwise be refused here.
+		if slices.Contains(m.exports, out) {
+			continue
+		}
+		return errControllerIsAPlainProvider(m, out)
+	}
+	return nil
+}
+
+// errControllerIsAPlainProvider names the module, the type, and the one-word
+// edit — because the symptom is a 404 with nothing in the logs, and the
+// distance between `warren.Providers` and `warren.Controllers` is where the
+// user's eye will not go on its own.
+func errControllerIsAPlainProvider(m Module, t reflect.Type) error {
+	return diagnostic(fmt.Sprintf(
+		"✗ controller declared as a plain provider\n\n"+
+			"    module %q (%s)\n"+
+			"      └─ warren.Providers lists a constructor returning %s,\n"+
+			"           which implements Register(transport.Registrar) — and nothing\n"+
+			"           in the module depends on it.\n\n"+
+			"  Only warren.Controllers is registered at boot step 5. Declared this way\n"+
+			"  the constructor is never called, no route is registered, and every one\n"+
+			"  of them 404s while the app logs a clean start.\n\n"+
+			"      warren.Controllers(%s)\n\n"+
+			"  If it really is a plain dependency, something has to depend on it.",
+		m.name, m.declared, t, constructorHint(t)))
+}
+
+// constructorHint guesses the constructor's name from the type it returns —
+// New<Type> is what every generator writes and what the manual documents.
+func constructorHint(t reflect.Type) string {
+	name := t.String()
+	if i := strings.LastIndexByte(name, '.'); i >= 0 {
+		name = name[i+1:]
+	}
+	return "New" + strings.TrimPrefix(name, "*")
 }
