@@ -756,8 +756,14 @@ scope. What genuinely remains:
    but not a rate limit or a CORS policy scoped to `/admin/*`. Not in v0.1.
 4. **Do raw routes appear in `warren/openapi` (§4.3)?** For that spec to answer.
 5. **RESOLVED** — `ErrorLog` goes to `slog`. See Divergences 5.
-6. **`warren/log` should carry the correlation ID through a `slog.Handler`,
-   not through a per-request derived logger.** warren.md §2.5 promises
+6. ~~**`warren/log` should carry the correlation ID through a `slog.Handler`,
+   not through a per-request derived logger.**~~ **DONE (2026-08-04)** —
+   `log.Handler` ships in core, `warren new` installs it in main, and the
+   allocation budget stayed at 18. One bug outlived it: the recoverer was
+   composed OUTSIDE `correlate`, so a panic's 500 body and its "handler
+   panicked" record were the only output in the service with no correlation
+   ID. Recover is now applied twice, inner and outer, as `broker.Pipeline`
+   already did. Original text: warren.md §2.5 promises
    `log.FromContext(ctx)` already carries it; deriving it at the edge costs 8
    allocations on every request, including the ones that never log. A
    `slog.Handler` that reads the ID off the `ctx` it is already handed at

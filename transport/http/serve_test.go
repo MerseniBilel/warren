@@ -1,7 +1,9 @@
 package http_test
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
 	"net"
 	"net/http"
 	"strings"
@@ -640,37 +642,84 @@ func serveWithTelemetry(t *testing.T, tel app.Telemetry, modules ...warren.Modul
 	return "http://" + ln.Addr().String()
 }
 
-// TestAPanicKeepsTheCorrelationID locks the property a field test reported
-// as broken and which did NOT reproduce: the 500 body a panic produces
-// carries the same correlation ID as the header, so an operator handed the
-// body has a way back to the log line.
+// TestAPanicKeepsTheCorrelationID — a panic's 500 body and its "handler
+// panicked" log record both carried NO correlation ID, while the response
+// header did. The two places an operator actually looks were the only ones
+// in the service that could not be joined to the request that caused them,
+// at the moment that link is worth most.
 //
-// It is regression-locked rather than dismissed because the claim was
-// specific and the mechanism is subtle — the recoverer is composed OUTSIDE
-// correlate, and the only thing populating this field is
-// log.CorrelationID(ctx) inside the recoverer. If that ever stops seeing
-// the correlated context, the body silently loses the one identifier that
-// joins a user's complaint to a stack trace.
+// The cause was composition: recoverer(correlate(h)). correlate passes a
+// NEW request down, so the recoverer's deferred func closes over the one
+// whose context was never given an ID. Fixed the way broker.Pipeline
+// already does it — Recover twice, inner and outer. The inner sees the
+// correlated context; the outer still catches a panic in correlate itself.
 //
-// What the same report got RIGHT is the log record, which carries no
-// correlation_id — and that is not this ordering. The recoverer already
-// calls ErrorContext(ctx, …); what is missing is a log.Handler resolving
-// the ID at Handle time, which is transport/http/SPEC.md open question 6
-// and affects every log line in the service, not only panics.
+// The log record is the assertion that bites. An earlier version of this
+// test checked only the body, and passed against the broken code twice
+// over: once because it sent a body that returns an ERROR rather than
+// panicking — rendered inside correlate, so it always had the ID — and once
+// because the body is not where this reliably shows.
 func TestAPanicKeepsTheCorrelationID(t *testing.T) {
-	t.Parallel()
+	// Not parallel: it swaps slog.Default to capture what a real main
+	// installs.
+	var buf syncBuffer
+	old := slog.Default()
+	slog.SetDefault(slog.New(wlog.Handler(slog.NewJSONHandler(&buf, nil))))
+	t.Cleanup(func() { slog.SetDefault(old) })
 
+	// {"code":"PANIC"} is what makes the handler panic. Any other value
+	// returns an ERROR instead, which is rendered inside correlate and so
+	// always carried the ID — sending the wrong key is how an earlier
+	// version of this test passed against the broken code.
 	base := serve(t, []warren.Module{userModule()})
-	res, body := do(t, "POST", base+"/fail", `{"email":"boom@example.com"}`)
+	res, body := do(t, "POST", base+"/fail", `{"code":"PANIC"}`)
 
 	if res.StatusCode != 500 {
 		t.Fatalf("status = %d, want 500", res.StatusCode)
 	}
-	header := res.Header.Get("X-Correlation-Id")
-	if header == "" {
-		t.Fatal("no X-Correlation-Id header on a panicking request")
+	id := res.Header.Get(whttp.CorrelationHeader)
+	if id == "" {
+		t.Fatal("no correlation header on a panicking request")
 	}
-	if !strings.Contains(body, header) {
-		t.Errorf("the response body does not carry the correlation ID %q:\n%s\n\nAn operator handed this body has no way back to the log line.", header, body)
+	if !strings.Contains(body, id) {
+		t.Errorf("the 500 body does not carry the correlation ID %q:\n%s\n\nAn operator handed this body has no way back to the log line.", id, body)
 	}
+
+	// The log record is what an operator greps. Give the write a moment:
+	// it happens on the server's goroutine.
+	deadline := time.Now().Add(5 * time.Second)
+	for !strings.Contains(buf.String(), "handler panicked") && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	logged := buf.String()
+	if !strings.Contains(logged, "handler panicked") {
+		t.Fatal("the panic was never logged")
+	}
+	for _, line := range strings.Split(logged, "\n") {
+		if !strings.Contains(line, "handler panicked") {
+			continue
+		}
+		if !strings.Contains(line, id) {
+			t.Errorf("the panic log record does not carry the correlation ID %q:\n%s", id, line)
+		}
+	}
+}
+
+// syncBuffer is a bytes.Buffer safe to write from the server goroutine and
+// read from the test's.
+type syncBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (s *syncBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+
+func (s *syncBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.String()
 }

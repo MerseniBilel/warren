@@ -173,7 +173,19 @@ func (s *server) wrap(h http.Handler) http.Handler {
 	if s.tel != nil {
 		h = s.telemetry(h)
 	}
-	return s.recoverer(s.correlate(h))
+	// Recover TWICE, the way the consumer chain does (broker.Pipeline).
+	//
+	// The INNER one sits inside correlate, so the context it recovers with
+	// carries the correlation ID: the 500 body and the "handler panicked"
+	// log record can both be joined to the request that caused them, which
+	// is the moment that link is worth most. Composed only on the outside,
+	// its deferred func closes over the request correlate has not yet
+	// replaced, and both come out anonymous.
+	//
+	// The OUTER one is still the net: a panic in correlate itself, or in
+	// anything between it and the listener, must not kill the connection
+	// silently.
+	return s.recoverer(s.correlate(s.recoverer(h)))
 }
 
 func (s *server) start(context.Context) error {
