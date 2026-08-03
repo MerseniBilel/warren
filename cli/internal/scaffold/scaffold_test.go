@@ -185,3 +185,113 @@ func TestModulePathIsRequired(t *testing.T) {
 		t.Errorf("err = %v, want the missing flag named", err)
 	}
 }
+
+// TestInvalidModulePathIsRefused — `warren new q2 --module 'not a module
+// path!!'` exited 0 and wrote a tree whose every go command fails with
+// "go.mod:1: usage: module module/path". --db and --transport are both
+// validated; the one flag that is REQUIRED was not.
+func TestInvalidModulePathIsRefused(t *testing.T) {
+	t.Parallel()
+
+	for _, bad := range []string{
+		"not a module path!!",
+		"has space/pkg",
+		"trailing/",
+		"/leading",
+		"double//slash",
+		"github.com/you/app\n",
+		"tab\there",
+	} {
+		t.Run(bad, func(t *testing.T) {
+			t.Parallel()
+			err := scaffold.New(scaffold.Options{
+				Dir: t.TempDir(), Name: "app", ModulePath: bad, Version: "v0.1.0",
+				DB: "memory", Broker: "memory",
+			})
+			if err == nil {
+				t.Fatalf("--module %q was accepted; every go command in that tree then fails", bad)
+			}
+			if !strings.Contains(err.Error(), "not a valid Go module path") {
+				t.Errorf("diagnostic:\n%v", err)
+			}
+		})
+	}
+}
+
+// TestOrdinaryModulePathsAreAccepted guards the check against being so
+// strict it refuses what people actually type.
+func TestOrdinaryModulePathsAreAccepted(t *testing.T) {
+	t.Parallel()
+
+	for _, good := range []string{
+		"github.com/you/app",
+		"example.com/inventory",
+		"gitlab.com/org/sub-group/app.v2",
+		"my-internal-thing",
+		"github.com/you/app/v2",
+		"git.company.internal/team/svc_name",
+	} {
+		t.Run(good, func(t *testing.T) {
+			t.Parallel()
+			if err := scaffold.New(scaffold.Options{
+				Dir: t.TempDir(), Name: "app", ModulePath: good, Version: "v0.1.0",
+				DB: "memory", Broker: "memory",
+			}); err != nil {
+				t.Errorf("--module %q was refused: %v", good, err)
+			}
+		})
+	}
+}
+
+// TestFrameworkPathWritesReplaceDirectives — `warren new` produced a tree
+// that did not build: "missing go.sum entry for module providing package
+// github.com/MerseniBilel/warren/app", fifteen times over, because the
+// framework is not published yet and go could not resolve the require.
+// `warren new --help` claimed "It compiles and passes `go test` as
+// generated". This is the flag that makes that true, and the CLI's own
+// compile test now uses it rather than hand-patching go.mod — so the path a
+// user takes is the path CI exercises.
+func TestFrameworkPathWritesReplaceDirectives(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	if err := scaffold.New(scaffold.Options{
+		Dir: dir, Name: "app", ModulePath: "example.com/app", Version: "v0.1.0",
+		FrameworkPath: "/somewhere/warren",
+	}); err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	mod, err := os.ReadFile(filepath.Join(dir, "go.mod"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"replace github.com/MerseniBilel/warren => /somewhere/warren",
+		"replace github.com/MerseniBilel/warren/transport/http => /somewhere/warren/transport/http",
+	} {
+		if !strings.Contains(string(mod), want) {
+			t.Errorf("go.mod is missing %q:\n%s", want, mod)
+		}
+	}
+}
+
+// TestNoFrameworkPathWritesNoReplace — invariant 8 is about this repository,
+// but a replace nobody asked for in a user's go.mod is its own bug: it
+// would point at a path that does not exist on their machine.
+func TestNoFrameworkPathWritesNoReplace(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	if err := scaffold.New(scaffold.Options{
+		Dir: dir, Name: "app", ModulePath: "example.com/app", Version: "v0.1.0",
+	}); err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	mod, err := os.ReadFile(filepath.Join(dir, "go.mod"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(mod), "replace") {
+		t.Errorf("go.mod carries a replace nobody asked for:\n%s", mod)
+	}
+}

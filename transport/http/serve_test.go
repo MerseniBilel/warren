@@ -314,11 +314,19 @@ func TestConflictingPatternsFailTheBootNotAPanic(t *testing.T) {
 
 type conflictController struct{}
 
+// getByUID exists so the second route's `param:` tag matches its own
+// wildcard. Reusing getUser (param:"id") on /users/{uid} makes THAT the
+// first failure — correctly, since it would bind "" on every request — and
+// this test is about the pattern conflict underneath it.
+type getByUID struct {
+	UID string `param:"uid"`
+}
+
 func (c *conflictController) Register(r transport.Registrar) {
 	transport.Get(r, "/users/{id}", app.HandlerFunc[getUser, userDTO](
 		func(context.Context, getUser) (userDTO, error) { return userDTO{}, nil }))
-	transport.Get(r, "/users/{uid}", app.HandlerFunc[getUser, userDTO](
-		func(context.Context, getUser) (userDTO, error) { return userDTO{}, nil }))
+	transport.Get(r, "/users/{uid}", app.HandlerFunc[getByUID, userDTO](
+		func(context.Context, getByUID) (userDTO, error) { return userDTO{}, nil }))
 }
 
 // --- shutdown --------------------------------------------------------------

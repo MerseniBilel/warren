@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"reflect"
 	"strconv"
+	"strings"
 
 	"github.com/MerseniBilel/warren/errors"
 )
@@ -159,4 +160,79 @@ func bindParams(req any, p Params, setters []setter) error {
 		}
 	}
 	return nil
+}
+
+// checkWildcards refuses a `param:` tag the route pattern has no wildcard
+// for. Both facts are known here, at registration, and the alternative is a
+// field that binds "" on every request: the handler looks up the zero value
+// and returns NOT_FOUND, so the service boots, serves, and is wrong.
+//
+// Renaming a path segment without renaming the tag is the ordinary way to
+// reach it, and nothing in the response says the parameter never arrived.
+//
+// Only PATH parameters are checked. A query: tag has no wildcard by
+// definition, and a pattern with a wildcard nothing binds is legitimate —
+// a route may ignore a segment it matches on.
+func checkWildcards(pattern string, setters []setter) error {
+	var missing []setter
+	for _, s := range setters {
+		if s.query {
+			continue
+		}
+		if !hasWildcard(pattern, s.name) {
+			missing = append(missing, s)
+		}
+	}
+	if len(missing) == 0 {
+		return nil
+	}
+
+	var errs []error
+	present := wildcards(pattern)
+	for _, s := range missing {
+		hint := "  Add it to the pattern, or drop the tag."
+		switch {
+		case len(present) == 1:
+			hint = fmt.Sprintf("  The pattern declares {%s}. Did you mean `param:%q`?", present[0], present[0])
+		case len(present) > 1:
+			hint = fmt.Sprintf("  The pattern declares {%s}. Use one of those, or add {%s}.",
+				strings.Join(present, "}, {"), s.name)
+		}
+		errs = append(errs, diagnostic(fmt.Sprintf(
+			"✗ no matching path wildcard\n\n    field tagged `param:%q` has no {%s} in the route pattern\n    %s\n\n"+
+				"    It would bind \"\" on every request — the handler would look up the\n"+
+				"    zero value and report NOT_FOUND, with nothing saying why.\n\n%s",
+			s.name, s.name, pattern, hint)))
+	}
+	return errRegistration(errs)
+}
+
+// hasWildcard reports whether pattern declares {name} or {name...}.
+func hasWildcard(pattern, name string) bool {
+	for _, w := range wildcards(pattern) {
+		if w == name {
+			return true
+		}
+	}
+	return false
+}
+
+// wildcards lists the names a pattern declares, in order, with the trailing
+// "..." of a multi-segment wildcard stripped — {rest...} binds "rest", so
+// that is the name a tag must carry.
+func wildcards(pattern string) []string {
+	var out []string
+	for rest := pattern; ; {
+		open := strings.IndexByte(rest, '{')
+		if open < 0 {
+			return out
+		}
+		rest = rest[open+1:]
+		close := strings.IndexByte(rest, '}')
+		if close < 0 {
+			return out // an unbalanced brace is the router's error to report
+		}
+		out = append(out, strings.TrimSuffix(rest[:close], "..."))
+		rest = rest[close+1:]
+	}
 }

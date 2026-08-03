@@ -590,6 +590,10 @@ func register[Req, Res any](r Registrar, p Protocol, verb, pattern string, h app
 		reg.fail(err)
 		return
 	}
+	if err := checkWildcards(pattern, setters); err != nil {
+		reg.fail(err)
+		return
+	}
 
 	reg.record(entry{
 		protocol: p,

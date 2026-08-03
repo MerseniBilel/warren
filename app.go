@@ -333,6 +333,26 @@ func (a *App) Start(ctx context.Context) error {
 	a.mu.Lock()
 	validator := a.validator
 	a.mu.Unlock()
+	// App.Validator wins; failing that, a validate.Validator in the graph is
+	// used — the same seam as telemetry, and for a sharper reason. A harness
+	// that boots the app itself (warrentest.NewModuleTest) never calls
+	// App.Validator, so without this a module whose requests carry tags only
+	// warren/validate/playground can enforce serves in production and cannot
+	// be booted in a test. The scan is over module scopes because a module's
+	// providers are private to it, and root-scope bindings are visible from
+	// every one of them.
+	if validator == nil {
+		for _, m := range ordered {
+			v, err := resolveDynamic(scopes[m.name], validatorType)
+			if err != nil {
+				continue
+			}
+			if vv, ok := v.(validate.Validator); ok && vv != nil {
+				validator = vv
+				break
+			}
+		}
+	}
 	var bopts []transport.BuilderOption
 	if validator != nil {
 		bopts = append(bopts, transport.WithValidator(validator))

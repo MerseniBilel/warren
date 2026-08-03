@@ -31,6 +31,7 @@ import (
 	"github.com/MerseniBilel/warren/broker/memory"
 	"github.com/MerseniBilel/warren/domain"
 	"github.com/MerseniBilel/warren/transport"
+	"github.com/MerseniBilel/warren/validate"
 )
 
 // App is a booted module graph under test.
@@ -73,6 +74,22 @@ func WithModules(extra ...warren.Module) Option {
 // The default is the module passed to NewModuleTest.
 func InModule(name string) Option {
 	return Option{apply: func(c *config) { c.inModule = name }}
+}
+
+// WithValidator compiles the module's routes against v instead of the
+// standard-library validator — how a module whose requests carry tags core
+// refuses is tested:
+//
+//	warrentest.NewModuleTest(t, stock.Module(), warrentest.WithValidator(playground.New()))
+//
+// Without it, installing warren/validate/playground — which core's own
+// diagnostic tells you to do — booted in production and failed every module
+// test in that module, because NewModuleTest calls Start itself and never
+// touches App.Validator.
+func WithValidator(v validate.Validator) Option {
+	return Option{apply: func(c *config) {
+		c.subs = append(c.subs, warren.Bind[validate.Validator](v))
+	}}
 }
 
 // WithMemoryBroker binds the in-process broker as Publisher and Subscriber

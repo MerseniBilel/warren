@@ -18,6 +18,7 @@ import (
 	"strings"
 
 	"github.com/MerseniBilel/warren/app"
+	"github.com/MerseniBilel/warren/validate"
 )
 
 // Module is an inert declaration of one module: its name, its imports, its
@@ -222,6 +223,19 @@ var errType = reflect.TypeFor[error]()
 // step 5: an exported app.Telemetry means instrumentation is composed into
 // every route.
 var telemetryType = reflect.TypeFor[app.Telemetry]()
+
+// validatorType is the same seam for validation: a validate.Validator in the
+// graph is the one every route's rules are compiled against, exactly as
+// App.Validator would have set it.
+//
+// It exists because App.Validator is not reachable from every place an app
+// is booted. warrentest.NewModuleTest calls Start itself, so a module whose
+// requests carry tags the standard-library validator refuses — which is what
+// installing warren/validate/playground is FOR — could be served in
+// production and not booted in a test. Two shipped features were mutually
+// exclusive; making the validator resolvable from the graph, as telemetry
+// already was, is what reconciles them.
+var validatorType = reflect.TypeFor[validate.Validator]()
 
 // diagnostic carries a rendered multi-line block; the text is the contract,
 // covered by golden files like every other Warren diagnostic.

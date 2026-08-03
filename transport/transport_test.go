@@ -545,3 +545,54 @@ func TestRawPatternMayCarryAMethod(t *testing.T) {
 		t.Fatalf("Raw must accept \"METHOD /path\": %v", err)
 	}
 }
+
+// TestParamTagWithNoWildcardIsARegistrationError — a `param:"id"` tag whose
+// route pattern has no {id} bound to "" on every request, and nothing said
+// so. The service booted, the route served, and the handler looked up the
+// zero value: `{"code":"NOT_FOUND","message":"*domain.Product  not found"}`,
+// the double space being the only clue. Renaming a path segment and
+// forgetting the tag is the ordinary way to reach it.
+//
+// Both facts are known at registration, so this belongs with the duplicate
+// route and the unsupported tag, not in production.
+func TestParamTagWithNoWildcardIsARegistrationError(t *testing.T) {
+	t.Parallel()
+
+	type req struct {
+		ID     string `param:"id"`
+		Reason string `json:"reason"`
+	}
+	b := transport.NewBuilder()
+	transport.Post(b.For("catalog"), "/products/{productId}/discontinue",
+		app.Handler[req, userDTO](app.HandlerFunc[req, userDTO](
+			func(context.Context, req) (userDTO, error) { return userDTO{}, nil })))
+	_, err := b.Table()
+	if err == nil {
+		t.Fatal("a param tag with no matching wildcard registered silently — it binds \"\" on every request")
+	}
+	for _, want := range []string{"no matching path wildcard", `param:"id"`, "/products/{productId}/discontinue", "productId"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("diagnostic does not mention %q:\n%s", want, err)
+		}
+	}
+}
+
+// TestParamTagsThatDoMatchStillRegister — the check must not refuse the
+// ordinary cases: an exact wildcard, a trailing {rest...}, and a query tag,
+// which never has a wildcard by definition.
+func TestParamTagsThatDoMatchStillRegister(t *testing.T) {
+	t.Parallel()
+
+	type req struct {
+		ID   string `param:"id"`
+		Rest string `param:"rest"`
+		Page int    `query:"page"`
+	}
+	b := transport.NewBuilder()
+	transport.Get(b.For("catalog"), "/products/{id}/files/{rest...}",
+		app.Handler[req, userDTO](app.HandlerFunc[req, userDTO](
+			func(context.Context, req) (userDTO, error) { return userDTO{}, nil })))
+	if _, err := b.Table(); err != nil {
+		t.Fatalf("a route whose wildcards all match was refused:\n%s", err)
+	}
+}

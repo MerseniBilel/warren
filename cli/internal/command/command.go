@@ -123,7 +123,12 @@ func newCmd() *cobra.Command {
 		Short: "Scaffold a Warren application",
 		Long: "new writes a working Warren service: a module graph, a feature with\n" +
 			"its four layers, the transactional outbox, a consumer, and tests that\n" +
-			"boot the whole thing. It compiles and passes `go test` as generated.",
+			"boot the whole thing.\n\n" +
+			"Warren is not published yet, so `go build` in a fresh scaffold cannot\n" +
+			"resolve the framework. Pass --framework <path-to-warren-checkout> and\n" +
+			"the go.mod gets the replace directives that make it compile and pass\n" +
+			"`go test` as generated. When v0.1.0 is tagged the flag stops being\n" +
+			"necessary.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			opts.Name = args[0]
@@ -139,19 +144,38 @@ func newCmd() *cobra.Command {
 			}
 			abs, _ := filepath.Abs(opts.Dir)
 			_, err := fmt.Fprintf(cmd.OutOrStdout(),
-				"Created %s\n\n  cd %s\n  %s_NAME=%s go run ./cmd/%s\n  go test ./...\n\n"+
+				"Created %s\n\n%s  cd %s\n  go mod tidy\n  %s_NAME=%s go run ./cmd/%s\n  go test ./...\n\n"+
 					"It serves POST /users, /healthz and /readyz on :8080.\n"+
 					"README.md says what is there and what is not.\n",
-				abs, opts.Dir, envPrefix(opts.Name), opts.Name, opts.Name)
+				abs, unpublishedNotice(opts.FrameworkPath), opts.Dir,
+				envPrefix(opts.Name), opts.Name, opts.Name)
 			return err
 		},
 	}
 	cmd.Flags().StringVar(&opts.ModulePath, "module", "", "the Go module path of the new app (required)")
 	cmd.Flags().StringVar(&opts.Dir, "dir", "", "where to write it (default: the app's name)")
+	cmd.Flags().StringVar(&opts.FrameworkPath, "framework", "", "path to a local Warren checkout, written as replace directives (needed until v0.1.0 is tagged)")
 	cmd.Flags().StringVar(&opts.Transport, "transport", "", "transport adapter (none released yet)")
 	cmd.Flags().StringVar(&opts.DB, "db", "memory", "persistence driver: memory")
 	cmd.Flags().StringVar(&opts.Broker, "broker", "memory", "broker driver: memory")
 	return cmd
+}
+
+// unpublishedNotice tells the user what --framework would have done, once,
+// at the moment it matters. Without it the first thing a new project does is
+// fail fifteen times with "missing go.sum entry for module providing package
+// github.com/MerseniBilel/warren/app" — which names neither the cause nor
+// the fix.
+//
+// Delete this when v0.1.0 is tagged and the require resolves on its own.
+func unpublishedNotice(frameworkPath string) string {
+	if frameworkPath != "" {
+		return ""
+	}
+	return "Warren is not published yet, so `go mod tidy` cannot resolve it. Either\n" +
+		"re-run with --framework <path-to-your-warren-checkout>, or add to go.mod:\n\n" +
+		"  replace github.com/MerseniBilel/warren => /path/to/warren\n" +
+		"  replace github.com/MerseniBilel/warren/transport/http => /path/to/warren/transport/http\n\n"
 }
 
 func envPrefix(name string) string {

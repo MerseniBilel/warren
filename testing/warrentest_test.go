@@ -5,6 +5,7 @@ import (
 	stderrors "errors"
 	"flag"
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -17,6 +18,7 @@ import (
 	"github.com/MerseniBilel/warren/health"
 	warrentest "github.com/MerseniBilel/warren/testing"
 	"github.com/MerseniBilel/warren/transport"
+	"github.com/MerseniBilel/warren/validate"
 )
 
 var _ = flag.Bool("update", false, "rewrite golden files")
@@ -262,3 +264,110 @@ func moduleB() warren.Module {
 		func() app.Handler[echoReq, echoRes] { return echoHandler{prefix: "b"} },
 	))
 }
+
+// --- a module whose routes carry a tag the core validator refuses ---------
+
+type reserveStock struct {
+	OrderID  string `json:"order_id" validate:"required,min=3"`
+	Quantity int    `json:"quantity" validate:"gte=1,lte=1000"`
+}
+
+type reservation struct{ ID string }
+
+type stockHandler struct{}
+
+func (stockHandler) Handle(context.Context, reserveStock) (reservation, error) {
+	return reservation{ID: "r-1"}, nil
+}
+
+// stockController registers a route whose request type carries min=/gte=/lte=
+// — constraints the standard-library validator plans and refuses.
+type stockController struct {
+	h app.Handler[reserveStock, reservation]
+}
+
+func (c *stockController) Register(r transport.Registrar) {
+	transport.Post(r, "/stock/reservations", c.h)
+}
+
+func stockModule() warren.Module {
+	return warren.NewModule("stock",
+		warren.Providers(func() app.Handler[reserveStock, reservation] { return stockHandler{} }),
+		warren.Controllers(func(h app.Handler[reserveStock, reservation]) *stockController {
+			return &stockController{h: h}
+		}),
+	)
+}
+
+// permissive is a stand-in for validate/playground: a Validator that plans
+// every tag. Core cannot import the playground module (it is a separate
+// module, and core is stdlib + dig), so the SEAM is what this tests — that a
+// Validator reaching the boot from the graph is the one routes are compiled
+// against.
+type permissive struct{ planned int }
+
+func (p *permissive) Plan(reflect.Type) (validate.Rule, error) {
+	p.planned++
+	return func(any) error { return nil }, nil
+}
+
+// TestAValidatorFromTheGraphIsUsed — a module test could not use
+// validate/playground at all. Core's validator refuses min=/gte=, the boot
+// diagnostic tells you to install the playground module, and then every
+// module test in that module failed to boot: NewModuleTest calls Start
+// itself, and the validator was reachable only through App.Validator, which
+// the harness never calls. Two shipped v0.1 features were mutually
+// exclusive, and Warren's own diagnostic walked you into it.
+func TestAValidatorFromTheGraphIsUsed(t *testing.T) {
+	t.Parallel()
+
+	v := &permissive{}
+	a := warrentest.NewModuleTest(t, stockModule(), warrentest.WithValidator(v))
+
+	if v.planned == 0 {
+		t.Error("the validator from the graph planned nothing — the route was compiled against a different one")
+	}
+	got, err := warrentest.Invoke[reserveStock, reservation](t.Context(), a, reserveStock{OrderID: "o-1", Quantity: 2})
+	if err != nil {
+		t.Fatalf("Invoke: %v", err)
+	}
+	if got.ID != "r-1" {
+		t.Errorf("Invoke = %+v, want the handler's reservation", got)
+	}
+}
+
+// TestWithoutAValidatorTheCoreOneStillRefuses — the fix must not silently
+// downgrade: a module carrying tags core cannot enforce, booted with no
+// validator, must still fail loudly.
+func TestWithoutAValidatorTheCoreOneStillRefuses(t *testing.T) {
+	t.Parallel()
+
+	// Driven through warren.App directly: NewModuleTest turns a boot failure
+	// into t.Fatalf, which is right for a user and untestable from here.
+	a := warren.New(stockModule(), claimsModule())
+	err := a.Start(context.Background())
+	if err == nil {
+		t.Fatal("a module whose tags core cannot enforce booted with no validator")
+	}
+	if !strings.Contains(err.Error(), "unsupported validation constraint") {
+		t.Errorf("diagnostic was:\n%v\nwant it to name the unsupported constraint", err)
+	}
+}
+
+// claimsModule mirrors what NewModuleTest installs so a route registered in
+// a test app is not refused for having no adapter.
+func claimsModule() warren.Module {
+	return warren.NewModule("claims",
+		warren.Providers(func(tbl *transport.Table) *claims {
+			for _, p := range []transport.Protocol{
+				transport.ProtocolHTTP, transport.ProtocolGRPC, transport.ProtocolEvent,
+			} {
+				tbl.Claim(p, "test")
+			}
+			return &claims{}
+		}),
+		warren.Eager[*claims](),
+	)
+}
+
+type claims struct{}

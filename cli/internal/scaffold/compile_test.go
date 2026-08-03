@@ -1,7 +1,6 @@
 package scaffold_test
 
 import (
-	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -25,36 +24,26 @@ func TestScaffoldCompilesAndPasses(t *testing.T) {
 	}
 	t.Parallel()
 
-	dir := t.TempDir()
-	if err := scaffold.New(scaffold.Options{
-		Dir: dir, Name: "myapp", ModulePath: "example.com/myapp", Version: "v0.1.0",
-	}); err != nil {
-		t.Fatalf("New: %v", err)
-	}
-
 	framework, err := filepath.Abs("../../..")
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Replace directives in the TEMP app's go.mod, not a go.work.
-	//
-	// A workspace cannot resolve a require on an untagged sibling module —
-	// the generated app requires warren/transport/http v0.1.0, which does not
-	// exist yet — so `use` is not enough and `go work sync` would write the
-	// workspace's resolved versions back into the FRAMEWORK's go.mod, which
-	// is how an indirect dependency once contaminated the core module.
-	// Replaces here are scoped to this temp directory and nothing is added to
-	// the repository (invariant 8: no COMMITTED replace).
-	mod := filepath.Join(dir, "go.mod")
-	src, rerr := os.ReadFile(mod)
-	if rerr != nil {
-		t.Fatal(rerr)
-	}
-	src = append(src, []byte(
-		"\nreplace github.com/MerseniBilel/warren => "+framework+
-			"\n\nreplace github.com/MerseniBilel/warren/transport/http => "+framework+"/transport/http\n")...)
-	if err := os.WriteFile(mod, src, 0o644); err != nil {
-		t.Fatal(err)
+
+	dir := t.TempDir()
+	if err := scaffold.New(scaffold.Options{
+		Dir: dir, Name: "myapp", ModulePath: "example.com/myapp", Version: "v0.1.0",
+		// The SAME flag a user passes, not a hand-patched go.mod: the
+		// scaffold produced a tree that did not build for anyone but this
+		// test, precisely because this test patched around it.
+		//
+		// Replaces here are scoped to a temp directory and nothing is added
+		// to the repository (invariant 8: no COMMITTED replace). They go in
+		// the app's go.mod rather than a go.work because a workspace cannot
+		// resolve a require on an untagged sibling, and `go work sync` would
+		// write resolved versions back into the FRAMEWORK's go.mod.
+		FrameworkPath: framework,
+	}); err != nil {
+		t.Fatalf("New: %v", err)
 	}
 
 	for _, step := range [][]string{

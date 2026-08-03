@@ -33,6 +33,19 @@ type Options struct {
 	ModulePath string
 	// Version is the framework version the scaffold pins.
 	Version string
+	// FrameworkPath, when set, adds replace directives pointing the
+	// framework modules at a local checkout.
+	//
+	// It exists because Warren is not published: the generated go.mod
+	// requires github.com/MerseniBilel/warren v0.1.0, nothing serves that
+	// version yet, and `go build` in a fresh scaffold fails fifteen times
+	// over with "missing go.sum entry". A user who has the repository can
+	// point at it; when v0.1.0 is tagged, this flag stops being necessary
+	// and the templates stop mentioning it.
+	//
+	// AGENT.md invariant 8 forbids a replace COMMITTED TO THIS REPOSITORY.
+	// One written into a user's own new project, on request, is not that.
+	FrameworkPath string
 	// Transport, DB and Broker select adapters. Only released values are
 	// accepted; anything else is refused with what is available.
 	Transport string
@@ -59,6 +72,9 @@ var released = map[string][]string{
 func New(opts Options) error {
 	if opts.ModulePath == "" {
 		return diagnostic("✗ missing module path\n\n    warren new needs --module, the import path of the app you are creating.\n\n  warren new " + opts.Name + " --module github.com/you/" + opts.Name)
+	}
+	if err := checkModulePath(opts.ModulePath, opts.Name); err != nil {
+		return err
 	}
 	for flag, value := range map[string]string{
 		"transport": opts.Transport, "db": opts.DB, "broker": opts.Broker,
@@ -93,6 +109,12 @@ func New(opts Options) error {
 	if len(conflicts) > 0 {
 		slices.Sort(conflicts)
 		return errConflict(conflicts)
+	}
+
+	if opts.FrameworkPath != "" {
+		files["go.mod"] = append(files["go.mod"], []byte(fmt.Sprintf(
+			"\nreplace github.com/MerseniBilel/warren => %s\n\nreplace github.com/MerseniBilel/warren/transport/http => %s/transport/http\n",
+			opts.FrameworkPath, opts.FrameworkPath))...)
 	}
 
 	for path, content := range files {
@@ -190,4 +212,47 @@ func errConflict(paths []string) error {
 		"✗ target is not empty\n\n    These files already exist:\n      %s\n\n"+
 			"  Nothing was written. Scaffold into an empty directory, or move the\n"+
 			"  existing files aside first.", strings.Join(paths, "\n      ")))
+}
+
+// checkModulePath refuses a --module value go.mod will not accept.
+//
+// It is deliberately narrower than golang.org/x/mod/module.CheckPath: this
+// module budgets one dependency (cobra), and the whole point is to catch
+// what a person actually mistypes — a space, a quote, a stray punctuation
+// mark — before a tree is written whose every go command fails with
+// "go.mod:1: usage: module module/path". A path this accepts and go rejects
+// is a worse diagnostic, not a wrong one; the go command still has the last
+// word.
+func checkModulePath(path, name string) error {
+	suggest := "github.com/you/" + name
+	bad := func(why string) error {
+		return diagnostic(fmt.Sprintf(
+			"✗ %q is not a valid Go module path\n\n    %s\n\n"+
+				"    It goes straight into go.mod, so every go command in the new tree\n"+
+				"    would fail with \"go.mod:1: usage: module module/path\".\n\n  warren new %s --module %s",
+			path, why, name, suggest))
+	}
+
+	for _, r := range path {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		case strings.ContainsRune("-._~/", r):
+		case r <= ' ' || r == 0x7f:
+			return bad("It contains a space or a control character.")
+		default:
+			return bad(fmt.Sprintf("The character %q is not allowed in an import path.", r))
+		}
+	}
+	if strings.HasPrefix(path, "/") || strings.HasSuffix(path, "/") {
+		return bad("An import path has no leading or trailing slash.")
+	}
+	if strings.Contains(path, "//") {
+		return bad("An import path has no empty element.")
+	}
+	for _, elem := range strings.Split(path, "/") {
+		if strings.HasPrefix(elem, ".") || strings.HasSuffix(elem, ".") {
+			return bad(fmt.Sprintf("The element %q begins or ends with a dot.", elem))
+		}
+	}
+	return nil
 }
