@@ -587,3 +587,117 @@ func TestCandidateBulletsAreValidGo(t *testing.T) {
 		}
 	}
 }
+
+// TestSuggestedFixesAreReferenceableGo — field test #4, defects B1 and B2,
+// both of which are regressions from the B3 fix that added the Imports line.
+//
+// The diagnostic interpolated the SCOPE NAME into a Go expression. That is
+// only valid when a module's name happens to equal its package name, which is
+// true for application modules (platform, user) and false for every adapter
+// Warren ships — they name themselves by path:
+//
+//	Add to billing's module: warren.Imports(warren/persistence/postgres.Module())
+//
+// which does not parse. And "Or provide it locally" printed a reflection-
+// derived function name as if it were source:
+//
+//	warren.Providers(platform.newUnitOfWork)   ← unexported, unreferenceable
+//	warren.Providers(postgres.Module.func2)    ← a closure, not an identifier
+//
+// A copy-pasteable fix is the entire reason dig is wrapped rather than
+// re-exported, so a line that cannot be pasted is worse than no line.
+func TestSuggestedFixesAreReferenceableGo(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name       string
+		scope      string // the providing module's name
+		ctor       any    // its constructor
+		wantNoPipe []string
+	}{
+		{
+			name:  "adapter module named by path",
+			scope: "warren/persistence/postgres",
+			ctor:  postgres.NewUserRepository,
+		},
+		{
+			name:  "module whose name is a plain identifier",
+			scope: "platform",
+			ctor:  postgres.NewUserRepository,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			root := di.New()
+			owner := root.Scope(tc.scope)
+			asking := root.Scope("billing")
+
+			if err := owner.Provide(tc.ctor, di.Exported()); err != nil {
+				t.Fatalf("providing: %v", err)
+			}
+			if err := asking.Provide(user.NewRegisterUserHandler); err != nil {
+				t.Fatalf("providing handler: %v", err)
+			}
+
+			err := root.Validate()
+			if err == nil {
+				t.Fatal("Validate() = nil though billing cannot see the repository")
+			}
+			assertPasteable(t, err.Error())
+		})
+	}
+}
+
+// TestUnexportedProviderIsNotOfferedAsSource — the "provide it locally" line
+// named an identifier the asking package cannot reference.
+func TestUnexportedProviderIsNotOfferedAsSource(t *testing.T) {
+	t.Parallel()
+
+	root := di.New()
+	platform := root.Scope("platform")
+	billing := root.Scope("billing")
+
+	// A lowercase constructor, exactly like the scaffold's platform module.
+	if err := platform.Provide(newUnexportedRepository, di.Exported()); err != nil {
+		t.Fatalf("providing: %v", err)
+	}
+	if err := billing.Provide(user.NewRegisterUserHandler); err != nil {
+		t.Fatalf("providing handler: %v", err)
+	}
+
+	err := root.Validate()
+	if err == nil {
+		t.Fatal("Validate() = nil though billing cannot see the repository")
+	}
+	got := err.Error()
+	if strings.Contains(got, "warren.Providers(di_test.newUnexportedRepository)") {
+		t.Errorf("an unexported constructor was offered as something to type:\n%s", got)
+	}
+	assertPasteable(t, got)
+}
+
+func newUnexportedRepository() domain.UserRepository { return nil }
+
+// assertPasteable checks every line that tells the reader what to type. Each
+// such line ends in a warren.X(...) call, and every one of them has to be
+// something that compiles where it is pasted.
+func assertPasteable(t *testing.T, out string) {
+	t.Helper()
+	for line := range strings.SplitSeq(out, "\n") {
+		_, expr, ok := strings.Cut(strings.TrimSpace(line), "warren.")
+		if !ok {
+			continue
+		}
+		expr = "warren." + expr
+		// A Go expression carries no quotes, no spaces, and no slashes — a
+		// slash means a module PATH reached a position only an identifier
+		// can occupy.
+		for _, bad := range []string{`"`, " ", "/"} {
+			if strings.Contains(expr, bad) {
+				t.Errorf("suggested fix is not valid Go (contains %q): %s", bad, expr)
+			}
+		}
+	}
+}

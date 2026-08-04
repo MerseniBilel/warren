@@ -2,7 +2,9 @@ package di
 
 import (
 	"fmt"
+	"go/token"
 	"strings"
+	"unicode"
 )
 
 // The diagnostics are the product. Every error this package returns is
@@ -53,15 +55,67 @@ func errMissing(target string, chain []string, declared, scope string, candidate
 				// side, and Imports is the line to type. Naming Exports here
 				// would send the reader to the module that already has it.
 				fmt.Fprintf(&b, "    • %s is exported by module %q, which %q does not import.\n", c.provider, c.scope, scope)
-				fmt.Fprintf(&b, "      Add to %s's module: warren.Imports(%s.Module())\n", scope, c.scope)
+				// Only when the module's name is also a Go identifier can it
+				// be the package qualifier. Warren's own adapters name
+				// themselves by PATH — "warren/persistence/postgres" — and
+				// interpolating that produced
+				// warren.Imports(warren/persistence/postgres.Module()),
+				// which does not parse. There the module value lives in the
+				// application's own wiring under a name only the reader
+				// knows, so the honest answer is to say what to do without
+				// inventing an identifier.
+				if isIdentifier(c.scope) {
+					fmt.Fprintf(&b, "      Add to %s's module: warren.Imports(%s.Module())\n", scope, c.scope)
+				} else {
+					fmt.Fprintf(&b, "      Add module %q to %s's warren.Imports(...).\n", c.scope, scope)
+				}
 			} else {
 				fmt.Fprintf(&b, "    • %s is registered in scope %q but not exported.\n", c.provider, c.scope)
 				fmt.Fprintf(&b, "      Add to %s's module: warren.Exports[%s]()\n", c.scope, target)
 			}
 		}
-		fmt.Fprintf(&b, "    • Or provide it locally:  warren.Providers(%s)\n", candidates[0].provider)
+		// "Or provide it locally" hands back a provider NAME derived from
+		// reflection, and a name is not source. platform.newUnitOfWork is
+		// unexported and unreferenceable from the asking package;
+		// postgres.Module.func2 is a closure and not an identifier at all.
+		// Print it only when it is something the reader can actually type —
+		// the suggestions above are the real fix regardless.
+		if ref := candidates[0].provider; isQualifiedExported(ref) {
+			fmt.Fprintf(&b, "    • Or provide it locally:  warren.Providers(%s)\n", ref)
+		}
 	}
 	return &diagnostic{text: strings.TrimRight(b.String(), "\n")}
+}
+
+// isIdentifier reports whether s can appear in Go source where an identifier
+// is required. Module names are free-form strings — Warren's own adapters use
+// paths like "warren/persistence/postgres" — so anything interpolated into a
+// suggested fix has to be checked first.
+func isIdentifier(s string) bool {
+	if s == "" || token.IsKeyword(s) {
+		return false
+	}
+	for i, r := range s {
+		if r == '_' || unicode.IsLetter(r) || (i > 0 && unicode.IsDigit(r)) {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+// isQualifiedExported reports whether name is a "pkg.Name" a reader could
+// paste into their own file: both halves identifiers, and the second one
+// exported. It rejects what reflection hands back for the two cases that
+// actually reached users — an unexported constructor (platform.newUnitOfWork,
+// invisible outside its package) and a closure (postgres.Module.func2, not an
+// identifier at all).
+func isQualifiedExported(name string) bool {
+	pkg, ident, ok := strings.Cut(name, ".")
+	if !ok || !isIdentifier(pkg) || !isIdentifier(ident) {
+		return false
+	}
+	return token.IsExported(ident)
 }
 
 // errAmbiguous reports one type with more than one visible provider, naming
