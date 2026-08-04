@@ -172,6 +172,82 @@ func TestMemoryStore(t *testing.T) {
 	})
 }
 
+// countingWaiter is a Store whose Wait blocks until its context is cancelled,
+// recording how many Waits are in flight at once. It stands in for the
+// Postgres store, whose Wait holds a pooled connection for its whole duration.
+type countingWaiter struct {
+	outbox.Store
+	mu      sync.Mutex
+	live    int
+	peak    int
+	started chan struct{}
+}
+
+func newCountingWaiter() *countingWaiter {
+	return &countingWaiter{Store: outbox.NewMemoryStore(), started: make(chan struct{}, 1024)}
+}
+
+func (w *countingWaiter) Wait(ctx context.Context) {
+	w.mu.Lock()
+	w.live++
+	if w.live > w.peak {
+		w.peak = w.live
+	}
+	w.mu.Unlock()
+	select {
+	case w.started <- struct{}{}:
+	default:
+	}
+	<-ctx.Done()
+	w.mu.Lock()
+	w.live--
+	w.mu.Unlock()
+}
+
+func (w *countingWaiter) peaked() int {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.peak
+}
+
+// TestRelayHoldsExactlyOneWaiter pins the guarantee Relay.Run's own doc
+// comment makes — and that it did not keep.
+//
+// On the timer branch the loop used to `continue` while the previous Wait was
+// still blocked on the relay-lifetime context, so a new Wait started every
+// poll interval and none of the old ones ever ended. The memory store's Wait
+// blocks on a channel, so the leak was invisible there; the Postgres store's
+// Wait holds a POOLED CONNECTION for its whole duration, so an idle service
+// exhausted its pool one connection per tick and then every request blocked
+// for ever — with a single INFO line in the log to explain it.
+//
+// Terminal, not transient: releasing a waiter needs a NOTIFY, a NOTIFY is
+// only issued inside Append, and Append needs a connection.
+func TestRelayHoldsExactlyOneWaiter(t *testing.T) {
+	t.Parallel()
+
+	w := newCountingWaiter()
+	relay := outbox.NewRelay(w, newCapture(), outbox.PollInterval(5*time.Millisecond))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { _ = relay.Run(ctx); close(done) }()
+
+	// Let a good number of poll intervals elapse with no Append at all —
+	// the idle service that died in the field test.
+	time.Sleep(150 * time.Millisecond)
+	got := w.peaked()
+	cancel()
+	<-done
+
+	if got > 1 {
+		t.Errorf("concurrent Wait calls peaked at %d over ~30 poll intervals, want 1 — each leaked waiter holds a pooled connection until shutdown", got)
+	}
+	if got == 0 {
+		t.Fatal("the relay never called Wait — the test measured nothing")
+	}
+}
+
 func TestRelayDrains(t *testing.T) {
 	t.Parallel()
 

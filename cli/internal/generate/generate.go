@@ -205,7 +205,11 @@ func Repository(opts Options) (string, error) {
 		if merr != nil {
 			return "", merr
 		}
-		p.files["db/migrations/00001_"+data["Plural"]+".sql"] = migration
+		// Numbered after whatever is already there. Every aggregate used to
+		// be written as 00001_<plural>.sql, so a second one collided: two
+		// files at one version apply in ALPHABETICAL order, which is wrong
+		// for any foreign key between them.
+		p.files[fmt.Sprintf("db/migrations/%05d_%s.sql", nextMigration(opts.Dir), data["Plural"])] = migration
 
 		// The migrate binary lives in the PROJECT, not in the warren CLI.
 		// The CLI takes no dependency on the framework — it is build-time
@@ -218,16 +222,30 @@ func Repository(opts Options) (string, error) {
 			return "", mmerr
 		}
 		p.files["cmd/migrate/main.go"] = migrateMain
+		// One migrate command per PROJECT, not per aggregate.
+		p.keepExisting = map[string]bool{"cmd/migrate/main.go": true}
 		p.next = fmt.Sprintf(`  Still to do — the repository needs a pool and a table.
 
-  1. In cmd/<app>/main.go, add the Postgres module and import its module
-     into the feature that uses it:
+  1. Declare the Postgres module ONCE, in internal/platform, and export what
+     the features need:
 
-         pg := postgres.Module(postgres.DSN(os.Getenv("DATABASE_URL")))
-         warren.New(pg, %s.Module(pg), ...)
+         // internal/platform/postgres.go
+         var Postgres = sync.OnceValue(func() warren.Module {
+             return postgres.Module(
+                 postgres.DSN(os.Getenv("DATABASE_URL")),
+                 postgres.WithOutbox(),
+             )
+         })
 
-     A module that wants postgres.DB must IMPORT the postgres module: a
-     provider is private to its module unless exported.
+     Then import it from the feature that uses it — %s/module.go:
+
+         warren.Imports(platform.Postgres())
+
+     A module that wants postgres.DB must IMPORT the module providing it: a
+     provider is private to its module unless exported. Passing a module as
+     an ARGUMENT to a feature's factory does not work — modules are
+     deduplicated by identity, so a factory called twice is two modules
+     sharing a name, which is a boot error.
 
   2. Apply the schema as a DEPLOY STEP — Warren never migrates at boot.
      cmd/migrate was generated for you:
@@ -255,6 +273,34 @@ var repositoryTemplates = map[string]string{
 
 // plural is the table name for an aggregate. Two rules cover almost every
 // name; the rest is a line the user edits, which beats a dependency.
+// nextMigration returns the version a new migration should carry: one past
+// the highest already in db/migrations, or 1 when there are none.
+//
+// It reads the directory rather than counting this run's files because the
+// user's own hand-written migrations live there too, and a generated file
+// that reused their number would apply in alphabetical order against them.
+func nextMigration(dir string) int {
+	entries, err := os.ReadDir(filepath.Join(dir, "db", "migrations"))
+	if err != nil {
+		return 1
+	}
+	highest := 0
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".sql") {
+			continue
+		}
+		digits := e.Name()
+		if i := strings.IndexByte(digits, '_'); i >= 0 {
+			digits = digits[:i]
+		}
+		n, convErr := strconv.Atoi(digits)
+		if convErr == nil && n > highest {
+			highest = n
+		}
+	}
+	return highest + 1
+}
+
 func plural(s string) string {
 	switch {
 	case strings.HasSuffix(s, "s"), strings.HasSuffix(s, "x"), strings.HasSuffix(s, "ch"), strings.HasSuffix(s, "sh"):
@@ -290,6 +336,16 @@ func Consumer(opts Options) (string, error) {
 		topic = strings.ReplaceAll(data["Snake"], "_", ".")
 	}
 	data["Topic"] = topic
+	// The aggregate whose fact this is. Warren's events are named
+	// <Aggregate><PastParticiple> — "named in the past tense" is the entity
+	// generator's own rule — so dropping the final word yields the aggregate,
+	// and `g entity` marshals its identifier as "<aggregate>_id". Deriving it
+	// here is what makes the two generators agree about the wire format of
+	// one event; they used to disagree in silence.
+	agg := aggregateOf(opts.Name)
+	data["Aggregate"] = agg
+	data["AggregateSnake"] = snake(agg)
+	data["AggregateIDKey"] = strconv.Quote(snake(agg) + "_id")
 	// The topic reaches three Go string literals. Quoted, a `"` in it closes
 	// the literal and the rest becomes an expression; a `\` makes the
 	// template fail and blame Warren for the user's input.
@@ -412,6 +468,14 @@ type plan struct {
 	files    map[string][]byte
 	edits    []edit
 	declares []decl
+	// keepExisting names files that are the PROJECT's, not this feature's:
+	// written when absent, left alone when present. cmd/migrate/main.go is
+	// shared by every aggregate, so treating it as a conflict made the second
+	// `g repository --driver postgres` fail over a file the generator itself
+	// had written — where "delete it" meant deleting the shared migrate
+	// command and --force meant overwriting hand-edited migrations.
+	keepExisting map[string]bool
+
 	// next is what the user must still do by hand, printed after the plan.
 	next   string
 	dryRun bool
@@ -444,6 +508,12 @@ func (p *plan) apply() (string, error) {
 	var conflicts []string
 	for path := range p.files {
 		if _, err := os.Stat(filepath.Join(p.dir, path)); err == nil {
+			if p.keepExisting[path] {
+				// The project already has it. Not a conflict and not a
+				// rewrite — simply not this generator's file to touch.
+				delete(p.files, path)
+				continue
+			}
 			existing[path] = true
 			conflicts = append(conflicts, path)
 		}
@@ -705,6 +775,43 @@ func render(name string, data map[string]string) ([]byte, error) {
 // It keeps acronyms whole: HTTPServer is http_server, not h_t_t_p_server,
 // and ID is id. That matters beyond aesthetics, because the result becomes
 // a WIRE FORMAT — the event name and the topic other services subscribe to.
+// aggregateOf returns the aggregate an event name belongs to, by dropping the
+// event's final CamelCase word — its past participle. "InvoiceCreated" gives
+// "Invoice", "PaymentReceived" gives "Payment".
+//
+// A single-word name has no verb to drop and is returned unchanged: the
+// generated file is a starting point, and a wrong guess there is visible in
+// the code the user is already reading. The failure that mattered was the
+// invisible one — a key nothing publishes, decoding to "" for ever.
+func aggregateOf(event string) string {
+	words := camelWords(event)
+	if len(words) < 2 {
+		return event
+	}
+	return strings.Join(words[:len(words)-1], "")
+}
+
+// camelWords splits a CamelCase identifier into its words, keeping runs of
+// upper-case letters together the way snake does ("InvoicePDFGenerated" is
+// Invoice, PDF, Generated).
+func camelWords(s string) []string {
+	runes := []rune(s)
+	var words []string
+	start := 0
+	for i, r := range runes {
+		if i == 0 || !unicode.IsUpper(r) {
+			continue
+		}
+		startsWord := !unicode.IsUpper(runes[i-1]) ||
+			(i+1 < len(runes) && unicode.IsLower(runes[i+1]))
+		if startsWord {
+			words = append(words, string(runes[start:i]))
+			start = i
+		}
+	}
+	return append(words, string(runes[start:]))
+}
+
 func snake(s string) string {
 	runes := []rune(s)
 	var b strings.Builder

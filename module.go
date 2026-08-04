@@ -377,6 +377,19 @@ func isNil(v reflect.Value) bool {
 	}
 }
 
+// errOptionalWithoutProvider refuses a waiver nothing can use.
+func errOptionalWithoutProvider(module, declared string, t reflect.Type) error {
+	return diagnostic(fmt.Sprintf(
+		"✗ optional without provider\n\n"+
+			"    module %q (%s) declares warren.Optional[%s](), but none of its\n"+
+			"    providers returns it.\n\n"+
+			"  Optional waives the nil check for one type. A waiver for a type the\n"+
+			"  module does not provide waives nothing today and hides a real nil the\n"+
+			"  day someone adds that provider — and nothing would report it.\n\n"+
+			"  Remove the Optional, or correct the type it names.",
+		module, declared, t))
+}
+
 func errNilProvider(module string, t reflect.Type) error {
 	return diagnostic(fmt.Sprintf(
 		"✗ provider returned nil\n\n"+

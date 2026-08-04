@@ -132,6 +132,11 @@ func TestRingPosition(t *testing.T) {
 		"context": true, "errors": true, "fmt": true, "maps": true,
 		"math/rand/v2": true, "strconv": true, "strings": true,
 		"sync": true, "time": true,
+		// runtime/debug is stdlib, and Recover needs it for the same reason
+		// transport/http does: a panic's stack exists only in the frame that
+		// recovers it. The invariant here is "no driver, no OTel" — this list
+		// enumerates what the package happens to use, not a narrower rule.
+		"runtime/debug":                         true,
 		"github.com/MerseniBilel/warren/app":    true,
 		"github.com/MerseniBilel/warren/errors": true,
 		"github.com/MerseniBilel/warren/inbox":  true,

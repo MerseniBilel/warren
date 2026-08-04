@@ -2,10 +2,12 @@ package application
 
 import (
 	"context"
+	stderrors "errors"
 	"log/slog"
 	"time"
 
 	"github.com/MerseniBilel/warren/app"
+	"github.com/MerseniBilel/warren/errors"
 	"github.com/MerseniBilel/warren/log"
 )
 
@@ -16,9 +18,14 @@ import (
 // contract between modules is the wire format, which is what makes
 // extracting a module into its own service a wiring change rather than a
 // rewrite.
+//
+// The keys match what `warren g entity {{.Aggregate}}` publishes. If this
+// event comes from somewhere else, change the tags to match ITS payload —
+// and keep the guard in Handle, which is what turns a mismatch into a
+// dead-letter you can read instead of a handler that quietly does nothing.
 type {{.Name}} struct {
-	AggregateID string    `json:"aggregate_id"`
-	At          time.Time `json:"at"`
+	{{.Aggregate}}ID string    `json:{{.AggregateIDKey}}`
+	At               time.Time `json:"at"`
 }
 
 // {{.Name}}Handled is the (empty) result — a consumer's response is
@@ -35,10 +42,23 @@ func NewOn{{.Name}}Handler() app.Handler[{{.Name}}, {{.Name}}Handled] {
 }
 
 func (h *on{{.Name}}) Handle(ctx context.Context, e {{.Name}}) ({{.Name}}Handled, error) {
+	// A payload that carried no identifier is not this event. Decoding is
+	// permissive — an unknown shape yields a struct of zero values and no
+	// error — so without this check a wire-format mismatch acks for ever and
+	// reports nothing anywhere. INVALID dead-letters without retrying, which
+	// is right: redelivering the same unreadable payload cannot help.
+	if e.{{.Aggregate}}ID == "" {
+		return {{.Name}}Handled{}, errors.Invalid("{{.AggregateSnake}}_id",
+			stderrors.New("the message carried no {{.AggregateSnake}}_id, so this payload is not the event this handler decodes from "+{{.TopicLiteral}}))
+	}
+
 	// Returning nil acks. Returning an error hands the message to the retry
 	// and dead-letter middleware, which decide by the error's code:
 	// Unavailable retries, Invalid dead-letters without retrying.
-	log.FromContext(ctx).Info({{.HandlingLiteral}},
-		slog.String("aggregate_id", e.AggregateID))
+	//
+	// InfoContext, not Info: the context is what carries the correlation ID,
+	// and it is the ID of the request that published this event.
+	log.FromContext(ctx).InfoContext(ctx, {{.HandlingLiteral}},
+		slog.String("{{.AggregateSnake}}_id", e.{{.Aggregate}}ID))
 	return {{.Name}}Handled{}, nil
 }

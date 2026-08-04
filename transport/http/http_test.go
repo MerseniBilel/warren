@@ -306,8 +306,16 @@ func TestWrongMethodIs405WithAllow(t *testing.T) {
 	if got := res.Header.Get("Allow"); got != "DELETE, GET, HEAD" {
 		t.Errorf("Allow = %q, want %q", got, "DELETE, GET, HEAD")
 	}
-	if !strings.Contains(body, `"code":"NOT_FOUND"`) {
-		t.Errorf("body = %s", body)
+	// NOT_FOUND would be a lie with consequences: a client switching on
+	// error.code would conclude the resource is gone and stop retrying,
+	// when in fact it exists and answers other verbs — the Allow header
+	// two lines up says which. §2.6's table maps codes raised by HANDLERS;
+	// 405 is raised by the adapter, before any handler exists.
+	if !strings.Contains(body, `"code":"INVALID"`) {
+		t.Errorf("a 405 must not claim the resource does not exist: %s", body)
+	}
+	if strings.Contains(body, "NOT_FOUND") {
+		t.Errorf("405 still carries NOT_FOUND: %s", body)
 	}
 }
 

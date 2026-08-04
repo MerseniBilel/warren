@@ -36,7 +36,10 @@ func NewOnUserRegisteredHandler() app.Handler[UserRegistered, Sent] {
 func (h *onUserRegistered) Handle(ctx context.Context, e UserRegistered) (Sent, error) {
 	// Returning nil acks. Returning an error hands the message to the retry
 	// and dead-letter middleware, which decide by the error's code.
-	log.FromContext(ctx).Info("would send a welcome email",
+	// InfoContext, not Info: the context is what carries the correlation ID,
+	// and it is the ID of the request that published this event. Info drops
+	// it, and the line then belongs to no request at all.
+	log.FromContext(ctx).InfoContext(ctx, "would send a welcome email",
 		slog.String("user_id", e.UserID),
 		slog.String("email", e.Email))
 	return Sent{}, nil

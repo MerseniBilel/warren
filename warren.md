@@ -843,12 +843,19 @@ type ID interface { comparable; fmt.Stringer }
 type Entity[T ID] struct{ id T }
 func (e *Entity[T]) ID() T                        // identity accessor
 
+// Aggregate is the identity-AGNOSTIC view: the events a root has pending.
+// It exists because a unit of work holds saved aggregates of many types at
+// once and cannot name their identifier types — persistence.Track takes this.
+type Aggregate interface {
+    PullEvents() []Event
+}
+
 // Root is the constraint repositories are generic over. AggregateRoot
 // satisfies it. (A struct cannot serve as a Go type constraint — only this
 // interface makes Repository[T Root[K], K ID] expressible.)
 type Root[T ID] interface {
     ID() T
-    PullEvents() []Event
+    Aggregate
 }
 
 type AggregateRoot[T ID] struct {
@@ -1123,8 +1130,10 @@ message in backoff holds no slot) → `Recover` (innermost: a handler panic is
 ```go
 type Middleware func(MessageHandler) MessageHandler
 func Chain(h MessageHandler, mw ...Middleware) MessageHandler // mw[0] outermost; nil panics at composition
-func Pipeline(topic string, h MessageHandler, store inbox.Store, dlq Publisher,
-    opts ...SubscribeOption) (MessageHandler, func(ctx context.Context) error)
+func Pipeline(subscription, topic string, h MessageHandler, store inbox.Store,
+    dlq Publisher, opts ...SubscribeOption) (MessageHandler, func(ctx context.Context) error)
+    // subscription names THIS subscription and must be unique in the process:
+    // it scopes the dedupe key, which is what lets two features consume one topic
 
 type SubscribeOption struct{ /* opaque */ }
 func WithRetry(p app.RetryPolicy) SubscribeOption   // default ExponentialBackoff(3)
@@ -1409,10 +1418,26 @@ func Broker(opts ...Option) warren.Module
 
 func Brokers(...string) Option
 func ConsumerGroup(string) Option
+func ClientID(string) Option
 func TLS(*tls.Config) Option
-func SASL(sasl.Mechanism) Option
-func Transactional(bool) Option
+func PartitionAssignment(Balancer) Option
+func CommitInterval(time.Duration) Option
+func SessionTimeout(time.Duration) Option
+func ConnectTimeout(time.Duration) Option
+func ProduceTimeout(time.Duration) Option
+func FetchMaxBytes(int32) Option
+func MaxPollRecords(int) Option
+func HealthTimeout(time.Duration) Option
+
+// the escape hatches, for what these options do not cover
+func Configure(...kgo.Opt) Option
+func Raw(func(context.Context, *kgo.Client) error) Option
 ```
+
+There is no `SASL` and no `Transactional`: an earlier draft of this block
+listed both. SASL goes through `Configure(kgo.SASL(...))`; the outbox is how
+Warren makes publication atomic, so a Kafka producer transaction would be a
+second mechanism for the same guarantee.
 
 **Usage**
 
@@ -1699,9 +1724,10 @@ alias — `werrors "github.com/MerseniBilel/warren/errors"` — so
 in one file. `postgres.ErrNoRows` is re-exported precisely so a repository
 never imports `pgx` itself.
 
-**`warren g repository --driver postgres` does not exist yet.** The three
-rules above are unenforced by any compiler, which makes that generator the
-highest-value item left in the CLI.
+**`warren g repository --driver postgres` writes exactly this.** The three
+rules above are unenforced by any compiler, which is why the generator exists:
+it emits `RequireTx` first, `r.db(ctx)` for the handle, `persistence.Track`
+after the write, and the version-checked SQL of §3.3's optimistic concurrency.
 
 ### 6.2–6.4 `mysql` / `mongo` / `redis`
 
@@ -1823,7 +1849,7 @@ otherwise.
 
 | Subsystem | Purpose |
 |---|---|
-| **Templates** | `embed.FS`, ejectable via `warren templates eject` for per-org forks |
+| **Templates** | `embed.FS`. Per-org forks via `warren templates eject` are planned, not built |
 | **AST editor** | Stdlib: the insertion point is located with `go/parser` and the new text is spliced into the original bytes, so comments survive by construction. `dave/dst` was rejected — see the paragraph above and §9. |
 | **Analyzer** | Syntactic — `go/parser` in `ImportsOnly` mode. `go/packages` was budgeted and dropped, which is what lets `lint arch` run on a project that does not compile. |
 
@@ -1831,29 +1857,48 @@ That analyzer is why the governance commands are cheap once the first exists —
 
 ### Command surface
 
+**Shipped in v0.1** — this is the whole surface; `warren --help` agrees with it:
+
 ```bash
 # scaffold
 warren new myapp --module github.com/acme/myapp \
-  --layout modular-monolith --transport http,grpc --db postgres --broker kafka
+  [--db memory] [--broker memory] [--dir .] [--framework ../warren]
 
-# generate
-warren g module     user
-warren g entity     user/User --fields "email:Email,name:string"
-warren g command    user/RegisterUser --transport http,grpc
-warren g repository user/User --driver postgres
-warren g consumer   user --event billing.customer.created
+# generate  (aliases: warren g …)
+warren generate module     <name>              [--main cmd/app/main.go]
+warren generate entity     <module> <Name>
+warren generate command    <module> <Name>     # alias: usecase
+warren generate repository <module> <Name>     [--driver memory|postgres]
+warren generate consumer   <module> <EventName> [--topic billing.customer.created]
 
-# govern  ← the differentiators
-warren lint arch                # dependency-rule violations, non-zero exit
+# govern
+warren lint arch    # layer and cross-module violations, non-zero exit
+
+warren version
+```
+
+Every generator takes `--dir`, `--dry-run` and `--force`.
+
+**Not built yet.** These were the original pitch and several of them are still
+the differentiators, but none exists — an earlier draft of this section listed
+them as though they shipped, and a field test went looking for all seven:
+
+```bash
 warren doctor                   # drift, dead providers, missing wiring
 warren graph modules|di|events
 warren explain di UserRepository
-
-# evolve
 warren add rabbitmq
 warren migrate layout --module task --to modular
 warren extract module billing --into ../billing-service
+warren templates eject
 ```
+
+Flags that do NOT exist either: `--layout`, `--fields`, `--transport` on
+`g command`, `--event` on `g consumer` (it is `--topic`), and the
+`module/Name` slash form (arguments are separate: `<module> <Name>`).
+`warren new --transport` is accepted but no transport adapter is released
+through it, and `--db postgres` is refused — adopting Postgres today means
+wiring `postgres.Module` into the platform module by hand.
 
 ### Generator rules
 

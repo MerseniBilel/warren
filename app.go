@@ -205,6 +205,15 @@ func (a *App) Start(ctx context.Context) error {
 				return errExportWithoutProvider(m.name, m.declared, t)
 			}
 		}
+		// A waiver for a type this module does not provide is dead — and a
+		// dead waiver is worse than a dead export, because nothing downstream
+		// ever fails to notice it: the nil check for that type is simply off
+		// for ever, silently, which is the failure the check exists to catch.
+		for _, t := range m.optional {
+			if !provided[t] {
+				return errOptionalWithoutProvider(m.name, m.declared, t)
+			}
+		}
 	}
 	for _, m := range ordered {
 		seenImports := map[*int]bool{}

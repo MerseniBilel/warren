@@ -208,8 +208,14 @@ func (s *server) raw(rr transport.RawRoute, h http.Handler) http.Handler {
 func (s *server) methodNotAllowed(allow string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Allow", allow)
+		// INVALID, not NOT_FOUND. The path EXISTS — the Allow header above
+		// lists the verbs it answers — so telling the client the resource was
+		// not found is a lie it acts on: a client switching on error.code
+		// concludes the thing is gone and stops asking. §2.6's table maps the
+		// codes HANDLERS raise; a 405 is decided by the adapter before any
+		// handler is reached, and INVALID is the honest one of those codes.
 		writeJSON(w, http.StatusMethodNotAllowed, errorBody{Error: errorPayload{
-			Code:          string(errors.CodeNotFound),
+			Code:          string(errors.CodeInvalid),
 			Message:       r.Method + " is not allowed on " + r.URL.Path,
 			CorrelationID: log.CorrelationID(r.Context()),
 		}})

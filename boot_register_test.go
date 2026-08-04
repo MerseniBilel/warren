@@ -523,6 +523,31 @@ func TestOptionalIsPerTypeNotPerModule(t *testing.T) {
 	}
 }
 
+// TestOptionalWithoutAProviderFailsTheBoot — a stale or typo'd Optional is a
+// dead declaration that silently disarms the nil check for that type for
+// ever. warren.Exports for an unprovided type is already a boot error for
+// exactly this reason; the waiver is more dangerous than the export, because
+// nothing downstream ever notices it.
+func TestOptionalWithoutAProviderFailsTheBoot(t *testing.T) {
+	t.Parallel()
+
+	m := warren.NewModule("catalog",
+		warren.Providers(func() pricing { return fixedPricing{} }),
+		warren.Optional[shipping](), // nothing here provides shipping
+		warren.Providers(func(p pricing) *priceReport { return &priceReport{p: p} }),
+		warren.Eager[*priceReport](),
+	)
+	err := warren.New(m).Start(context.Background())
+	if err == nil {
+		t.Fatal("an Optional for a type the module does not provide booted clean")
+	}
+	for _, want := range []string{"optional", "shipping", "catalog"} {
+		if !strings.Contains(strings.ToLower(err.Error()), strings.ToLower(want)) {
+			t.Errorf("diagnostic does not mention %q:\n%s", want, err)
+		}
+	}
+}
+
 // TestOptionalWithoutANilStillDelivers — Optional relaxes the check, it does
 // not change what the graph receives. A configured collector must arrive
 // exactly as it would without the declaration.

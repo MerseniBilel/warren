@@ -47,5 +47,5 @@ GET /nope → 404  Content-Type: application/json; charset=utf-8
 
 ── wrong method
 PATCH /users/u-1 → 405  Allow: DELETE, GET, HEAD  Content-Type: application/json; charset=utf-8
-{"error":{"code":"NOT_FOUND","message":"PATCH is not allowed on /users/u-1","correlation_id":"<id>"}}
+{"error":{"code":"INVALID","message":"PATCH is not allowed on /users/u-1","correlation_id":"<id>"}}
 

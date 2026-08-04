@@ -151,6 +151,71 @@ func TestGenerateRepository(t *testing.T) {
 	}
 }
 
+// TestASecondPostgresRepositoryNumbersItsMigration — every aggregate's
+// migration was written as db/migrations/00001_<plural>.sql, so a second one
+// collided at version 00001. GETTING_STARTED tells the user files apply in
+// NAME order and to zero-pad them; two files at 00001 then order
+// alphabetically, and "invoices" applies before "reservations" — wrong for
+// any foreign key between them.
+func TestASecondPostgresRepositoryNumbersItsMigration(t *testing.T) {
+	t.Parallel()
+
+	dir := app(t)
+	for _, name := range []string{"Reservation", "Invoice"} {
+		if _, err := generate.Entity(generate.Options{Dir: dir, Module: "user", Name: name}); err != nil {
+			t.Fatalf("Entity %s: %v", name, err)
+		}
+		if _, err := generate.Repository(generate.Options{
+			Dir: dir, Module: "user", Name: name, Driver: "postgres",
+		}); err != nil {
+			t.Fatalf("Repository %s: %v", name, err)
+		}
+	}
+
+	entries, err := os.ReadDir(filepath.Join(dir, "db/migrations"))
+	if err != nil {
+		t.Fatalf("reading migrations: %v", err)
+	}
+	var names []string
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	if len(names) != 2 {
+		t.Fatalf("migrations = %v, want one per aggregate", names)
+	}
+	if names[0] == names[1] {
+		t.Fatalf("both aggregates wrote the same file: %v", names)
+	}
+	// Distinct, ordered, and in generation order — the order the FKs need.
+	if !strings.HasPrefix(names[0], "00001_reservations") {
+		t.Errorf("first migration = %q, want 00001_reservations", names[0])
+	}
+	if !strings.HasPrefix(names[1], "00002_invoices") {
+		t.Errorf("second migration = %q, want 00002_invoices — a second 00001 makes apply order alphabetical", names[1])
+	}
+}
+
+// TestASecondPostgresRepositoryDoesNotFightOverCmdMigrate — cmd/migrate/main.go
+// is a PROJECT-level file the generator itself wrote. Listing it as a conflict
+// made the second aggregate fail with "these files already exist … delete
+// them, or pass --force", where deleting means deleting the shared migrate
+// command and --force silently overwrites hand-edited migrations.
+func TestASecondPostgresRepositoryDoesNotFightOverCmdMigrate(t *testing.T) {
+	t.Parallel()
+
+	dir := app(t)
+	for _, name := range []string{"Reservation", "Invoice"} {
+		if _, err := generate.Entity(generate.Options{Dir: dir, Module: "user", Name: name}); err != nil {
+			t.Fatalf("Entity %s: %v", name, err)
+		}
+		if _, err := generate.Repository(generate.Options{
+			Dir: dir, Module: "user", Name: name, Driver: "postgres",
+		}); err != nil {
+			t.Fatalf("a second postgres repository was refused over a file the generator itself wrote: %v", err)
+		}
+	}
+}
+
 func TestGenerateModule(t *testing.T) {
 	t.Parallel()
 
@@ -230,6 +295,77 @@ func TestGenerateConsumer(t *testing.T) {
 		if !strings.Contains(mod, want) {
 			t.Errorf("module.go is missing %q:\n%s", want, mod)
 		}
+	}
+}
+
+// TestConsumerDecodesWhatTheEntityGeneratorPublishes — the two generators
+// disagreed about the wire format of the SAME event, and did so silently.
+//
+// `g entity billing Invoice` emits an event marshalling to
+// {"invoice_id":...,"at":...}; `g consumer audit InvoiceCreated` produced a
+// struct reading `json:"aggregate_id"`. That key is never present in anything
+// Warren publishes, so the field decoded to "" on every delivery, nothing
+// errored, and a field test observed a live consumer receiving {'aggregate_id': ”}.
+// Two generators of one CLI, for one event, run in the documented order.
+func TestConsumerDecodesWhatTheEntityGeneratorPublishes(t *testing.T) {
+	t.Parallel()
+
+	dir := app(t)
+	if _, err := generate.Entity(generate.Options{Dir: dir, Module: "user", Name: "Invoice"}); err != nil {
+		t.Fatalf("Entity: %v", err)
+	}
+	if _, err := generate.Consumer(generate.Options{Dir: dir, Module: "user", Name: "InvoiceCreated"}); err != nil {
+		t.Fatalf("Consumer: %v", err)
+	}
+
+	// The key the entity's event actually marshals to.
+	entity := read(t, dir, "internal/modules/user/domain/invoice.go")
+	if !strings.Contains(entity, "`json:\"invoice_id\"`") {
+		t.Fatalf("the entity generator no longer emits invoice_id; this test's premise is stale:\n%s", entity)
+	}
+
+	consumer := read(t, dir, "internal/modules/user/application/on_invoice_created.go")
+	if !strings.Contains(consumer, "`json:\"invoice_id\"`") {
+		t.Errorf("the consumer does not decode the key the entity publishes:\n%s", consumer)
+	}
+	if strings.Contains(consumer, "aggregate_id") {
+		t.Errorf("the consumer still reads aggregate_id, which nothing publishes:\n%s", consumer)
+	}
+}
+
+// TestConsumerRefusesAPayloadItCouldNotRead — deriving the right key is a
+// convention, and conventions break: a consumer wired to an event from
+// another system will not match. What must NOT happen again is the silence.
+// An empty identifier means the payload was not what this handler expects,
+// and saying so routes the message to the DLQ with a readable cause instead
+// of acking a no-op.
+func TestConsumerRefusesAPayloadItCouldNotRead(t *testing.T) {
+	t.Parallel()
+
+	dir := app(t)
+	if _, err := generate.Consumer(generate.Options{Dir: dir, Module: "user", Name: "InvoiceCreated"}); err != nil {
+		t.Fatalf("Consumer: %v", err)
+	}
+	src := read(t, dir, "internal/modules/user/application/on_invoice_created.go")
+	if !strings.Contains(src, "errors.Invalid") {
+		t.Errorf("a consumer that decoded nothing still acks silently:\n%s", src)
+	}
+}
+
+// TestConsumerLogsWithTheContext — `.Info(` drops the correlation ID that
+// `.InfoContext(ctx,` carries. log/log.go, GETTING_STARTED §7b and warren.md
+// §7.1 each warn about exactly this, and the generator shipped the broken
+// form, so every generated consumer had its correlation ID disabled.
+func TestConsumerLogsWithTheContext(t *testing.T) {
+	t.Parallel()
+
+	dir := app(t)
+	if _, err := generate.Consumer(generate.Options{Dir: dir, Module: "user", Name: "InvoiceCreated"}); err != nil {
+		t.Fatalf("Consumer: %v", err)
+	}
+	src := read(t, dir, "internal/modules/user/application/on_invoice_created.go")
+	if !strings.Contains(src, "InfoContext(ctx") {
+		t.Errorf("the generated consumer does not log through the context, so it has no correlation ID:\n%s", src)
 	}
 }
 

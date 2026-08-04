@@ -22,6 +22,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/MerseniBilel/warren"
+	"github.com/MerseniBilel/warren/broker"
 	"github.com/MerseniBilel/warren/domain"
 	werrors "github.com/MerseniBilel/warren/errors"
 	"github.com/MerseniBilel/warren/outbox"
@@ -514,6 +515,67 @@ func TestRunVersionedContract(t *testing.T) {
 // Wait must return when a record is appended — and the notify is issued
 // inside the business transaction, so it fires exactly when the rows become
 // visible.
+// TestIdleRelayDoesNotExhaustThePool is the field test's most severe finding,
+// pinned against a real server.
+//
+// Relay.Run handed each Wait the relay-lifetime context and moved on when the
+// poll timer won, so a new Wait began every interval and none ever ended. The
+// Postgres store's Wait ACQUIRES A POOLED CONNECTION and holds it for its
+// whole duration, so an idle service consumed one connection per tick and
+// died after MaxConns of them: /readyz went 503, every request blocked
+// indefinitely, and the entire log was one INFO line saying the server was
+// listening.
+//
+// It could not recover on its own, which is what made it terminal rather than
+// transient — releasing a waiter needs a NOTIFY, a NOTIFY is only issued
+// inside Append, and Append needs a connection.
+//
+// The assertion is about POOL OCCUPANCY, not goroutines: this is the only
+// place the defect is visible, since the memory store's Wait blocks on a
+// channel and leaks nothing a pool can run out of.
+func TestIdleRelayDoesNotExhaustThePool(t *testing.T) {
+	// A pool small enough that the old behaviour exhausts it well within the
+	// idle window below.
+	_, db, _, store := bootApp(t, postgres.MaxConns(4))
+
+	relay := outbox.NewRelay(store, noopPublisher{}, outbox.PollInterval(20*time.Millisecond))
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { _ = relay.Run(ctx); close(done) }()
+	defer func() { cancel(); <-done }()
+
+	// Idle for many poll intervals. Nothing is appended, so nothing NOTIFYs
+	// and the timer wins every time — the exact condition that killed it.
+	time.Sleep(600 * time.Millisecond)
+
+	// The pool must still hand out a connection. Under the old behaviour this
+	// blocked until the deadline: the defect's real symptom is not an error
+	// but a request that never returns.
+	probeCtx, probeCancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer probeCancel()
+	var n int
+	if err := db(probeCtx).QueryRow(probeCtx, `SELECT 1`).Scan(&n); err != nil {
+		t.Fatalf("the pool could not serve a trivial query after an idle relay: %v", err)
+	}
+
+	// And the relay must be holding at most ONE listener, not one per tick.
+	var listeners int
+	if err := db(probeCtx).QueryRow(probeCtx,
+		`SELECT count(*) FROM pg_stat_activity WHERE query LIKE 'LISTEN%' AND pid <> pg_backend_pid()`,
+	).Scan(&listeners); err != nil {
+		t.Fatalf("counting listeners: %v", err)
+	}
+	if listeners > 1 {
+		t.Errorf("%d LISTEN connections held after an idle relay, want at most 1 — each one is a pooled connection the service never gets back", listeners)
+	}
+}
+
+// noopPublisher accepts everything: this test is about the waiter, not about
+// publication.
+type noopPublisher struct{}
+
+func (noopPublisher) Publish(context.Context, string, ...broker.Message) error { return nil }
+
 func TestWaitWakesOnAppend(t *testing.T) {
 	_, db, uow, store := bootApp(t)
 	repo := userRepo{db: db}

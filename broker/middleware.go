@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"maps"
 	"math/rand/v2"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
@@ -14,6 +15,7 @@ import (
 	"github.com/MerseniBilel/warren/app"
 	"github.com/MerseniBilel/warren/errors"
 	"github.com/MerseniBilel/warren/inbox"
+	"github.com/MerseniBilel/warren/log"
 )
 
 // Middleware decorates a MessageHandler — the consumer ring's mirror of
@@ -193,6 +195,19 @@ func Recover() Middleware {
 		return func(ctx context.Context, msg Message) (err error) {
 			defer func() {
 				if r := recover(); r != nil {
+					// Logged HERE, with the stack, because this is the only
+					// frame that still has one. Converting the panic to an
+					// error and returning it discards the stack, and a field
+					// test found that a panicking consumer produced no record
+					// anywhere: no error, no trace, no sign the message had
+					// even arrived. transport/http has logged panics with a
+					// stack from the start; the consumer ring is where nobody
+					// is watching, so it needs it more.
+					log.FromContext(ctx).ErrorContext(ctx, "consumer panicked",
+						"panic", r,
+						"message_id", msg.ID,
+						"type", msg.Type,
+						"stack", string(debug.Stack()))
 					err = errors.Internal(fmt.Errorf("handler panic: %v", r))
 				}
 			}()
@@ -437,7 +452,28 @@ func DeadLetter(pub Publisher, originTopic, dlqTopic string) Middleware {
 			dead.Headers["warren-error-code"] = string(codeOf(err))
 			dead.Headers["warren-error"] = err.Error()
 			dead.Headers["warren-attempts"] = strconv.Itoa(attemptsOf(err))
+			// warren.md §2.6: the DLQ "stops the message, keeps it for
+			// inspection, and fires the DLQ alert. Which is correct, because
+			// this should wake someone up." Nothing woke up — with the
+			// scaffold's memory broker and nobody subscribed to <topic>.dlq,
+			// a poison message vanished leaving no trace in logs or storage.
+			// This line IS the alert: it is the one consumer event that
+			// should page a human.
+			log.FromContext(ctx).ErrorContext(ctx, "message dead-lettered",
+				"message_id", msg.ID,
+				"type", msg.Type,
+				"origin_topic", originTopic,
+				"dlq_topic", dlqTopic,
+				"attempts", attemptsOf(err),
+				"code", string(codeOf(err)),
+				"error", err.Error())
 			if perr := pub.Publish(ctx, dlqTopic, dead); perr != nil {
+				// Worse than a dead-letter: the message is now neither handled
+				// nor preserved, and the nack sends it round again.
+				log.FromContext(ctx).ErrorContext(ctx, "dead-letter publish failed",
+					"message_id", msg.ID,
+					"dlq_topic", dlqTopic,
+					"error", perr.Error())
 				return errors.Unavailable("dead-letter publish to "+dlqTopic, perr)
 			}
 			return nil
@@ -469,6 +505,17 @@ func Retry(policy app.RetryPolicy) Middleware {
 				if !retry {
 					return &attemptedError{err: err, attempts: attempt}
 				}
+				// WARN, not ERROR: a retry that succeeds is not a failure. But
+				// it must be audible — a consumer retrying steadily against a
+				// broken dependency used to look exactly like a consumer doing
+				// nothing at all.
+				log.FromContext(ctx).WarnContext(ctx, "consumer retrying",
+					"message_id", msg.ID,
+					"type", msg.Type,
+					"attempt", attempt,
+					"delay", delay.String(),
+					"code", string(code),
+					"error", err.Error())
 				if delay > 0 {
 					timer := time.NewTimer(delay)
 					select {

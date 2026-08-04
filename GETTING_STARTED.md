@@ -403,12 +403,31 @@ warren.NewModule("notes",
 A module that wants `postgres.DB` must **import** the postgres module — a
 provider is private to its module unless exported. In `main`:
 
+Declare it ONCE, in `internal/platform`, and let features import it. A module
+factory that takes a module as an argument does not work: modules are
+deduplicated by identity, so a factory called by two importers is two modules
+sharing a name — a boot error. This is also the shape `warren g module`
+generates, which expects `platform.Module()` to exist.
+
 ```go
-pg := postgres.Module(
-	postgres.DSN(os.Getenv("DATABASE_URL")),
-	postgres.WithOutbox(),        // events land in warren_outbox, same commit
-)
-warren.New(pg, notes.Module(pg), whttp.Server(whttp.Port(8080))).Run()
+// internal/platform/postgres.go
+var Postgres = sync.OnceValue(func() warren.Module {
+	return postgres.Module(
+		postgres.DSN(os.Getenv("DATABASE_URL")),
+		postgres.WithOutbox(),    // events land in warren_outbox, same commit
+	)
+})
+
+// internal/modules/notes/module.go
+var Module = sync.OnceValue(func() warren.Module {
+	return warren.NewModule("notes",
+		warren.Imports(platform.Postgres()),
+		warren.Controllers(NewController),
+	)
+})
+
+// cmd/app/main.go
+warren.New(platform.Postgres(), notes.Module(), whttp.Server(whttp.Port(8080))).Run()
 ```
 
 ### The schema — a deploy step, never a boot step
@@ -432,7 +451,8 @@ if err := postgres.Migrate(ctx, dsn, schema.FS);       err != nil { log.Fatal(er
 know:
 
 - Files apply in **name order**, so zero-pad them: `00010` sorts after
-  `00009`, `10` does not.
+  `00009`, `10` does not. `warren g repository --driver postgres` numbers its
+  own files this way, continuing from the highest already in `db/migrations`.
 - Both filesystems record into the **same** `warren_schema_migrations` table,
   keyed by bare filename. Name yours so they cannot collide with Warren's —
   `00001_notes.sql`, never `00001_warren_outbox.sql`, which would be recorded

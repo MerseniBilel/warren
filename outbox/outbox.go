@@ -364,8 +364,25 @@ func (r *Relay) Run(ctx context.Context) error {
 			if waiter != nil {
 				// Appending is the signal; the timer is the safety net for a
 				// signal that never arrives.
+				//
+				// The Wait gets its OWN cancellable context, and is cancelled
+				// and JOINED before the next iteration. Both halves matter.
+				// This loop used to hand Wait the relay-lifetime context and
+				// `continue` the moment the timer won, leaving that Wait
+				// blocked for ever and starting another on the next tick.
+				//
+				// The memory store's Wait blocks on a channel, so the leak
+				// there was only goroutines. The Postgres store's Wait holds a
+				// POOLED CONNECTION for its whole duration: an idle service
+				// consumed one connection per poll interval, exhausted the
+				// pool in MaxConns ticks, and then every request blocked for
+				// ever — with one INFO line in the log to explain it. It could
+				// not recover, either, because releasing a waiter needs a
+				// NOTIFY, which is only issued inside Append, which needs a
+				// connection.
+				waitCtx, cancelWait := context.WithCancel(ctx)
 				waited := make(chan struct{})
-				go func() { waiter.Wait(ctx); close(waited) }()
+				go func() { waiter.Wait(waitCtx); close(waited) }()
 				if !timer.Stop() {
 					select {
 					case <-timer.C:
@@ -373,10 +390,20 @@ func (r *Relay) Run(ctx context.Context) error {
 					}
 				}
 				timer.Reset(r.poll)
+				stopping := false
 				select {
 				case <-waited:
 				case <-timer.C:
 				case <-ctx.Done():
+					stopping = true
+				}
+				// Joining is what makes "exactly one waiter" true rather than
+				// merely intended. A Waiter must return when its context is
+				// done — that is the contract Waiter states — so this cannot
+				// outlast the cancellation.
+				cancelWait()
+				<-waited
+				if stopping {
 					return nil
 				}
 				continue
