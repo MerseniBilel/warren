@@ -55,8 +55,13 @@ func newPaymentReceivedSubscription(
 	// context, cancelled as soon as boot finishes under Start/Stop.
 	ctx, cancel := context.WithCancel(context.Background())
 	lc.Append(lifecycle.Hook{
-		Name:    "billing payment.received consumer",
-		OnStart: func(context.Context) error { go func() { _ = sub.Subscribe(ctx, topic, pipeline) }(); return nil },
+		Name: "billing payment.received consumer",
+		// Subscribe returns once the subscription is LIVE, so OnStart
+		// returning means this consumer is genuinely listening. Do not wrap
+		// it in a goroutine: that reports "started" before the subscription
+		// exists, and anything published in the gap is discarded — by a
+		// Publish that reports success, so the outbox marks it published.
+		OnStart: func(context.Context) error { return sub.Subscribe(ctx, topic, pipeline) },
 		OnStop: func(c context.Context) error {
 			cancel()
 			return wait(c)

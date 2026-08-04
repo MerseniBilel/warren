@@ -110,12 +110,22 @@ func (b *Broker) Publish(ctx context.Context, topic string, msgs ...broker.Messa
 	return nil
 }
 
-// Subscribe registers h against topic and delivers messages to it, one at a
-// time, in publish order. It blocks until ctx is cancelled, then returns
-// nil: the in-flight message finishes first, so a cancelled Subscribe is a
-// drain, not an abort. A handler error does not end the subscription — the
-// consumer chain owns dispositions, and a disposition this driver cannot
-// honour is logged rather than dropped in silence.
+// Subscribe registers h against topic and RETURNS ONCE IT IS LIVE — the
+// registration below happens before this function returns, so a Publish that
+// is ordered after it cannot miss the subscription. Delivery then runs in the
+// background, one message at a time, in publish order, until ctx is
+// cancelled; the in-flight message finishes first, so cancellation is a
+// drain, not an abort.
+//
+// The registration was always synchronous and always first. What changed is
+// that the caller can now RELY on it: while Subscribe blocked for the
+// subscription's lifetime, every caller had to spawn a goroutine and had no
+// way to know when the line below had run — so a publish racing boot went to
+// a topic that, as far as this map was concerned, nobody was listening to.
+//
+// A handler error does not end the subscription — the consumer chain owns
+// dispositions, and a disposition this driver cannot honour is logged rather
+// than dropped in silence.
 func (b *Broker) Subscribe(ctx context.Context, topic string, h broker.MessageHandler) error {
 	if h == nil {
 		panic("memory: Subscribe with a nil handler")
@@ -126,6 +136,13 @@ func (b *Broker) Subscribe(ctx context.Context, topic string, h broker.MessageHa
 	b.topics[topic] = append(b.topics[topic], s)
 	b.mu.Unlock()
 
+	go b.deliver(ctx, topic, s, h)
+	return nil
+}
+
+// deliver is the subscription's loop, owned by the driver rather than by the
+// caller's goroutine.
+func (b *Broker) deliver(ctx context.Context, topic string, s *subscription, h broker.MessageHandler) {
 	defer func() {
 		close(s.done)
 		b.mu.Lock()
@@ -163,7 +180,7 @@ func (b *Broker) Subscribe(ctx context.Context, topic string, h broker.MessageHa
 			}
 		case <-ctx.Done():
 			b.abandon(ctx, topic, s)
-			return nil
+			return
 		}
 	}
 }

@@ -3,6 +3,7 @@ package kafka
 import (
 	"context"
 	"log/slog"
+	"reflect"
 	"sync"
 
 	"github.com/twmb/franz-go/pkg/kgo"
@@ -25,7 +26,11 @@ import (
 // sibling that already succeeded acks from its own inbox entry without
 // re-running.
 //
-// It returns when ctx is done, which is how the runner's OnStop stops it.
+// It RETURNS ONCE THE SUBSCRIPTION IS LIVE: the handler is registered and the
+// topic added to the poll set before this returns, so a publish ordered after
+// it cannot miss the subscription. Cancelling ctx deregisters the handler;
+// the poll loop itself is bound to the CLIENT's lifetime and is stopped by
+// stopConsuming at shutdown step 3.
 func (c *client) Subscribe(ctx context.Context, topic string, h broker.MessageHandler) error {
 	if h == nil {
 		panic("kafka: Subscribe with a nil handler for topic " + topic)
@@ -52,7 +57,25 @@ func (c *client) Subscribe(ctx context.Context, topic string, h broker.MessageHa
 	// fetching for the first, and the loop ends when the client closes.
 	c.startLoop()
 
-	<-ctx.Done()
+	// Deregister when this subscription's context ends. The loop is shared,
+	// so it must keep running for the other subscriptions; what has to stop
+	// is delivery to THIS handler.
+	go func() {
+		<-ctx.Done()
+		c.mu.Lock()
+		hs := c.handlers[topic]
+		// Handlers are func values and so are not comparable; identity is
+		// the code pointer. Two subscriptions sharing one handler function
+		// is not a shape this driver creates — each pipeline closes over its
+		// own name and inbox.
+		for i, other := range hs {
+			if reflect.ValueOf(other).Pointer() == reflect.ValueOf(h).Pointer() {
+				c.handlers[topic] = append(hs[:i:i], hs[i+1:]...)
+				break
+			}
+		}
+		c.mu.Unlock()
+	}()
 	return nil
 }
 

@@ -50,10 +50,36 @@ type Publisher interface {
 
 // Subscriber consumes a topic, invoking the handler for each message. A
 // subscription is a lifecycle component: it starts after its dependencies
-// are ready and drains on shutdown — cancellation of ctx stops fetching,
-// lets in-flight messages finish and ack, and returns. Never a goroutine
-// someone forgot about.
+// are ready and drains on shutdown — cancellation of ctx stops fetching and
+// lets in-flight messages finish and ack. Never a goroutine someone forgot
+// about.
 type Subscriber interface {
+	// Subscribe registers h for topic and RETURNS ONCE THE SUBSCRIPTION IS
+	// LIVE — once a Publish to that topic will reach h. It does not block
+	// for the lifetime of the subscription; the driver owns the delivery
+	// loop, which runs until ctx is cancelled.
+	//
+	// Returning early is the whole contract, and it exists because the
+	// alternative silently loses messages. Subscribe used to block, so every
+	// caller wrapped it in a goroutine:
+	//
+	//	OnStart: func(context.Context) error {
+	//	    go func() { _ = sub.Subscribe(ctx, topic, h) }()
+	//	    return nil          // "started" — but not yet subscribed
+	//	}
+	//
+	// which reports success before the subscription exists. warren.md §1.3
+	// step 6 promises consumers start before publishers, and that promise was
+	// being defeated by the very code the framework generates: anything
+	// published in the gap went to a topic with no subscriber and was
+	// discarded — and the outbox relay, seeing a successful Publish, marked
+	// the record published. Silent, permanent event loss on the path the
+	// framework recommends. In tests it showed up as the first module test in
+	// a process passing and every later one receiving nothing at all.
+	//
+	// A driver that cannot register synchronously must block until it can:
+	// failing the boot because a broker is unreachable is the correct
+	// outcome, and it is the reason this returns an error.
 	Subscribe(ctx context.Context, topic string, h MessageHandler) error
 }
 

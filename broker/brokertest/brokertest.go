@@ -47,6 +47,9 @@ func Run(t *testing.T, newBroker NewBroker) {
 	t.Run("fan-out to several subscriptions", func(t *testing.T) { testFanOut(t, newBroker) })
 	t.Run("per-key ordering", func(t *testing.T) { testOrdering(t, newBroker) })
 	t.Run("drain on context cancellation", func(t *testing.T) { testDrain(t, newBroker) })
+	t.Run("the subscription is live when Subscribe returns", func(t *testing.T) {
+		TestSubscribeIsLiveWhenItReturns(t, newBroker)
+	})
 }
 
 // collector receives messages and lets a test await a count without sleeps.
@@ -112,21 +115,21 @@ func awaitCount(t *testing.T, c *collector, n int) {
 	}
 }
 
-// subscribe starts a subscription in the background and returns its cancel
-// and a channel carrying Subscribe's return.
+// subscribe starts a subscription and returns its cancel.
 //
-// Subscribe blocks while it delivers, so it necessarily runs in a goroutine
-// and no driver can promise the subscription is live the instant the call
-// starts — an in-process broker registers a moment later, a Kafka consumer
-// joins its group seconds later. Tests therefore establish liveness with
-// ready() before asserting on published messages, rather than assuming it.
-func subscribe(t *testing.T, sub broker.Subscriber, topic string, h broker.MessageHandler) (context.CancelFunc, <-chan error) {
+// Subscribe RETURNS ONCE THE SUBSCRIPTION IS LIVE, so there is no goroutine
+// here and no liveness guess: if it returned nil, a publish ordered after it
+// reaches the handler. ready() survives for the cases that still need to
+// tolerate at-least-once redelivery of earlier traffic, but it is no longer
+// how a test learns the subscription exists.
+func subscribe(t *testing.T, sub broker.Subscriber, topic string, h broker.MessageHandler) context.CancelFunc {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan error, 1)
-	go func() { done <- sub.Subscribe(ctx, topic, h) }()
 	t.Cleanup(cancel)
-	return cancel, done
+	if err := sub.Subscribe(ctx, topic, h); err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+	return cancel
 }
 
 // ready publishes probe messages until the collector sees one, then forgets
@@ -319,7 +322,7 @@ func testOrdering(t *testing.T, newBroker NewBroker) {
 func testDrain(t *testing.T, newBroker NewBroker) {
 	pub, sub := newBroker(t)
 	c := newCollector()
-	cancel, done := subscribe(t, sub, "orders", c.handle)
+	cancel := subscribe(t, sub, "orders", c.handle)
 	ready(t, pub, c, "orders")
 
 	if err := pub.Publish(context.Background(), "orders", broker.Message{ID: "o1"}); err != nil {
@@ -327,18 +330,46 @@ func testDrain(t *testing.T, newBroker NewBroker) {
 	}
 	awaitCount(t, c, 1)
 
-	// Shutdown step 3: cancelling the context stops fetching and Subscribe
-	// returns — the subscription is a lifecycle component, not a goroutine
-	// left running.
+	// Shutdown step 3: cancelling the context stops delivery. Subscribe has
+	// long since returned — the driver owns the loop — so what is asserted
+	// is that messages STOP arriving, which is the property that actually
+	// matters for a drain.
 	cancel()
-	select {
-	case err := <-done:
-		if err != nil && !stderrors.Is(err, context.Canceled) {
-			t.Errorf("Subscribe returned %v, want nil or context.Canceled", err)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("Subscribe did not return after its context was cancelled — the subscription cannot drain")
+	deadline := time.Now().Add(5 * time.Second)
+	for c.count() < 1 && time.Now().Before(deadline) {
+		runtime.Gosched()
 	}
+	before := c.count()
+	for range 5 {
+		_ = pub.Publish(context.Background(), "orders", broker.Message{ID: "after-cancel"})
+	}
+	time.Sleep(200 * time.Millisecond)
+	if got := c.count(); got != before {
+		t.Errorf("the handler received %d message(s) after its context was cancelled — the subscription did not stop",
+			got-before)
+	}
+}
+
+// TestSubscribeIsLiveWhenItReturns is the contract A2 added, and the one that
+// would have caught the defect: a publish ordered AFTER Subscribe returns must
+// reach the handler, with no settling, no polling and no probe.
+//
+// Every caller used to wrap Subscribe in a goroutine because it blocked, and
+// so reported "started" before the subscription existed. Anything published in
+// that window went to a topic with no subscriber and was discarded — and the
+// outbox relay, seeing a successful Publish, marked the record published.
+func TestSubscribeIsLiveWhenItReturns(t *testing.T, newBroker NewBroker) {
+	t.Helper()
+	pub, sub := newBroker(t)
+	c := newCollector()
+
+	// No ready() and no sleep: that is the assertion.
+	subscribe(t, sub, "orders", c.handle)
+
+	if err := pub.Publish(context.Background(), "orders", broker.Message{ID: "first"}); err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
+	awaitCount(t, c, 1)
 }
 
 func id(i int) string {

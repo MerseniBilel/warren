@@ -1082,6 +1082,9 @@ type Publisher interface {
 }
 
 type Subscriber interface {
+    // Registers h and RETURNS ONCE THE SUBSCRIPTION IS LIVE. It does not
+    // block for the subscription's lifetime; the driver owns the delivery
+    // loop, which runs until ctx is cancelled.
     Subscribe(ctx context.Context, topic string, h MessageHandler) error
 }
 
@@ -1092,6 +1095,32 @@ type MessageHandler func(context.Context, Message) error
 const CorrelationHeader = "correlation-id"
 func Correlating(next Publisher) Publisher   // nil-safe; never overwrites
 ```
+
+**`Subscribe` returns once the subscription is LIVE, and that is a promise the
+port makes rather than a convention callers follow.** It used to block for the
+subscription's lifetime, so every caller — including the code `warren g
+consumer` GENERATES — wrapped it in a goroutine and returned success
+immediately:
+
+```go
+OnStart: func(context.Context) error {
+    go func() { _ = sub.Subscribe(ctx, topic, h) }()
+    return nil          // "started" — but not yet subscribed
+}
+```
+
+which reports a consumer as started before it exists. §1.3 step 6 promises
+consumers start before publishers, and this defeated it in the framework's own
+generated code: anything published in the gap reached a topic with no
+subscriber and was discarded — by a `Publish` that returns nil, so the outbox
+relay marked the record published. Silent, permanent event loss on the
+recommended path. In tests it appeared as the first `warrentest.NewModuleTest`
+in a process passing and every later one receiving nothing at all.
+
+A driver that cannot register synchronously must block until it can; failing
+the boot because a broker is unreachable is the correct outcome, and it is why
+`Subscribe` returns an error. `brokertest.Run` certifies the promise directly —
+publish immediately after `Subscribe` returns, with no settling and no probe.
 
 **The correlation ID survives the hop.** A request that publishes an event and
 a consumer that handles it are one causal chain, and it used to break at the
