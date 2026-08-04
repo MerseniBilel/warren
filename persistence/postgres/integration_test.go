@@ -735,3 +735,60 @@ func TestConnectionFailureIsUnavailableOnReadsToo(t *testing.T) {
 		t.Errorf("diagnostic:\n%v", err)
 	}
 }
+
+// TestAStatementThatCannotFinishIsUnavailable — field test #4, defect A4.
+//
+//	docker pause warren-pg
+//	curl -m 15 -X POST localhost:8080/shipments -d '{...}'
+//	code=000 time=15.003321s     ← no response, no 503, no error
+//
+// The pool had a ConnectTimeout and nothing bounded a QUERY, so a database
+// that stopped answering converted directly into unbounded goroutine growth.
+// warren.md §3.3 promises UNAVAILABLE when the database cannot serve, and an
+// unbounded wait is not that.
+//
+// This drives the bound with pg_sleep, which a healthy server can be asked to
+// hold open indefinitely. The paused case is covered by the CLIENT-side half
+// of StatementTimeout: a paused server enforces no statement_timeout of its
+// own, because enforcing one is work it has to do — which is exactly why the
+// deadline is applied on both sides rather than only in RuntimeParams.
+func TestAStatementThatCannotFinishIsUnavailable(t *testing.T) {
+	_, db, uow, _ := bootApp(t, postgres.StatementTimeout(500*time.Millisecond))
+
+	start := time.Now()
+	err := uow.Do(context.Background(), func(ctx context.Context) error {
+		_, execErr := db(ctx).Exec(ctx, "select pg_sleep(30)")
+		return execErr
+	})
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("a statement that cannot finish returned no error")
+	}
+	if !werrors.Is(err, werrors.CodeUnavailable) {
+		t.Errorf("err = %v, want UNAVAILABLE — §3.3's promise for a database that cannot serve", err)
+	}
+	if elapsed > 10*time.Second {
+		t.Errorf("the statement took %v to fail; nothing bounded it", elapsed)
+	}
+}
+
+// TestACallersDeadlineWins — the statement timeout must only bound a context
+// that has none. A request context is the tighter, better-informed limit, and
+// silently extending a query past the point anyone is waiting for it would be
+// worse than no bound at all.
+func TestACallersDeadlineWins(t *testing.T) {
+	_, db, uow, _ := bootApp(t, postgres.StatementTimeout(time.Hour))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	_ = uow.Do(ctx, func(c context.Context) error {
+		_, execErr := db(c).Exec(c, "select pg_sleep(30)")
+		return execErr
+	})
+	if elapsed := time.Since(start); elapsed > 10*time.Second {
+		t.Errorf("the caller's 500ms deadline was overridden by the hour-long default: took %v", elapsed)
+	}
+}

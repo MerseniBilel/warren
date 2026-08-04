@@ -79,14 +79,26 @@ func (u *UnitOfWork) Do(ctx context.Context, fn func(context.Context) error, opt
 
 	// Step 2 — begin. Isolation is set here, as the transaction's first
 	// statement, which is the only place Postgres accepts it.
-	tx, err := u.pool.p.BeginTx(ctx, txOpts)
+	// Bound the ACQUIRE too. BeginTx takes a connection from the pool and
+	// blocks until one is free, so on an exhausted pool an unbounded context
+	// parks the request for ever — warren.md §3.3 promises UNAVAILABLE on
+	// exhaustion, and a hang is not that. A caller's own deadline wins.
+	beginCtx := ctx
+	if d := u.pool.cfg.statementTimeout; d > 0 {
+		if _, ok := ctx.Deadline(); !ok {
+			var cancel context.CancelFunc
+			beginCtx, cancel = context.WithTimeout(ctx, d)
+			defer cancel()
+		}
+	}
+	tx, err := u.pool.p.BeginTx(beginCtx, txOpts)
 	if err != nil {
 		return errors.Unavailable("postgres", err)
 	}
 
 	// Steps 3 and 4 — the transaction goes on the context so repositories
 	// resolve through it, and the collector goes on so Track can enlist.
-	txCtx := context.WithValue(ctx, txKey{}, Queryer(queryer{tx}))
+	txCtx := context.WithValue(ctx, txKey{}, Queryer(queryer{q: tx, timeout: u.pool.cfg.statementTimeout}))
 	txCtx, drain := persistence.Collect(txCtx)
 
 	committed := false

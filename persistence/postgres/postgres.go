@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"strconv"
 	"strings"
 	"time"
 
@@ -60,31 +61,39 @@ const (
 )
 
 type config struct {
-	dsn             string
-	maxConns        int32
-	minConns        int32
-	maxConnLifetime time.Duration
-	maxConnIdleTime time.Duration
-	connectTimeout  time.Duration
-	cacheMode       CacheMode
-	healthTimeout   time.Duration
-	raw             []func(context.Context, *pgxpool.Pool) error
-	configure       []func(*pgxpool.Config) error
+	dsn              string
+	maxConns         int32
+	minConns         int32
+	maxConnLifetime  time.Duration
+	maxConnIdleTime  time.Duration
+	connectTimeout   time.Duration
+	statementTimeout time.Duration
+	cacheMode        CacheMode
+	healthTimeout    time.Duration
+	raw              []func(context.Context, *pgxpool.Pool) error
+	configure        []func(*pgxpool.Config) error
 
 	outbox *outboxConfig
 	inbox  *inboxConfig
 	lock   *lockConfig
 }
 
+// statementTimeout is the default bound on a single statement, server-side
+// and client-side. 30s is long enough that no healthy query reaches it and
+// short enough that a wedged database fails a request rather than parking a
+// goroutine on it for ever.
+const defaultStatementTimeout = 30 * time.Second
+
 func defaults() config {
 	return config{
-		maxConns:        10,
-		minConns:        0,
-		maxConnLifetime: time.Hour,
-		maxConnIdleTime: 30 * time.Minute,
-		connectTimeout:  5 * time.Second,
-		cacheMode:       StatementCachePrepare,
-		healthTimeout:   2 * time.Second,
+		maxConns:         10,
+		minConns:         0,
+		maxConnLifetime:  time.Hour,
+		maxConnIdleTime:  30 * time.Minute,
+		connectTimeout:   5 * time.Second,
+		statementTimeout: defaultStatementTimeout,
+		cacheMode:        StatementCachePrepare,
+		healthTimeout:    2 * time.Second,
 	}
 }
 
@@ -199,6 +208,25 @@ func MaxConnIdleTime(d time.Duration) Option {
 // worse than a boot that fails.
 func ConnectTimeout(d time.Duration) Option {
 	return Option{apply: func(c *config) { c.connectTimeout = d }}
+}
+
+// StatementTimeout bounds a single statement, on both sides of the wire. The
+// default is 30 seconds; 0 disables it.
+//
+// It is set as the connection's server-side statement_timeout AND applied as
+// a context deadline by the query wrapper, and it needs both. The server-side
+// half is what cancels a genuinely slow query. The client-side half is what
+// survives a server that cannot answer at all: a paused, partitioned or
+// swapping Postgres enforces no timeout of its own, because enforcing one is
+// work it has to do — so without a deadline here a request goroutine waits
+// for ever, and the pool empties behind it.
+//
+// A caller's own deadline always wins; this only bounds a context that has
+// none. A statement that exceeds it is UNAVAILABLE, which is what warren.md
+// §3.3 promises for a database that cannot serve and what makes app.Retrying
+// re-run the transaction.
+func StatementTimeout(d time.Duration) Option {
+	return Option{apply: func(c *config) { c.statementTimeout = d }}
 }
 
 // StatementCacheMode selects how prepared statements are cached. Use
@@ -348,6 +376,18 @@ func newPool(cfg config, lc lifecycle.Lifecycle, reg health.Registry) (*pool, er
 	pgxCfg.MaxConnLifetime = cfg.maxConnLifetime
 	pgxCfg.MaxConnIdleTime = cfg.maxConnIdleTime
 	pgxCfg.ConnConfig.ConnectTimeout = cfg.connectTimeout
+	// Server-side backstop: Postgres cancels a statement that runs longer
+	// than this. It is not sufficient on its own — a server that is paused,
+	// partitioned or swapping enforces nothing, which is why the client-side
+	// deadline in queryer exists too — but it is what stops a genuinely slow
+	// query holding a connection.
+	if cfg.statementTimeout > 0 {
+		if pgxCfg.ConnConfig.RuntimeParams == nil {
+			pgxCfg.ConnConfig.RuntimeParams = map[string]string{}
+		}
+		pgxCfg.ConnConfig.RuntimeParams["statement_timeout"] =
+			strconv.FormatInt(cfg.statementTimeout.Milliseconds(), 10)
+	}
 	if cfg.cacheMode == StatementCacheDescribe {
 		pgxCfg.ConnConfig.DefaultQueryExecMode = pgx.QueryExecModeDescribeExec
 	}
@@ -392,7 +432,7 @@ func (p *pool) open(ctx context.Context) error {
 		return errCannotConnect(p.cfg.dsn, err)
 	}
 	p.p = pgxPool
-	p.boxed = queryer{pgxPool}
+	p.boxed = queryer{q: pgxPool, timeout: p.cfg.statementTimeout}
 
 	for _, fn := range p.cfg.raw {
 		if err := fn(ctx, pgxPool); err != nil {
@@ -442,14 +482,56 @@ type pgxQuerier interface {
 // reason: Exec must return int64 rather than pgconn.CommandTag, which is a
 // driver type. It is boxed once per transaction and once per process, never
 // per call — so DB(ctx) allocates nothing.
-type queryer struct{ q pgxQuerier }
+type queryer struct {
+	q       pgxQuerier
+	timeout time.Duration
+}
+
+// bound applies the statement timeout to a context that has none of its own.
+//
+// A caller's deadline always wins: a request context that is already bounded
+// is the tighter, better-informed limit, and overriding it would extend a
+// query past the point anyone is waiting for it.
+//
+// This is the half that survives a server which cannot answer at all. A
+// paused, partitioned or swapping Postgres enforces no statement_timeout,
+// because enforcing it is work the server has to do — so without a deadline
+// on THIS side, a request goroutine waits for ever. warren.md §3.3 promises
+// UNAVAILABLE when the database cannot serve; an unbounded wait is not that.
+func (w queryer) bound(ctx context.Context) (context.Context, context.CancelFunc) {
+	if w.timeout <= 0 {
+		return ctx, func() {}
+	}
+	if _, ok := ctx.Deadline(); ok {
+		return ctx, func() {}
+	}
+	return context.WithTimeout(ctx, w.timeout)
+}
 
 func (w queryer) Query(ctx context.Context, sql string, args ...any) (Rows, error) {
+	// The cancel cannot be deferred here: the caller reads the rows AFTER
+	// this returns, and cancelling the context would kill the read. It is
+	// tied to Close instead, which a caller must call anyway to release the
+	// connection — so the deadline covers the whole result set, not just the
+	// round trip that opened it.
+	ctx, cancel := w.bound(ctx)
 	rows, err := w.q.Query(ctx, sql, args...)
 	if err != nil {
+		cancel()
 		return nil, mapError(err)
 	}
-	return rows, nil
+	return boundedRows{Rows: rows, cancel: cancel}, nil
+}
+
+// boundedRows releases the statement deadline when the result set is closed.
+type boundedRows struct {
+	Rows
+	cancel context.CancelFunc
+}
+
+func (b boundedRows) Close() {
+	b.Rows.Close()
+	b.cancel()
 }
 
 // QueryRow returns a Row whose Scan classifies its error, exactly as Query
@@ -462,12 +544,21 @@ func (w queryer) Query(ctx context.Context, sql string, args ...any) (Rows, erro
 // Isolation(Serializable) was unusable by this package's own definition. The
 // wrapper costs one allocation on the error path and none on the happy one.
 func (w queryer) QueryRow(ctx context.Context, sql string, args ...any) Row {
-	return mappedRow{w.q.QueryRow(ctx, sql, args...)}
+	// pgx defers the round trip to Scan, so the deadline has to outlive this
+	// call and is released by mappedRow.Scan.
+	ctx, cancel := w.bound(ctx)
+	return mappedRow{r: w.q.QueryRow(ctx, sql, args...), cancel: cancel}
 }
 
-type mappedRow struct{ r pgx.Row }
+type mappedRow struct {
+	r      pgx.Row
+	cancel context.CancelFunc
+}
 
 func (m mappedRow) Scan(dest ...any) error {
+	if m.cancel != nil {
+		defer m.cancel()
+	}
 	if err := m.r.Scan(dest...); err != nil {
 		return mapError(err)
 	}
@@ -475,6 +566,8 @@ func (m mappedRow) Scan(dest ...any) error {
 }
 
 func (w queryer) Exec(ctx context.Context, sql string, args ...any) (int64, error) {
+	ctx, cancel := w.bound(ctx)
+	defer cancel()
 	tag, err := w.q.Exec(ctx, sql, args...)
 	if err != nil {
 		return 0, mapError(err)
@@ -564,6 +657,17 @@ func startSweeper(retention time.Duration, fn func(context.Context) error) func(
 // matching would break silently on a driver upgrade, and app.Retrying has to
 // be able to trust this classification.
 func isConnectionError(err error) bool {
+	// A statement that ran out of time is a database that could not serve, so
+	// it carries the same code as a dial failure: UNAVAILABLE, retryable,
+	// 503. Without this it fell through unclassified and became a 500, which
+	// tells a caller the bug is theirs and stops app.Retrying re-running it.
+	//
+	// context.Canceled is deliberately NOT here: that is the CLIENT hanging
+	// up, not the database failing, and reporting it as a service problem
+	// would make every abandoned request look like an outage.
+	if errorsAs2(err, context.DeadlineExceeded) {
+		return true
+	}
 	var connErr *pgconn.ConnectError
 	if errorsAs(err, &connErr) {
 		return true

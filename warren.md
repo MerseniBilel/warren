@@ -1058,7 +1058,8 @@ bug into a 503 and destroy the stack.
 
 Error codes: absent → `NOT_FOUND`; unique or optimistic-concurrency conflict
 → `CONFLICT`; constraint violation → `INVALID`; connection lost, pool
-exhausted, serialization failure, **commit failure** → `UNAVAILABLE`, so
+exhausted, serialization failure, statement timeout, **commit failure** →
+`UNAVAILABLE`, so
 `app.Retrying` composed OUTSIDE `app.Transactional` re-runs the whole
 transaction. An unsupported `Option` is `INVALID`, never a silent downgrade.
 
@@ -1486,6 +1487,7 @@ func PartitionAssignment(Balancer) Option
 func CommitInterval(time.Duration) Option
 func SessionTimeout(time.Duration) Option
 func ConnectTimeout(time.Duration) Option
+func StatementTimeout(time.Duration) Option   // 30s, both sides of the wire; 0 disables
 func ProduceTimeout(time.Duration) Option
 func FetchMaxBytes(int32) Option
 func MaxPollRecords(int) Option
