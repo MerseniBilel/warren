@@ -47,9 +47,15 @@ func (u *MemoryUnitOfWork) OnCommit(fn func(context.Context, []domain.Event) err
 type stagingKey struct{}
 
 // staging is one transaction's pending writes and deletes.
+//
+// expect records, per key, the version a versioned aggregate was loaded at.
+// It is kept alongside the put rather than read off the aggregate at commit
+// because the aggregate's own version is advanced on success, so by then the
+// number the write was checked against is gone.
 type staging struct {
 	mu       sync.Mutex
 	puts     map[string]any
+	expect   map[string]int64
 	deletes  map[string]bool
 	readOnly bool
 }
@@ -74,7 +80,7 @@ func (u *MemoryUnitOfWork) Do(ctx context.Context, fn func(context.Context) erro
 	if tx.Isolation != "" {
 		return errUnsupportedIsolation(tx.Isolation)
 	}
-	s := &staging{puts: map[string]any{}, deletes: map[string]bool{}, readOnly: tx.ReadOnly}
+	s := &staging{puts: map[string]any{}, expect: map[string]int64{}, deletes: map[string]bool{}, readOnly: tx.ReadOnly}
 	txCtx := context.WithValue(ctx, stagingKey{}, s)
 	txCtx, drain := Collect(txCtx)
 
@@ -92,6 +98,14 @@ func (u *MemoryUnitOfWork) Do(ctx context.Context, fn func(context.Context) erro
 	}()
 
 	if err := fn(txCtx); err != nil {
+		return err
+	}
+
+	// Check the versions BEFORE draining and before the sinks run, so a
+	// conflict costs nothing and — more importantly — publishes nothing. The
+	// authoritative check is the one below, under the same lock as the apply;
+	// this one only means the common case fails before the outbox is written.
+	if err := u.checkVersions(s); err != nil {
 		return err
 	}
 
@@ -116,10 +130,26 @@ func (u *MemoryUnitOfWork) Do(ctx context.Context, fn func(context.Context) erro
 
 	u.mu.Lock()
 	s.mu.Lock()
+	// The authoritative version check. It shares ONE acquisition of u.mu with
+	// the apply below, which is what makes "exactly one of N concurrent
+	// writers wins" true: a check that released the lock before writing would
+	// let two transactions both pass it and both commit.
+	if err := versionConflict(u.entities, s); err != nil {
+		s.mu.Unlock()
+		u.mu.Unlock()
+		return err
+	}
 	// Commit copies, so the handler's aggregate and committed state part
 	// ways at commit: a later mutation of the handler's object cannot
 	// rewrite what was committed.
 	for k, v := range s.puts {
+		// Advance the caller's aggregate BEFORE copying, so the stored copy
+		// and the object the handler still holds agree — a handler that saves
+		// the same aggregate twice in one request must not conflict with
+		// itself.
+		if ver, ok := v.(domain.Versioned); ok {
+			ver.SetVersion(s.expect[k] + 1)
+		}
 		u.entities[k] = copyAggregate(v)
 	}
 	for k := range s.deletes {
@@ -129,6 +159,50 @@ func (u *MemoryUnitOfWork) Do(ctx context.Context, fn func(context.Context) erro
 	u.mu.Unlock()
 	committed = true
 	return nil
+}
+
+// checkVersions takes the locks itself for the early, publish-nothing check.
+func (u *MemoryUnitOfWork) checkVersions(s *staging) error {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return versionConflict(u.entities, s)
+}
+
+// versionConflict reports whether any staged write is working from a version
+// the store has moved past. Callers hold both locks.
+//
+// The two cases are the two ways a writer can be stale: the row changed under
+// it, or the row it expected to update is gone — a delete it did not see.
+func versionConflict(entities map[string]any, s *staging) error {
+	for k := range s.puts {
+		expected, versioned := s.expect[k]
+		if !versioned {
+			continue
+		}
+		stored, exists := entities[k]
+		switch {
+		case !exists && expected != 0:
+			return errStaleWrite(k, expected, -1)
+		case exists && expected == 0:
+			// An insert onto an existing row. Two requests both minted the
+			// same identity, or one is replaying a create.
+			return errStaleWrite(k, 0, currentVersion(stored))
+		case exists:
+			if got := currentVersion(stored); got != expected {
+				return errStaleWrite(k, expected, got)
+			}
+		}
+	}
+	return nil
+}
+
+func currentVersion(v any) int64 {
+	if ver, ok := v.(domain.Versioned); ok {
+		return ver.Version()
+	}
+	return 0
 }
 
 // MemoryRepository is the in-process Repository for one aggregate type. Its
@@ -300,12 +374,22 @@ func (r *MemoryRepository[T, K]) Save(ctx context.Context, root T) error {
 	Track(ctx, root)
 
 	k := r.key(root.ID())
+	ver, versioned := any(root).(domain.Versioned)
 	if s, ok := ctx.Value(stagingKey{}).(*staging); ok {
 		if s.readOnly {
 			return errReadOnlyWrite("Save")
 		}
 		s.mu.Lock()
 		s.puts[k] = root
+		if versioned {
+			// Record the expected version only on the FIRST save of this key
+			// in this transaction. A handler that saves twice checks against
+			// the version it read, not against the one its own first save
+			// would have implied.
+			if _, seen := s.expect[k]; !seen {
+				s.expect[k] = ver.Version()
+			}
+		}
 		delete(s.deletes, k)
 		s.mu.Unlock()
 		return nil
@@ -316,6 +400,21 @@ func (r *MemoryRepository[T, K]) Save(ctx context.Context, root T) error {
 	// committed state.
 	r.uow.mu.Lock()
 	defer r.uow.mu.Unlock()
+	if versioned {
+		expected := ver.Version()
+		stored, exists := r.uow.entities[k]
+		switch {
+		case !exists && expected != 0:
+			return errStaleWrite(k, expected, -1)
+		case exists && expected == 0:
+			return errStaleWrite(k, 0, currentVersion(stored))
+		case exists:
+			if got := currentVersion(stored); got != expected {
+				return errStaleWrite(k, expected, got)
+			}
+		}
+		ver.SetVersion(expected + 1)
+	}
 	r.uow.entities[k] = copyAggregate(root)
 	return nil
 }
@@ -345,12 +444,31 @@ func (r *MemoryRepository[T, K]) Delete(ctx context.Context, id K) error {
 // errUnsupportedIsolation refuses a level this driver cannot provide.
 //
 // It refuses rather than downgrades because the downgrade would be a lie
-// with money attached: the in-process driver detects no write conflict at
-// all, so accepting Serializable would tell a caller their two concurrent
-// writers are ordered when both of them win.
+// with money attached. The driver detects a conflict only where an aggregate
+// opted in by embedding domain.VersionedRoot; an isolation level is a promise
+// about EVERY read and write in the transaction, including the unversioned
+// ones and the reads, and this driver cannot make it.
 func errUnsupportedIsolation(level Level) error {
 	return errors.Invalid("isolation",
-		fmt.Errorf("the in-process driver cannot honour %s: it stages writes behind a mutex and detects no write conflict, so accepting the level would be a silent downgrade. Use a real driver, or drop the option", level))
+		fmt.Errorf("the in-process driver cannot honour %s: it stages writes behind a mutex, and the only write conflict it detects is a version mismatch on an aggregate that embeds domain.VersionedRoot. Accepting the level would be a silent downgrade — use a real driver, or drop the option", level))
+}
+
+// errStaleWrite reports a lost update that did NOT happen. current is the
+// version the store holds, or -1 when the row is gone.
+//
+// It carries CodeConflict, which §3.3 promises and which nothing could
+// produce before: Save had no expected-version seam at all, so a field test
+// paying one invoice four times concurrently got four 201s and published four
+// events. The message names both versions because "conflict" alone leaves the
+// caller unable to tell a stale read from a vanished row.
+func errStaleWrite(key string, expected, current int64) error {
+	if current < 0 {
+		return errors.Conflict("%s was loaded at version %d, but it no longer exists — it was deleted after this request read it", key, expected)
+	}
+	if expected == 0 {
+		return errors.Conflict("%s already exists at version %d, and this write expected to create it", key, current)
+	}
+	return errors.Conflict("%s was loaded at version %d and is now at version %d — another writer committed first, so this update was refused rather than silently overwriting theirs", key, expected, current)
 }
 
 // errReadOnlyWrite refuses a write in a transaction the caller declared

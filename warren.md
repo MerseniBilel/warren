@@ -859,6 +859,21 @@ func NewAggregateRoot[T ID](id T) AggregateRoot[T]  // identity set at construct
 func (a *AggregateRoot[T]) Raise(e Event)
 func (a *AggregateRoot[T]) PullEvents() []Event   // drained by UnitOfWork
 
+// Optimistic concurrency, OPT-IN. Embed VersionedRoot instead of
+// AggregateRoot and Repository.Save becomes conditional on the version the
+// aggregate was loaded at: a stale write is CodeConflict and changes nothing.
+type Versioned interface {
+    Version() int64        // 0 = never persisted, so the write is an insert
+    SetVersion(v int64)    // drivers only: at reconstitution, and after a write
+}
+
+type VersionedRoot[T ID] struct {
+    AggregateRoot[T]
+    version int64
+}
+func NewVersionedRoot[T ID](id T) VersionedRoot[T]                        // version 0
+func ReconstituteVersionedRoot[T ID](id T, version int64) VersionedRoot[T] // the load path
+
 type Event interface {
     EventName() string          // "user.registered"
     OccurredAt() time.Time

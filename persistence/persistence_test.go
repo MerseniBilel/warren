@@ -40,6 +40,21 @@ func newOrder(id orderID, total int) *order {
 
 var _ domain.Aggregate = (*order)(nil)
 
+// payment is the versioned fixture: the same aggregate opted into optimistic
+// concurrency by embedding VersionedRoot instead of AggregateRoot.
+type payment struct {
+	domain.VersionedRoot[orderID]
+	Total int
+}
+
+func newPayment(id orderID, total int) *payment {
+	p := &payment{VersionedRoot: domain.NewVersionedRoot(id), Total: total}
+	p.Raise(placed{ID: id, At: time.Unix(1, 0)})
+	return p
+}
+
+var _ domain.Versioned = (*payment)(nil)
+
 func TestTrackAndCollect(t *testing.T) {
 	t.Parallel()
 
@@ -122,6 +137,14 @@ func TestMemoryDriverContract(t *testing.T) {
 		uow := persistence.NewMemoryUnitOfWork()
 		return uow, persistence.NewMemoryRepository[*order, orderID](uow)
 	}, func(id orderID) *order { return newOrder(id, 1) }, orderID("first"), orderID("second"))
+}
+
+func TestMemoryDriverVersionedContract(t *testing.T) {
+	t.Parallel()
+	persistence.RunVersionedContract(t, func(*testing.T) (persistence.UnitOfWork, persistence.Repository[*payment, orderID]) {
+		uow := persistence.NewMemoryUnitOfWork()
+		return uow, persistence.NewMemoryRepository[*payment, orderID](uow)
+	}, func(id orderID) *payment { return newPayment(id, 1) }, orderID("first"))
 }
 
 func TestMemoryUnitOfWorkCommitAndRollback(t *testing.T) {

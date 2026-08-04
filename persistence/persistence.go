@@ -32,6 +32,13 @@ type Repository[T domain.Root[K], K domain.ID] interface {
 	// The Track call is part of this contract, not an implementation detail:
 	// a driver whose Save does not Track loses the aggregate's events, and
 	// the contract suite asserts it.
+	//
+	// If root implements domain.Versioned, the write is CONDITIONAL on the
+	// version the aggregate was loaded at. A write whose version the store has
+	// moved past returns CodeConflict and changes nothing — it is the only
+	// thing standing between two concurrent requests and a lost update, and
+	// RunVersionedContract certifies it. An aggregate that does not implement
+	// domain.Versioned is written unconditionally, as before.
 	Save(ctx context.Context, root T) error
 
 	// Delete removes the aggregate, or returns CodeNotFound. Deleting what

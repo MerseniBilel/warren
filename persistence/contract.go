@@ -2,6 +2,7 @@ package persistence
 
 import (
 	"context"
+	"sync"
 	"testing"
 
 	"github.com/MerseniBilel/warren/domain"
@@ -157,6 +158,167 @@ func RunContract[T domain.Root[K], K domain.ID](t *testing.T, newDriver NewDrive
 		drained = agg.PullEvents()
 		if len(drained) != 0 {
 			t.Errorf("%d events were still pending after commit — Save did not Track, so they never reached the outbox", len(drained))
+		}
+	})
+}
+
+// RunVersionedContract certifies a driver's optimistic concurrency, and is
+// run IN ADDITION to RunContract by drivers whose aggregates embed
+// domain.VersionedRoot. It is separate because the version is opt-in: a
+// driver that stores unversioned aggregates is not failing anything by not
+// implementing it.
+//
+// The suite exists because the framework shipped without it. warren.md §3.3
+// promised CodeConflict, Repository.Save had no expected-version seam, and a
+// field test paying one invoice four times concurrently got four 201s and
+// four published events. Every subtest here is that defect in miniature.
+//
+// newAggregate must return an aggregate implementing domain.Versioned at
+// version 0.
+func RunVersionedContract[T domain.Root[K], K domain.ID](t *testing.T, newDriver NewDriver[T, K], newAggregate func(K) T, ids ...K) {
+	t.Helper()
+	if len(ids) < 1 {
+		t.Fatal("persistence.RunVersionedContract needs at least one identity")
+	}
+	id := ids[0]
+	if _, ok := any(newAggregate(id)).(domain.Versioned); !ok {
+		t.Fatal("persistence.RunVersionedContract was given an aggregate that does not implement domain.Versioned — embed domain.VersionedRoot")
+	}
+
+	save := func(uow UnitOfWork, repo Repository[T, K], agg T) error {
+		return uow.Do(context.Background(), func(ctx context.Context) error {
+			return repo.Save(ctx, agg)
+		})
+	}
+
+	t.Run("a first save starts the aggregate at version 1", func(t *testing.T) {
+		uow, repo := newDriver(t)
+		agg := newAggregate(id)
+		if err := save(uow, repo, agg); err != nil {
+			t.Fatalf("Do: %v", err)
+		}
+		// The driver must ADVANCE the caller's aggregate. Leaving it at 0
+		// makes the next save in the same request look like an insert.
+		if got := any(agg).(domain.Versioned).Version(); got != 1 {
+			t.Errorf("version = %d after the first save, want 1 — the driver did not advance the aggregate it just wrote", got)
+		}
+	})
+
+	t.Run("a loaded aggregate carries its stored version", func(t *testing.T) {
+		uow, repo := newDriver(t)
+		if err := save(uow, repo, newAggregate(id)); err != nil {
+			t.Fatalf("Do: %v", err)
+		}
+		got, err := repo.FindByID(context.Background(), id)
+		if err != nil {
+			t.Fatalf("FindByID: %v", err)
+		}
+		if v := any(got).(domain.Versioned).Version(); v != 1 {
+			t.Errorf("loaded version = %d, want 1 — reconstituting at 0 turns every update into an insert", v)
+		}
+	})
+
+	t.Run("a stale write is CONFLICT, not a silent overwrite", func(t *testing.T) {
+		uow, repo := newDriver(t)
+		if err := save(uow, repo, newAggregate(id)); err != nil {
+			t.Fatalf("Do: %v", err)
+		}
+		// Two readers load the same version — the shape of two concurrent
+		// requests paying one invoice.
+		one, err := repo.FindByID(context.Background(), id)
+		if err != nil {
+			t.Fatalf("FindByID: %v", err)
+		}
+		two, err := repo.FindByID(context.Background(), id)
+		if err != nil {
+			t.Fatalf("FindByID: %v", err)
+		}
+		if err := save(uow, repo, one); err != nil {
+			t.Fatalf("the first writer must win: %v", err)
+		}
+		err = save(uow, repo, two)
+		if !errors.Is(err, errors.CodeConflict) {
+			t.Errorf("the second writer got %v, want CodeConflict — a blind upsert here is the lost update the version exists to prevent", err)
+		}
+	})
+
+	t.Run("the winner's write survives the conflict", func(t *testing.T) {
+		uow, repo := newDriver(t)
+		if err := save(uow, repo, newAggregate(id)); err != nil {
+			t.Fatalf("Do: %v", err)
+		}
+		one, _ := repo.FindByID(context.Background(), id)
+		two, _ := repo.FindByID(context.Background(), id)
+		if err := save(uow, repo, one); err != nil {
+			t.Fatalf("Do: %v", err)
+		}
+		_ = save(uow, repo, two)
+		got, err := repo.FindByID(context.Background(), id)
+		if err != nil {
+			t.Fatalf("FindByID: %v", err)
+		}
+		// A conflict that still wrote is worse than no check at all: the
+		// caller is told the write failed while the data says otherwise.
+		if v := any(got).(domain.Versioned).Version(); v != 2 {
+			t.Errorf("stored version = %d after one win and one conflict, want 2 — the rejected write left a trace", v)
+		}
+	})
+
+	t.Run("sequential saves of one aggregate keep working", func(t *testing.T) {
+		uow, repo := newDriver(t)
+		agg := newAggregate(id)
+		for i := range 3 {
+			if err := save(uow, repo, agg); err != nil {
+				t.Fatalf("save %d of the same aggregate failed: %v — the driver reads the version but never advances it", i+1, err)
+			}
+		}
+		if v := any(agg).(domain.Versioned).Version(); v != 3 {
+			t.Errorf("version = %d after three saves, want 3", v)
+		}
+	})
+
+	t.Run("concurrent writers produce exactly one winner", func(t *testing.T) {
+		uow, repo := newDriver(t)
+		if err := save(uow, repo, newAggregate(id)); err != nil {
+			t.Fatalf("Do: %v", err)
+		}
+		const writers = 8
+		loaded := make([]T, writers)
+		for i := range loaded {
+			got, err := repo.FindByID(context.Background(), id)
+			if err != nil {
+				t.Fatalf("FindByID: %v", err)
+			}
+			loaded[i] = got
+		}
+		var wg sync.WaitGroup
+		errs := make([]error, writers)
+		start := make(chan struct{})
+		for i := range writers {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				<-start
+				errs[i] = save(uow, repo, loaded[i])
+			}()
+		}
+		close(start)
+		wg.Wait()
+
+		won := 0
+		for i, err := range errs {
+			switch {
+			case err == nil:
+				won++
+			case errors.Is(err, errors.CodeConflict):
+			default:
+				t.Errorf("writer %d = %v, want nil or CodeConflict", i, err)
+			}
+		}
+		// This is the field-test defect exactly: 8 writers all loaded version
+		// 1, so 7 of them are working from state that no longer exists.
+		if won != 1 {
+			t.Errorf("%d of %d concurrent writers succeeded, want exactly 1 — the rest silently overwrote each other", won, writers)
 		}
 	})
 }
