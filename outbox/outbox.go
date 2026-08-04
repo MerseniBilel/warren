@@ -151,11 +151,24 @@ func Sink(store Store, enc Encoder) func(context.Context, []domain.Event) error 
 		if len(events) == 0 {
 			return nil
 		}
+		// Capture the correlation ID HERE, not at publish time. Sink runs
+		// inside the request, at commit; the relay publishes minutes later
+		// from a background context that carries no correlation ID, so a
+		// publisher decorator alone would stamp nothing on the outbox path —
+		// which is the path every Warren service actually emits events on.
+		// broker.Correlating then leaves these headers alone.
+		id := log.CorrelationID(ctx)
 		recs := make([]Record, 0, len(events))
 		for _, e := range events {
 			rec, err := enc.Encode(e)
 			if err != nil {
 				return err
+			}
+			if id != "" && rec.Message.Headers[broker.CorrelationHeader] == "" {
+				if rec.Message.Headers == nil {
+					rec.Message.Headers = make(map[string]string, 1)
+				}
+				rec.Message.Headers[broker.CorrelationHeader] = id
 			}
 			recs = append(recs, rec)
 		}

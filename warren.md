@@ -1079,7 +1079,29 @@ type Subscriber interface {
 }
 
 type MessageHandler func(context.Context, Message) error
+
+// The correlation ID crosses the broker. CorrelationHeader is its wire form;
+// Correlating stamps it on the way out, and Pipeline seeds it on the way in.
+const CorrelationHeader = "correlation-id"
+func Correlating(next Publisher) Publisher   // nil-safe; never overwrites
 ```
+
+**The correlation ID survives the hop.** A request that publishes an event and
+a consumer that handles it are one causal chain, and it used to break at the
+broker: nothing in `broker/` or `outbox/` carried the ID, so the consumer's log
+lines belonged to no request at all. Two halves close it:
+
+- **Publishing** — `broker.Correlating` wraps the `Publisher` at boot and
+  copies `log.CorrelationID(ctx)` into `Headers`. It never overwrites and never
+  stamps an empty value.
+- **The outbox** — `outbox.Sink` stamps the ID at **Append**, inside the
+  request. It has to: the relay publishes minutes later from a background
+  context with no correlation ID, so a publish-time decorator alone would stamp
+  nothing on the path every service actually emits events over.
+- **Consuming** — `Pipeline` seeds `log.WithCorrelationID` from the header,
+  outside `TraceExtract`, so the retry's logging and the dead-letter's carry it
+  too. A message with no header seeds nothing: inventing an ID would tie
+  unrelated work together.
 
 **Driver-agnostic middleware** — written once, applies to Kafka, Rabbit, NATS, and memory identically:
 

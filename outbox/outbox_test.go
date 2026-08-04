@@ -13,6 +13,7 @@ import (
 	"github.com/MerseniBilel/warren/broker"
 	"github.com/MerseniBilel/warren/domain"
 	werrors "github.com/MerseniBilel/warren/errors"
+	"github.com/MerseniBilel/warren/log"
 	"github.com/MerseniBilel/warren/outbox"
 )
 
@@ -448,6 +449,49 @@ func TestSinkBridgesPersistenceToTheOutbox(t *testing.T) {
 	}
 	if recs, _ := store.Pending(context.Background(), 10); len(recs) != 2 {
 		t.Error("an empty drain appended something")
+	}
+}
+
+// TestSinkStampsTheCorrelationID — the outbox is the ONE place the ID must be
+// captured rather than read at publish time. Sink runs inside the request, at
+// commit; the relay publishes minutes later from a background context that
+// has no correlation ID at all. A publisher decorator alone would stamp
+// nothing on this path, and the trail would still end at the broker for every
+// event a Warren service actually emits.
+func TestSinkStampsTheCorrelationID(t *testing.T) {
+	t.Parallel()
+
+	store := outbox.NewMemoryStore()
+	sink := outbox.Sink(store, outbox.JSONEncoder())
+	ctx := log.WithCorrelationID(context.Background(), "corr-1")
+
+	if err := sink(ctx, []domain.Event{placed{Order: "o-1", Total: 100, At: time.Unix(1, 0)}}); err != nil {
+		t.Fatalf("Sink: %v", err)
+	}
+	recs, _ := store.Pending(context.Background(), 10)
+	if len(recs) != 1 {
+		t.Fatalf("appended %d records, want 1", len(recs))
+	}
+	if got := recs[0].Message.Headers[broker.CorrelationHeader]; got != "corr-1" {
+		t.Errorf("header %q = %q, want %q — the relay publishes long after the request is gone", broker.CorrelationHeader, got, "corr-1")
+	}
+}
+
+// TestSinkWithoutACorrelationIDStampsNothing — events raised by a consumer or
+// a job may have no correlation ID, and a blank header reads as one that is
+// genuinely blank.
+func TestSinkWithoutACorrelationIDStampsNothing(t *testing.T) {
+	t.Parallel()
+
+	store := outbox.NewMemoryStore()
+	sink := outbox.Sink(store, outbox.JSONEncoder())
+
+	if err := sink(context.Background(), []domain.Event{placed{Order: "o-1", Total: 100, At: time.Unix(1, 0)}}); err != nil {
+		t.Fatalf("Sink: %v", err)
+	}
+	recs, _ := store.Pending(context.Background(), 10)
+	if _, ok := recs[0].Message.Headers[broker.CorrelationHeader]; ok {
+		t.Error("an empty correlation ID was stamped as a header")
 	}
 }
 

@@ -135,6 +135,10 @@ func TestRingPosition(t *testing.T) {
 		"github.com/MerseniBilel/warren/app":    true,
 		"github.com/MerseniBilel/warren/errors": true,
 		"github.com/MerseniBilel/warren/inbox":  true,
+		// log is KERNEL (§1.1), and dependencies point downward: a CONTRACTS
+		// package may see it, exactly as it sees errors. Correlating and
+		// correlate need it to move the correlation ID across the broker.
+		"github.com/MerseniBilel/warren/log": true,
 	}
 	entries, err := os.ReadDir(".")
 	if err != nil {

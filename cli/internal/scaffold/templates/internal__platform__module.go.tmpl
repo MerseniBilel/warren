@@ -137,7 +137,14 @@ func newRelay(
 }
 
 // The ports the feature modules actually inject.
-func publisher(p brokerPorts) broker.Publisher   { return p.pub }
+//
+// The publisher is Correlating: a direct publish then carries the correlation
+// ID of the request that made it, so the consumer's log lines belong to the
+// same causal chain instead of to no request at all. Events that go through
+// the outbox are already stamped at commit by outbox.Sink — the relay
+// publishes long after the request is gone — and Correlating leaves a header
+// that is already there alone.
+func publisher(p brokerPorts) broker.Publisher   { return broker.Correlating(p.pub) }
 func subscriber(p brokerPorts) broker.Subscriber { return p.sub }
 func unitOfWork(u *persistence.MemoryUnitOfWork) persistence.UnitOfWork { return u }
 

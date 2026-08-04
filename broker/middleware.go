@@ -174,6 +174,10 @@ func Pipeline(subscription, topic string, h MessageHandler, store inbox.Store, d
 		inner = Deduplicate(subscription, store, cfg.dedupeTTL)(inner)
 	}
 	inner = TraceExtract()(inner)
+	// Outside TraceExtract, so that everything downstream — the retry's
+	// logging, the dead-letter's, the handler's own — writes under the
+	// correlation ID of the request that published the message.
+	inner = correlate()(inner)
 	drainMw, wait := Drain()
 	inner = drainMw(inner)
 	inner = Recover()(inner)

@@ -93,7 +93,13 @@ func Broker(opts ...Option) warren.Module {
 			func(lc lifecycle.Lifecycle, reg health.Registry) (*client, error) {
 				return newClient(cfg, lc, reg)
 			},
-			func(c *client) broker.Publisher { return c },
+			// Correlating, so a direct publish carries the correlation ID of
+			// the request that made it and the consumer's own log lines
+			// belong to the same causal chain. The outbox path is already
+			// stamped at Append — outbox.Sink runs inside the request, and
+			// the relay publishes long after it is gone — and Correlating
+			// never overwrites a header that is already there.
+			func(c *client) broker.Publisher { return broker.Correlating(c) },
 			func(c *client) broker.Subscriber { return c },
 		),
 		warren.Exports[broker.Publisher](),
