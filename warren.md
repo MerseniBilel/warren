@@ -206,7 +206,7 @@ warren/cli/                             MODULE  cobra                   (build-t
 
 DEFERRED to v0.2 — each spec records why
 warren/openapi/                         MODULE  —                       first for v0.2
-warren/auth/                            MODULE  golang-jwt + go-oidc    identity type is a core decision
+warren/auth/                            MODULE  golang-jwt + go-oidc    verification only; app.Identity ships in v0.1
 warren/transport/grpc/                  MODULE  google.golang.org/grpc  needs `warren g proto`
 warren/jobs/                            MODULE  robfig/cron             amends the boot/shutdown orders
 warren/resilience/                      MODULE  gobreaker + x/time/rate narrowed: breaker + limiter only
@@ -715,6 +715,10 @@ that swallows it would restore the drop in the configuration the scaffold
 ships, since `platform` hands the pipeline a `Correlating` publisher and never
 the raw broker.
 
+Both auth rows became reachable from shipped code in v0.1: `app.RequireAuthenticated`
+and `app.RequireScope` are the first policies in the repository that can produce
+them, so 401 and 403 are now exercised rather than merely mapped.
+
 **Why the two auth codes dead-letter rather than retry or ack.** The message
 won't get a better token by waiting — retrying an expired credential just burns
 the backoff budget and delays the inevitable. And acking means "handled, delete
@@ -1000,7 +1004,53 @@ func WithTelemetry(ctx context.Context, t Telemetry) context.Context
 func TelemetryFromContext(ctx context.Context) Telemetry
 func WithHandlerName(ctx context.Context, name string) context.Context
 func HandlerName(ctx context.Context) string
+
+// Identity — the caller, as core can express it (v0.1). The edge ring
+// produces it; policies and handlers consume it.
+type Identity struct {
+    Subject string         // the principal
+    Issuer  string         // who vouched for it, or ""
+    Scopes  []string       // the OAuth2 "scope" claim, already split
+    Claims  map[string]any // everything else. May be nil. Read-only once seeded.
+}
+func (id Identity) HasScope(scope string) bool
+func (id Identity) LogValue() slog.Value   // redacts Claims — slog never dumps a token
+
+func WithIdentity(ctx context.Context, id Identity) context.Context
+func IdentityFromContext(ctx context.Context) (Identity, bool)
+
+func RequireAuthenticated() AuthorizationPolicy
+func RequireScope(scopes ...string) AuthorizationPolicy
+func Claim[T any](id Identity, name string) (T, bool)
 ```
+
+**Identity is a struct and not an interface, and the accessor returns an
+ok-bool.** Both are the same decision: absence must not be able to look like
+presence. A two-result accessor makes `app.IdentityFromContext(ctx).Subject` a
+COMPILE ERROR rather than a row owned by `""`; `WithIdentity` refuses an
+`Identity` whose `Subject` is empty, exactly as `WithTelemetry` refuses a nil
+`Telemetry`, so the presence bit and the subject can never disagree; and a
+struct cannot be a non-nil interface holding a nil pointer. Identity is DATA,
+like `RequestInfo` — `Telemetry` and `AuthorizationPolicy` are BEHAVIOUR, and
+that is where interfaces belong. The asymmetry with `log.CorrelationID(ctx)
+string` is deliberate: an absent correlation ID is cosmetic, an absent
+identity is a security decision.
+
+Reading identity costs **0 allocations**, present or absent; carrying it costs
+**2** (112 B, measured go1.26.3/darwin-arm64) and is charged only to a request
+that actually carries a credential. **Warren installs no identity
+middleware** — that is what keeps `transport/http`'s committed budget at 17.
+
+`Claims` is why there is no `Identity[T]`: a generic identity would give every
+instantiation its own context key, so a guard seeding one `T` and a handler
+reading another would silently see no identity at all. `Claim[T]` is a generic
+free function over the map instead — type-safe, no generic methods, no key
+ambiguity. `Identity` holds a slice and a map and so is **not comparable**,
+which is what keeps a later field addition source-compatible.
+
+`RequireAuthenticated` and `RequireScope` are the first policies in the
+repository able to produce `UNAUTHENTICATED` and `PERMISSION_DENIED`. They
+never merge the two: no identity is 401, an identity lacking the scope is 403.
 
 `Traced()` and `Metered()` keep their no-argument signatures because the
 telemetry **rides the context**, the same pattern as §2.5's logger:
@@ -1857,11 +1907,43 @@ Trace context propagates into `Message.Headers`, so a span survives the trip thr
 
 ### 7.2 `warren/auth`
 
-**Wraps** `golang-jwt/jwt/v5`, `coreos/go-oidc`. Guards run as edge middleware; identity lands on the context; `app.Authorized(policy)` runs as core middleware so authorization applies to gRPC and consumers too.
+**Wraps** `golang-jwt/jwt/v5`, `coreos/go-oidc` · **Mode** Wrap · **DEFERRED to v0.2**
+
+**The identity type is not in this module — it shipped in v0.1 as
+`app.Identity` (§3.2).** A handler that reads the caller's identity may not
+import an adapter (invariant 6), and `app.AuthorizationPolicy` — the port that
+consumes identity — has been in core since 2026-08-01. A port whose only input
+is declared elsewhere is an incomplete port, so the type sits next to the
+policy.
+
+What ships in v0.1, with no dependency and no `auth` module:
 
 ```go
-r.HTTP().Get("/users/{id}", c.get, auth.RequireScope("users:read"))
+// the policy, per route — transport.Guard runs it BEFORE decode
+transport.Get(r, "/users/{id}", c.get, transport.Guard(app.RequireScope("users:read")))
+
+// the identity, in the handler
+id, ok := app.IdentityFromContext(ctx)
+
+// the seam, in your own edge middleware — fifteen lines of net/http
+http.Server(http.Middleware(myBearerTokenMiddleware))  // ends in app.WithIdentity
 ```
+
+What this module adds in v0.2 is the half that needs a token library: **edge
+guards that verify a credential and seed `app.WithIdentity`** — issuer,
+audience, algorithms, clock skew, JWKS refresh, OIDC discovery — plus the
+per-transport registration of those guards for gRPC and consumers. Adopting it
+changes no policy, no handler and no test written against v0.1.
+
+**A verification failure is `UNAUTHENTICATED`; a verified caller lacking a
+scope is `PERMISSION_DENIED`** (§2.6). The two are never merged — 401 and 403
+answer different questions, and a consumer dead-letters both.
+
+**Event routes carry no identity in v0.1.** There is no header convention and
+no propagating decorator yet, so `app.Authorized` composed into a consumer
+chain denies every message and dead-letters it without retry. That is
+fail-closed and correct; it is also not what you wanted. Guard your consumers
+in v0.2.
 
 ### 7.3 `warren/resilience`
 
@@ -2015,7 +2097,7 @@ All generators support `--dry-run` and `--force`.
 | Migrations | **none — Build** | Build | **`pressly/goose` REJECTED 2026-08-02.** Healthy (MIT, v3.27.3 2026-07-22, 11.3k stars) and only 5 modules as a library import — but once migrating at boot is banned it buys nothing an ordered applier and a version table do not, and against goal 2 a contributor debugging a migration reads 100 lines of ours instead of goose's dialect/locker/provider layering. `postgres.Schema` ships in goose's FILE format, so a project already running goose, atlas or dbmate applies it with one line |
 | Redis | `redis/go-redis/v9` | Wrap | cache + lock |
 | Telemetry | OpenTelemetry Go | Wrap | **Audited 2026-08-02**: v1.44.0 (2026-05-27), Apache-2.0, 6 500 stars, pushed 2026-08-02, not archived. **24 third-party modules in the build graph**, including grpc, protobuf and genproto — an order of magnitude above anything else here (core 1, transport/http 0, postgres 6), which is why it is opt-in in its own module and `scripts/invariants.sh` refuses `go.opentelemetry.io` in any other go.mod. OTLP over gRPC only: the HTTP exporter reaches grpc through its own config package and is not lighter. Wiring only — no OTel type in any Warren signature |
-| Auth | `golang-jwt/jwt/v5`, `coreos/go-oidc` | Wrap | |
+| Auth | `golang-jwt/jwt/v5`, `coreos/go-oidc` | Wrap | **v0.2, audits outstanding.** The identity type is NOT here: `app.Identity` ships in v0.1 core, stdlib only, zero third-party (§3.2) |
 | Resilience | `sony/gobreaker`, `cenkalti/backoff/v4` | Wrap | one `Policy` interface |
 | Cron | `robfig/cron/v3` | Wrap | lifecycle-aware |
 | Testing | none — stdlib + core | Build | `testify` and `testcontainers-go` were both budgeted and neither adopted: assertions are `if got != want`, and Docker fixtures wait for `warren/testing/containers`, its own module. |

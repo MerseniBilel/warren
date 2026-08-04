@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | **DEFERRED to v0.2 (decided 2026-08-02)** — see **Why it is deferred** below. Nothing in shipped code depends on it. |
+| **Status** | **DEFERRED to v0.2 (decided 2026-08-02).** **Amended 2026-08-05:** open questions 1, 2 and 3 are RESOLVED by the v0.1 identity ruling — the identity type is `app.Identity`, the option type is the existing `transport.RouteOption` via `transport.Guard`, and `policy` is the existing `app.AuthorizationPolicy`, of which `app.RequireScope` is the core-resident proof. This module's remaining scope is **verification only**. Open questions 4, 5, 7 and 8 remain, and they are what keeps it deferred. |
 | **Source** | [warren.md §7.2](../warren.md) |
 | **Module** | own module (`github.com/MerseniBilel/warren/auth`) |
 | **Mode** | Wrap (warren.md §9) |
@@ -16,16 +16,23 @@ is a real port, `transport.Guard(policy)` is a real `RouteOption` carried on
 every route, and `app.Authorized` composes it. A user writes a twenty-line
 policy today and it works over HTTP and consumers alike.
 
-What is missing is smaller than a module and bigger than a decision: **there is
-no `Identity` type anywhere in core** — grep returns zero hits — so every
-service invents its own context key. Where that type lives is a manifest
-amendment, not an implementation detail, and an adapter cannot declare it
-because handlers must not import an adapter. warren.md §7.2 is one paragraph
-and one line of code; five of eight open questions are structural.
+**The identity decision WAS the blocker, and it was taken in v0.1.**
+`app.Identity` and its context seam ship in core (warren.md §3.2, and
+`app/SPEC.md`), so users write policies, handlers and tests today that do not
+change when this module lands. That was the right order: the seam is
+expressible without a token library, and the verifier is not expressible
+without the seam.
 
-Dependencies are not the blocker: `golang-jwt/jwt/v5` has none and
-`coreos/go-oidc` about three. **The identity decision is.** It is v0.2's first
-item precisely because core gets more expensive to change after v0.1 tags.
+What remains is the half that needs the libraries, and it is genuinely not
+ready: the audits AGENT.md requires for `golang-jwt/jwt/v5` and
+`coreos/go-oidc` have not been run — no observation date, archived check,
+release date, licence or transitive footprint is recorded for either — and
+four structural questions are open (OQ4 verification configuration, OQ5 what
+`go-oidc` is actually for, OQ7 consumer identity propagation, OQ8 who
+registers the guard for gRPC and consumers).
+
+Promoting this spec to APPROVED would approve a dependency decision on the
+strength of nothing. It stays deferred.
 
 ## Problem
 

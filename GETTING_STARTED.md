@@ -484,7 +484,8 @@ correct behaviour but worth knowing.
 | You want | Use |
 |---|---|
 | Edge middleware (CORS, real IP) | `whttp.Middleware(...)` — the stdlib `func(http.Handler) http.Handler` shape, so `chi/v5/middleware` works unmodified |
-| Authorization on one route | `transport.Guard(policy)` — runs **before** decode, so a denied caller's malformed body is a 403, not a 400 |
+| Authorization on one route | `transport.Guard(app.RequireScope("users:read"))` — runs **before** decode, so a denied caller's malformed body is a 401/403, not a 400 |
+| Reading the caller | `id, ok := app.IdentityFromContext(ctx)` — seeded by your own edge middleware with `app.WithIdentity`. The ok-bool is the point: `IdentityFromContext(ctx).Subject` does not compile |
 | Cross-cutting logic on every protocol | `app.Chain` / core middleware — wraps the handler, so it applies to HTTP, gRPC and consumers identically |
 | File upload, download, SSE, WebSocket | `transport.Raw(r, transport.ProtocolHTTP, "POST /uploads", h)` from your controller — note the pattern carries the method here |
 | `pprof`, static assets, a webhook receiver | `whttp.Handle("GET /debug/pprof/", h)` — for handlers needing no module dependency |

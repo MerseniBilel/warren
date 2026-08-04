@@ -10,11 +10,13 @@
 > `net/http.ServeMux` and adds nothing to your `go.mod` but itself, and
 > **`persistence/postgres`**, whose unit of work commits aggregate state and
 > the outbox rows for that aggregate's events in one transaction. What is
-> **not** in v0.1: `openapi`, `auth`, `transport/grpc`, `jobs`, `resilience`,
+> **not** in v0.1: `openapi`, `auth` (the JWT/OIDC **verifier** — the identity
+> type and the policies ship in `app`), `transport/grpc`, `jobs`, `resilience`,
 > `broker/rabbitmq`, `broker/nats`, and the Mongo/Redis/MySQL drivers — each
 > deferred to v0.2 **with the reason recorded in its own spec**, not left as
-> an open question. The short version: `openapi` and `auth` are undecided
-> architecture, `jobs` would amend the boot and shutdown orders, `resilience`
+> an open question. The short version: `openapi` is undecided architecture,
+> `auth` needs two dependency audits that have not been run, `jobs` would
+> amend the boot and shutdown orders, `resilience`
 > is mostly shipped already, and a third broker driver answers nothing that
 > `broker/memory` plus the shared contract suite does not.
 > The repository is being rebuilt spec-first: every
@@ -198,7 +200,8 @@ contract now.
       binding *(implemented; the routes land with the transport adapters)*
 - [x] `warren/testing` (`warrentest`) — boot a module with fakes, Invoke by
       type, AssertPublished, Golden *(implemented; stdlib + core only)*
-- [ ] `auth`, `resilience`, `jobs`, `openapi`
+- [x] `app.Identity` — the identity seam, policies and the 401/403 split (v0.1)
+- [ ] `auth` (verifier), `resilience`, `jobs`, `openapi`
 
 ### Phase 6 — the CLI *(the discovery engine: scaffolding real apps is how
 ### weaknesses get found)*

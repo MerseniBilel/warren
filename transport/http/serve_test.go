@@ -3,6 +3,7 @@ package http_test
 import (
 	"bytes"
 	"context"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -722,4 +723,129 @@ func (s *syncBuffer) String() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.b.String()
+}
+
+// doWithHeaders is do with request headers — the identity seam is seeded
+// from one, so the tests need to set it.
+func doWithHeaders(t *testing.T, method, url, body string, headers map[string]string) (*http.Response, string) {
+	t.Helper()
+	var r io.Reader
+	if body != "" {
+		r = strings.NewReader(body)
+	}
+	req, err := http.NewRequest(method, url, r)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("do: %v", err)
+	}
+	defer func() { _ = res.Body.Close() }()
+	out, err := io.ReadAll(res.Body)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	return res, string(out)
+}
+
+// --- app.RequireScope over HTTP --------------------------------------------
+//
+// These are the first tests in the repository able to produce a 401 at all.
+// Until app.RequireAuthenticated and app.RequireScope shipped, nothing could
+// construct an UNAUTHENTICATED error, so statusFor's CodeUnauthenticated arm
+// and warren.md §2.6's 401 row were unreachable — mapped, documented, and
+// never exercised.
+
+type scopedController struct{ reached bool }
+
+func (c *scopedController) get(context.Context, getUser) (userDTO, error) {
+	c.reached = true
+	return userDTO{ID: "u-1"}, nil
+}
+
+func (c *scopedController) Register(r transport.Registrar) {
+	transport.Get(r, "/scoped/{id}", app.HandlerFunc[getUser, userDTO](c.get),
+		transport.Guard(app.RequireScope("users:read")))
+}
+
+// identityMiddleware is the fifteen lines a v0.1 user writes at the edge: it
+// reads a header and seeds app.WithIdentity. In v0.2 warren/auth does this
+// after verifying a signature; the seam does not change.
+func identityMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if sub := r.Header.Get("X-Subject"); sub != "" {
+			id := app.Identity{Subject: sub}
+			if scope := r.Header.Get("X-Scope"); scope != "" {
+				id.Scopes = []string{scope}
+			}
+			r = r.WithContext(app.WithIdentity(r.Context(), id))
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func TestRequireScopeMapsTo401And403(t *testing.T) {
+	t.Parallel()
+
+	c := &scopedController{}
+	m := warren.NewModule("scoped", warren.Controllers(func() *scopedController { return c }))
+	base := serve(t, []warren.Module{m}, whttp.Middleware(identityMiddleware))
+
+	t.Run("no identity is 401", func(t *testing.T) {
+		res, body := doWithHeaders(t, "GET", base+"/scoped/u-1", "", nil)
+		if res.StatusCode != 401 {
+			t.Errorf("status = %d, want 401 — the caller has not proved who they are\n%s", res.StatusCode, body)
+		}
+		if !strings.Contains(body, `"code":"UNAUTHENTICATED"`) {
+			t.Errorf("body does not carry the code:\n%s", body)
+		}
+	})
+
+	t.Run("wrong scope is 403", func(t *testing.T) {
+		res, body := doWithHeaders(t, "GET", base+"/scoped/u-1", "",
+			map[string]string{"X-Subject": "u-1", "X-Scope": "users:write"})
+		if res.StatusCode != 403 {
+			t.Errorf("status = %d, want 403 — a known caller who may not act\n%s", res.StatusCode, body)
+		}
+		if !strings.Contains(body, `"code":"PERMISSION_DENIED"`) {
+			t.Errorf("body does not carry the code:\n%s", body)
+		}
+	})
+
+	t.Run("the right scope is served", func(t *testing.T) {
+		res, body := doWithHeaders(t, "GET", base+"/scoped/u-1", "",
+			map[string]string{"X-Subject": "u-1", "X-Scope": "users:read"})
+		if res.StatusCode != 200 {
+			t.Errorf("status = %d, want 200\n%s", res.StatusCode, body)
+		}
+	})
+
+	if c.reached != true {
+		t.Error("the handler never ran, so the allowed case proved nothing")
+	}
+}
+
+// TestGuardDeniesBeforeDecodeWithARealPolicy — transport.Guard's doc comment
+// has always claimed an unauthenticated caller's malformed body is a 401 and
+// not a 400. Nothing could prove it until a policy existed that produces
+// UNAUTHENTICATED.
+func TestGuardDeniesBeforeDecodeWithARealPolicy(t *testing.T) {
+	t.Parallel()
+
+	c := &scopedController{}
+	m := warren.NewModule("scoped2", warren.Controllers(func() *scopedController { return c }))
+	base := serve(t, []warren.Module{m}, whttp.Middleware(identityMiddleware))
+
+	res, body := doWithHeaders(t, "GET", base+"/scoped/u-1", `{not json at all`, nil)
+	if res.StatusCode != 401 {
+		t.Errorf("a malformed body with no identity = %d, want 401 not 400 — the guard runs before decode\n%s",
+			res.StatusCode, body)
+	}
+	if c.reached {
+		t.Error("the handler ran behind a denying guard")
+	}
 }
