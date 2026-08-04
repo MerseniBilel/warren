@@ -4,6 +4,7 @@ import (
 	"context"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/MerseniBilel/warren/domain"
 	"github.com/MerseniBilel/warren/errors"
@@ -164,7 +165,7 @@ func RunContract[T domain.Root[K], K domain.ID](t *testing.T, newDriver NewDrive
 
 // versionedContractIDs is how many distinct identities RunVersionedContract
 // needs: one per subtest.
-const versionedContractIDs = 6
+const versionedContractIDs = 7
 
 // RunVersionedContract certifies a driver's optimistic concurrency, and is
 // run IN ADDITION to RunContract by drivers whose aggregates embed
@@ -267,6 +268,113 @@ func RunVersionedContract[T domain.Root[K], K domain.ID](t *testing.T, newDriver
 		err = save(uow, repo, two)
 		if !errors.Is(err, errors.CodeConflict) {
 			t.Errorf("the second writer got %v, want CodeConflict — a blind upsert here is the lost update the version exists to prevent", err)
+		}
+	})
+
+	// A COMMIT SINK MUST NOT FIRE FOR A TRANSACTION THAT THEN FAILS.
+	//
+	// This is the outbox half of the subtest below, and it is the assertion
+	// this suite was one line short of. "The winner's write survives the
+	// conflict" proves the loser left no trace in the STATE; it says nothing
+	// about what the loser announced. outbox.Store.Append's contract is the
+	// specification being checked here:
+	//
+	//	"Append writes records in the caller's ambient transaction. It opens
+	//	 no connection of its own: if the transaction rolls back, the records
+	//	 roll back with it — that atomicity is the entire pattern."
+	//
+	// A driver that runs its sinks before the write is certain publishes
+	// events for state that never existed. Downstream consumers then invoice
+	// for orders nobody placed, and no error is reported anywhere.
+	t.Run("a conflicted transaction announces nothing", func(t *testing.T) {
+		uow, repo := newDriver(t)
+		id := next()
+		if err := save(uow, repo, newAggregate(id)); err != nil {
+			t.Fatalf("Do: %v", err)
+		}
+
+		// OnCommit is on the concrete drivers, not on the port — the port
+		// deliberately does not expose sink registration to a handler, so a
+		// driver without it cannot have this defect.
+		sinker, ok := uow.(interface {
+			OnCommit(func(context.Context, []domain.Event) error)
+		})
+		if !ok {
+			t.Skip("driver exposes no OnCommit; there is no sink to fire early")
+		}
+
+		var mu sync.Mutex
+		announced, parked := 0, false
+		release := make(chan struct{})
+
+		// The sink is what makes the window observable. The FIRST commit's
+		// sink dawdles; a second, conflicting transaction runs meanwhile. A
+		// driver that writes its outbox rows before the write is certain
+		// will have announced TWO changes and committed one.
+		//
+		// The park is bounded rather than a rendezvous: a correct driver
+		// serializes the two commits, so a hard rendezvous would deadlock on
+		// the very implementation this is asserting.
+		sinker.OnCommit(func(context.Context, []domain.Event) error {
+			mu.Lock()
+			announced++
+			first := !parked
+			parked = true
+			mu.Unlock()
+			if first {
+				select {
+				case <-release:
+				case <-time.After(500 * time.Millisecond):
+				}
+			}
+			return nil
+		})
+
+		// Both writers load the SAME version: exactly one may win.
+		one, err := repo.FindByID(context.Background(), id)
+		if err != nil {
+			t.Fatalf("FindByID: %v", err)
+		}
+		two, err := repo.FindByID(context.Background(), id)
+		if err != nil {
+			t.Fatalf("FindByID: %v", err)
+		}
+
+		var wg sync.WaitGroup
+		wg.Add(1)
+		var firstErr error
+		go func() {
+			defer wg.Done()
+			firstErr = save(uow, repo, one)
+		}()
+		// Give the first transaction time to reach its sink and park there.
+		time.Sleep(50 * time.Millisecond)
+		secondErr := save(uow, repo, two)
+		close(release)
+		wg.Wait()
+
+		wins := 0
+		for _, e := range []error{firstErr, secondErr} {
+			if e == nil {
+				wins++
+			}
+		}
+		mu.Lock()
+		got := announced
+		mu.Unlock()
+
+		if wins != 1 {
+			t.Fatalf("%d of 2 writers from one version committed, want exactly 1 (first=%v second=%v)",
+				wins, firstErr, secondErr)
+		}
+		// outbox.Store.Append's contract, stated as a number: "if the
+		// transaction rolls back, the records roll back with it — that
+		// atomicity is the entire pattern". A conflicted transaction that
+		// still announced its change invoices for orders nobody placed, and
+		// reports no error anywhere.
+		if got != wins {
+			t.Errorf("commit sinks ran %d time(s) for %d committed transaction(s) — "+
+				"a conflicted transaction announced a change it did not make", got, wins)
 		}
 	})
 

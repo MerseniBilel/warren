@@ -145,7 +145,7 @@ func TestMemoryDriverVersionedContract(t *testing.T) {
 		uow := persistence.NewMemoryUnitOfWork()
 		return uow, persistence.NewMemoryRepository[*payment, orderID](uow)
 	}, func(id orderID) *payment { return newPayment(id, 1) },
-		orderID("v1"), orderID("v2"), orderID("v3"), orderID("v4"), orderID("v5"), orderID("v6"))
+		orderID("v1"), orderID("v2"), orderID("v3"), orderID("v4"), orderID("v5"), orderID("v6"), orderID("v7"))
 }
 
 func TestMemoryUnitOfWorkCommitAndRollback(t *testing.T) {

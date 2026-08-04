@@ -23,6 +23,11 @@ import (
 // aggregate untouched, and a retried handler re-reads clean state instead of
 // re-applying its change to the object it already mutated.
 type MemoryUnitOfWork struct {
+	// commitMu serializes the commit sequence — version check, sinks, apply
+	// — so the check cannot be invalidated between passing and being acted
+	// on. It is ordered BEFORE mu: never take it while holding mu.
+	commitMu sync.Mutex
+
 	mu       sync.Mutex
 	entities map[string]any // committed state, keyed by type+id
 	commit   []func(context.Context, []domain.Event) error
@@ -102,10 +107,42 @@ func (u *MemoryUnitOfWork) Do(ctx context.Context, fn func(context.Context) erro
 		return err
 	}
 
+	// COMMIT IS SERIALIZED FROM HERE.
+	//
+	// Everything below — the version check, the sinks, and the apply — is one
+	// critical section, and this lock is what makes the check below
+	// AUTHORITATIVE rather than advisory. Without it the sequence was:
+	//
+	//	check versions   → passes, another writer has not committed YET
+	//	run sinks        → THE OUTBOX ROW IS WRITTEN HERE
+	//	check again      → fails, because that writer committed in between
+	//	return CONFLICT  → the row stays. It announces a change that was
+	//	                   rolled back, and nothing ever removes it.
+	//
+	// outbox.Store.Append's contract is "if the transaction rolls back, the
+	// records roll back with it — that atomicity is the entire pattern", and
+	// a memory store cannot honour it after the fact: Append has already
+	// happened and the Store interface has no undo. So the fix is to make the
+	// window not exist. u.entities is mutated in exactly one place, the apply
+	// below, which is inside this same critical section — so while commitMu
+	// is held, no version this transaction checked can change.
+	//
+	// It costs commit concurrency, which for the in-process driver is the
+	// right trade: correctness of the outbox is the property the driver
+	// exists to demonstrate. Real drivers get this from the database — the
+	// postgres UnitOfWork writes its sinks INSIDE the pgx transaction, so its
+	// rollback takes the outbox rows with it, and it needs none of this.
+	//
+	// u.mu is NOT held across the sinks (see below), so a sink that reads or
+	// writes through this unit of work still works. A sink that opens a
+	// SEPARATE top-level transaction would deadlock here — but it would also
+	// be escaping the transaction whose commit it is part of, which is
+	// already the bug this pattern exists to prevent.
+	u.commitMu.Lock()
+	defer u.commitMu.Unlock()
+
 	// Check the versions BEFORE draining and before the sinks run, so a
-	// conflict costs nothing and — more importantly — publishes nothing. The
-	// authoritative check is the one below, under the same lock as the apply;
-	// this one only means the common case fails before the outbox is written.
+	// conflict costs nothing and — more importantly — publishes nothing.
 	if err := u.checkVersions(s); err != nil {
 		return err
 	}
@@ -131,10 +168,19 @@ func (u *MemoryUnitOfWork) Do(ctx context.Context, fn func(context.Context) erro
 
 	u.mu.Lock()
 	s.mu.Lock()
-	// The authoritative version check. It shares ONE acquisition of u.mu with
-	// the apply below, which is what makes "exactly one of N concurrent
-	// writers wins" true: a check that released the lock before writing would
-	// let two transactions both pass it and both commit.
+	// The version check that shares ONE acquisition of u.mu with the apply
+	// below, which is what makes "exactly one of N concurrent writers wins"
+	// true: a check that released the lock before writing would let two
+	// transactions both pass it and both commit.
+	//
+	// Under commitMu no OTHER transaction can invalidate the check above, so
+	// what is left for this one to catch is a write THIS transaction's own
+	// sinks staged — a sink that saves an aggregate joins the ambient
+	// transaction, and those puts were not in s.puts when the first check
+	// ran. That case does still roll back after a sink has run, and it is
+	// the one case where that is the correct answer: a sink writing a stale
+	// aggregate is a conflict, and committing it would be the lost update
+	// the check exists to prevent.
 	if err := versionConflict(u.entities, s); err != nil {
 		s.mu.Unlock()
 		u.mu.Unlock()
