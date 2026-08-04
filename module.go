@@ -26,10 +26,21 @@ import (
 // providers, controllers, consumers, exports, and its lifecycle hooks.
 // Constructing a Module registers nothing and performs no work.
 //
-// Because Imports carries Module values, an import cycle is unrepresentable:
-// closing one would be infinite recursion in the user's own constructors
-// before New is ever called. Cycles between providers are detected by
-// warren/di.
+// Because Imports carries Module VALUES rather than names, a cycle between
+// modules cannot reach the bootstrapper: closing one is recursion in the
+// user's own declarations, before New is ever called. Go rejects both shapes
+// it can take, at COMPILE time — verified, not assumed:
+//
+//	modules in different packages   → import cycle not allowed
+//	modules in one package          → initialization cycle for A
+//
+// So the failure is a build error naming both sides, which is a better
+// diagnostic than Warren could produce anyway. What Warren does NOT catch is
+// an arrangement that defeats both checks — an indirection through a
+// function variable, say — and that fails as recursion or a deadlock in
+// package init, with a Go stack and no mention of modules. Cycles between
+// PROVIDERS are a different thing entirely and are detected by warren/di,
+// which reports them as a Warren diagnostic naming the loop.
 type Module struct {
 	name        string
 	declared    string // file:line of the NewModule call

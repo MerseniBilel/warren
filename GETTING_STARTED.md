@@ -494,6 +494,41 @@ correct behaviour but worth knowing.
 
 ---
 
+## Where a message goes when it cannot be handled
+
+A consumer's error decides its own fate, by its `warren/errors` code —
+[§2.6](warren.md)'s table, and nothing in your handler chooses it:
+
+| Code | What happens |
+|---|---|
+| `NOT_FOUND`, `CONFLICT` | acked. The work is already done, or was never possible. |
+| `UNAVAILABLE` | retried with backoff, then nacked so the broker redelivers — **or dead-lettered, if the broker cannot redeliver**. See below. |
+| everything else | retried, then **dead-lettered**. |
+
+A dead letter is published to `<topic>.dlq` — override with
+`broker.WithDeadLetter("...")` — carrying four headers that say what
+happened: `warren-origin-topic`, `warren-error-code`, `warren-error`,
+`warren-attempts`. **It is also logged at ERROR**, deliberately: that line is
+the alert, and it is the one consumer event that should wake someone up.
+
+**A DLQ topic is an ordinary topic.** There is no special API — you consume it
+the way you consume anything else, which is how you inspect and replay:
+
+```go
+broker.Pipeline("notes.dlq_watch", "note.written.dlq", handle, store, pub,
+    broker.WithoutDedupe(),   // the inbox already saw these ids
+)
+```
+
+**On the in-process broker, `<topic>.dlq` has no subscriber unless you write
+one** — so the ERROR log is your only record. That is the honest limit of a
+broker with no durable log, and it is the reason `broker/memory` reports
+`Redelivers() false`: a nack there is a drop, so an `UNAVAILABLE` whose
+retries are spent is dead-lettered rather than silently lost. A durable
+broker keeps §2.6's row exactly as written.
+
+---
+
 ## When boot fails
 
 It will, and that is the design: **every error the framework can detect
