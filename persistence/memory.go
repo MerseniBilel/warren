@@ -293,6 +293,10 @@ func copyUnexported(dst, src reflect.Value) {
 // Save stages the aggregate and enlists it, so its events reach the outbox
 // when the transaction commits.
 func (r *MemoryRepository[T, K]) Save(ctx context.Context, root T) error {
+	var zero K
+	if root.ID() == zero {
+		return errAggregateHasNoID(r.kind)
+	}
 	Track(ctx, root)
 
 	k := r.key(root.ID())
@@ -354,4 +358,17 @@ func errUnsupportedIsolation(level Level) error {
 func errReadOnlyWrite(op string) error {
 	return errors.Invalid("read-only transaction",
 		fmt.Errorf("%s was called inside persistence.ReadOnly(): a read-only transaction that writes is not a downgrade, it is the opposite of what was asked for", op))
+}
+
+// errAggregateHasNoID refuses a write whose key would be the zero value.
+//
+// Dropping `AggregateRoot: domain.NewAggregateRoot(id)` from a constructor
+// is a plausible refactor mistake with no compile error, and the
+// consequences were entirely silent: the row was filed under the empty key,
+// the write reported success, the creation event was published, and every
+// later load of that aggregate returned NOT_FOUND for ever. A consumer
+// downstream learned about an entity nothing can load.
+func errAggregateHasNoID(kind string) error {
+	return errors.Invalid("aggregate id",
+		fmt.Errorf("a %s was saved with the zero identifier, so it would be filed under the empty key and could never be loaded again. Its constructor most likely omits AggregateRoot: domain.NewAggregateRoot(id)", kind))
 }

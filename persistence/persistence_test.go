@@ -501,3 +501,41 @@ func TestAReadOnlyTransactionStillReads(t *testing.T) {
 		t.Errorf("a read inside ReadOnly() was refused: %v", err)
 	}
 }
+
+// TestSavingAnAggregateWithNoIDIsRefused — removing
+// `AggregateRoot: domain.NewAggregateRoot(id)` from a constructor is a
+// plausible refactor mistake and there is no compile error. The write then
+// "succeeded", filed under the empty key, and the aggregate 404'd for ever:
+//
+//	POST /invoices      → 201 {"id":"x1","status":"draft"}
+//	POST /invoices/x1/issue → 404 "*domain.Invoice x1 not found"
+//	GET  /invoices/x1       → 404 "*domain.Invoice x1 not found"
+//
+// The event was published too, so a downstream consumer learned about an
+// invoice nothing can ever load.
+func TestSavingAnAggregateWithNoIDIsRefused(t *testing.T) {
+	t.Parallel()
+
+	uow := persistence.NewMemoryUnitOfWork()
+	repo := persistence.NewMemoryRepository[*order, orderID](uow)
+	ctx := context.Background()
+
+	// An aggregate whose embedded root was never initialised: its ID is the
+	// zero value, and nothing in the type system says so.
+	orphan := &order{Total: 1}
+
+	err := uow.Do(ctx, func(ctx context.Context) error {
+		return repo.Save(ctx, orphan)
+	})
+	if !werrors.Is(err, werrors.CodeInvalid) {
+		t.Fatalf("Save of an aggregate with no ID = %v, want INVALID", err)
+	}
+	if err != nil && !strings.Contains(err.Error(), "NewAggregateRoot") {
+		t.Errorf("the diagnostic does not name the omission that causes it:\n%v", err)
+	}
+
+	// Outside a transaction too — the immediate-write path is the same bug.
+	if err := repo.Save(ctx, orphan); !werrors.Is(err, werrors.CodeInvalid) {
+		t.Errorf("Save outside a transaction = %v, want INVALID", err)
+	}
+}

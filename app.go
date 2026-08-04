@@ -192,7 +192,10 @@ func (a *App) Start(ctx context.Context) error {
 					// cosmetic limit of the candidate text, not of visibility.
 					opts = append(opts, di.Exported())
 				}
-				if err := scope.Provide(ctor, opts...); err != nil {
+				// Wrapped so a nil return fails the boot rather than the
+				// first request that touches it. outputsOf ran above, on the
+				// ORIGINAL, so substitution matching is unaffected.
+				if err := scope.Provide(nilChecked(ctor, m.name), opts...); err != nil {
 					return err
 				}
 			}

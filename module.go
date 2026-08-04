@@ -253,3 +253,109 @@ func errDuplicateModule(name, first, second string) error {
 func errExportWithoutProvider(module, declared string, t reflect.Type) error {
 	return diagnostic(fmt.Sprintf("✗ export without provider\n\n    module %q (%s) exports %s, but none of its providers returns it.\n\n  Add the constructor to warren.Providers, remove the export, or — if a\n  provider returns a concrete type that implements it — declare that\n  constructor's return type as the exported interface.", module, declared, t))
 }
+
+// nilChecked wraps a constructor so a nil return is a BOOT failure rather
+// than a 500 on the first request that touches it.
+//
+// warren.md §1.3's headline rule is that every error the framework can
+// detect surfaces at boot, never on request 1 — and a provider returning a
+// nil interface booted clean, logged "http server listening", and panicked
+// inside the handler. It is detectable exactly here, where the value is
+// constructed.
+//
+// It wraps only what it must: a constructor with no nilable output is
+// returned untouched, and a variadic one is left alone rather than
+// reconstructed wrongly. The wrapper's own declaration site never reaches a
+// diagnostic, because the site is passed to dig explicitly as an option.
+func nilChecked(ctor any, module string) any {
+	t := reflect.TypeOf(ctor)
+	if t == nil || t.Kind() != reflect.Func || t.IsVariadic() {
+		return ctor
+	}
+
+	values, hadErr := valueOutputs(t)
+	if !anyNilable(values) {
+		return ctor
+	}
+
+	ins := make([]reflect.Type, 0, t.NumIn())
+	for i := range t.NumIn() {
+		ins = append(ins, t.In(i))
+	}
+	outs := append(append([]reflect.Type{}, values...), errType)
+
+	fn := reflect.ValueOf(ctor)
+	wrapper := reflect.MakeFunc(reflect.FuncOf(ins, outs, false), func(args []reflect.Value) []reflect.Value {
+		got := fn.Call(args)
+
+		// The constructor's own error wins: it knows more than this check.
+		if hadErr {
+			if e := got[len(got)-1]; !e.IsNil() {
+				return got
+			}
+			got = got[:len(got)-1]
+		}
+		for i, v := range got {
+			if isNil(v) {
+				out := make([]reflect.Value, len(outs))
+				for j := range values {
+					out[j] = reflect.Zero(values[j])
+				}
+				out[len(outs)-1] = reflect.ValueOf(errNilProvider(module, values[i]))
+				return out
+			}
+		}
+		return append(got, reflect.Zero(errType))
+	})
+	return wrapper.Interface()
+}
+
+// valueOutputs splits a constructor's outputs into its values and whether it
+// ended with an error.
+func valueOutputs(t reflect.Type) ([]reflect.Type, bool) {
+	var values []reflect.Type
+	hadErr := false
+	for i := range t.NumOut() {
+		o := t.Out(i)
+		if i == t.NumOut()-1 && o == errType {
+			hadErr = true
+			continue
+		}
+		values = append(values, o)
+	}
+	return values, hadErr
+}
+
+func anyNilable(ts []reflect.Type) bool {
+	for _, t := range ts {
+		switch t.Kind() {
+		case reflect.Interface, reflect.Pointer, reflect.Map, reflect.Slice, reflect.Func, reflect.Chan:
+			return true
+		}
+	}
+	return false
+}
+
+// isNil reports whether v is a nil of a nilable kind. It looks at the
+// RETURNED value only: a perfectly good value carrying a nil field is none
+// of boot's business.
+func isNil(v reflect.Value) bool {
+	switch v.Kind() {
+	case reflect.Interface, reflect.Pointer, reflect.Map, reflect.Slice, reflect.Func, reflect.Chan:
+		return v.IsNil()
+	default:
+		return false
+	}
+}
+
+func errNilProvider(module string, t reflect.Type) error {
+	return diagnostic(fmt.Sprintf(
+		"✗ provider returned nil\n\n"+
+			"    module %q\n"+
+			"      └─ a constructor for %s returned nil.\n\n"+
+			"  Nothing downstream can check that, so the first request reaching it\n"+
+			"  panics and becomes a 500 — long after the boot that could have said so.\n\n"+
+			"  Return a real value, or return an error explaining why you cannot:\n"+
+			"  a constructor may return (T, error) and the boot reports it by name.",
+		module, t))
+}

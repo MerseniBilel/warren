@@ -431,3 +431,54 @@ func (*deadController) Register(transport.Registrar) {}
 type parentController struct{ sub *deadController }
 
 func (p *parentController) Register(r transport.Registrar) { p.sub.Register(r) }
+
+// TestANilProviderFailsTheBoot — warren.md §1.3's headline rule is "every
+// error the framework can detect surfaces at boot, never on request 1". A
+// provider returning a nil interface booted clean, logged "http server
+// listening", and produced a 500 on the first request that used it:
+//
+//	{"error":{"code":"INTERNAL","message":"internal error",...}}
+//
+// It is detectable exactly where the value is constructed.
+func TestANilProviderFailsTheBoot(t *testing.T) {
+	t.Parallel()
+
+	m := warren.NewModule("catalog",
+		warren.Providers(func() pricing { return nil }),
+		warren.Controllers(func(p pricing) *pricedController { return &pricedController{p: p} }),
+	)
+	err := warren.New(m).Start(context.Background())
+	if err == nil {
+		t.Fatal("a provider returning nil booted — the first request that touches it is a 500")
+	}
+	for _, want := range []string{"provider returned nil", "pricing", "catalog"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("diagnostic does not mention %q:\n%s", want, err)
+		}
+	}
+}
+
+// TestANilPointerFieldIsNotMistakenForANilProvider — the check must look at
+// the RETURNED value, not inside it. A perfectly good value with a nil field
+// is none of boot's business.
+func TestANilPointerFieldIsNotMistakenForANilProvider(t *testing.T) {
+	t.Parallel()
+
+	m := warren.NewModule("catalog",
+		warren.Providers(func() pricing { return fixedPricing{next: nil} }),
+		warren.Controllers(func(p pricing) *pricedController { return &pricedController{p: p} }),
+	)
+	if err := warren.New(m).Start(context.Background()); err != nil {
+		t.Fatalf("a value carrying a nil field was refused:\n%v", err)
+	}
+}
+
+type pricing interface{ Price() int }
+
+type fixedPricing struct{ next *fixedPricing }
+
+func (fixedPricing) Price() int { return 1 }
+
+type pricedController struct{ p pricing }
+
+func (*pricedController) Register(transport.Registrar) {}
