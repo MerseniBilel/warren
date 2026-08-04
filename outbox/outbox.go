@@ -23,9 +23,9 @@ import (
 
 	"github.com/MerseniBilel/warren/app"
 	"github.com/MerseniBilel/warren/broker"
-	"github.com/MerseniBilel/warren/log"
 	"github.com/MerseniBilel/warren/domain"
 	"github.com/MerseniBilel/warren/errors"
+	"github.com/MerseniBilel/warren/log"
 )
 
 // Record is one outbox row: a broker.Message plus the topic it publishes to.

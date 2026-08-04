@@ -257,6 +257,7 @@ func Controllers(...any) ModuleOption
 func Consumers(...any) ModuleOption
 func Exports[T any]() ModuleOption
 func Eager[T any]() ModuleOption       // materialise at boot even if unconsumed
+func Optional[T any]() ModuleOption    // a nil T from a provider is MEANT, not a defect
 
 // boot-time substitution — the seam warren/testing is built on
 func Substitute[T any](v T) Substitution  // replace every provider of T
@@ -277,6 +278,17 @@ and calls it — the seam tests and pre-transport mains use to reach the
 components boot built, with module encapsulation intact. `Eager[T]()`
 materialises a provider nothing consumes: `config.Module` uses it so a bad
 config fails the boot even when no constructor injects the struct.
+
+A provider returning `nil` normally **fails the boot** — §1.3's rule is that
+every detectable error surfaces at boot, and a nil interface otherwise booted
+clean and became a 500 on the first request to touch it. `Optional[T]()`
+declares that a nil `T` is *meant*. It is per type, not per module: one
+declared absence does not disarm the check for anything else the module
+provides, and consumers of an optional binding handle the nil themselves.
+`warren/observability` is the case it exists for — a nil `app.Telemetry` is
+"no collector configured", and `app.WithTelemetry` drops a nil so the
+uninstrumented request path stays a pass-through rather than paying for a
+no-op value on every request.
 
 Two hooks patterns, deliberately different: `warren.OnStart`/`OnStop` take
 plain closures fixed at declaration time; anything created *at* boot — a

@@ -473,7 +473,84 @@ func TestANilPointerFieldIsNotMistakenForANilProvider(t *testing.T) {
 	}
 }
 
+// TestOptionalPermitsADeliberateNil — a capability that is legitimately
+// ABSENT is not the defect TestANilProviderFailsTheBoot describes.
+// warren/observability returns a nil app.Telemetry when no collector is
+// configured, and app.WithTelemetry drops a nil so the uninstrumented request
+// path stays a pass-through; forcing a no-op value instead would put that
+// value on every request context and cost real work per request.
+//
+// Optional is how a module DECLARES that, so the intent is written down
+// rather than inferred from a nil nobody meant.
+func TestOptionalPermitsADeliberateNil(t *testing.T) {
+	t.Parallel()
+
+	m := warren.NewModule("catalog",
+		warren.Providers(func() pricing { return nil }),
+		warren.Optional[pricing](),
+		warren.Providers(func(p pricing) *priceReport { return &priceReport{p: p} }),
+		warren.Eager[*priceReport](),
+	)
+	if err := warren.New(m).Start(context.Background()); err != nil {
+		t.Fatalf("a declared-optional nil was refused:\n%v", err)
+	}
+}
+
+// TestOptionalIsPerTypeNotPerModule — declaring one type optional must not
+// disarm the check for every other type the module provides. The defect the
+// guard exists for is a nil nobody meant; a blanket opt-out would reintroduce
+// it wholesale in any module that had one honest absence.
+func TestOptionalIsPerTypeNotPerModule(t *testing.T) {
+	t.Parallel()
+
+	m := warren.NewModule("catalog",
+		warren.Providers(
+			func() pricing { return nil },
+			func() shipping { return nil },
+		),
+		warren.Optional[pricing](),
+		warren.Providers(func(p pricing, s shipping) *priceReport { return &priceReport{p: p} }),
+		warren.Eager[*priceReport](),
+	)
+	err := warren.New(m).Start(context.Background())
+	if err == nil {
+		t.Fatal("shipping was not declared Optional, but its nil booted clean")
+	}
+	for _, want := range []string{"provider returned nil", "shipping", "catalog"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("diagnostic does not mention %q:\n%s", want, err)
+		}
+	}
+}
+
+// TestOptionalWithoutANilStillDelivers — Optional relaxes the check, it does
+// not change what the graph receives. A configured collector must arrive
+// exactly as it would without the declaration.
+func TestOptionalWithoutANilStillDelivers(t *testing.T) {
+	t.Parallel()
+
+	var got pricing
+	m := warren.NewModule("catalog",
+		warren.Providers(func() pricing { return fixedPricing{} }),
+		warren.Optional[pricing](),
+		warren.Providers(func(p pricing) *priceReport { got = p; return &priceReport{p: p} }),
+		warren.Eager[*priceReport](),
+	)
+	if err := warren.New(m).Start(context.Background()); err != nil {
+		t.Fatalf("boot failed:\n%v", err)
+	}
+	if got == nil {
+		t.Fatal("Optional swallowed a real value")
+	}
+}
+
 type pricing interface{ Price() int }
+
+type shipping interface{ Ship() int }
+
+// priceReport is a plain eager value, not a controller — Optional is about
+// what a provider returns, not about how the value is registered.
+type priceReport struct{ p pricing }
 
 type fixedPricing struct{ next *fixedPricing }
 

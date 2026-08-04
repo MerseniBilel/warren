@@ -140,6 +140,12 @@ func Module(opts ...Option) warren.Module {
 			return newTelemetry(cfg, lc)
 		}),
 		warren.Exports[app.Telemetry](),
+		// A nil app.Telemetry is this module's "no collector configured", and
+		// it must reach the graph as a nil: app.WithTelemetry drops it, so the
+		// uninstrumented request path stays a pass-through. A no-op value
+		// instead would ride every request context and cost real work per
+		// request. Without this, boot's nil-provider guard refuses it.
+		warren.Optional[app.Telemetry](),
 		// Eager so a misconfiguration fails the boot even when nothing
 		// injects it — the bootstrapper resolves it before step 5 anyway, but
 		// an app with no routes at all would otherwise never build it.
@@ -239,9 +245,10 @@ func WithoutHandlerInstrumentation() Option {
 }
 
 // newTelemetry builds the providers and registers the flush. It returns a nil
-// app.Telemetry when no endpoint is configured — app.WithTelemetry's
-// typed-nil probe and boot's own nil check both treat that as "uninstrumented",
-// so the request path is unchanged.
+// app.Telemetry when no endpoint is configured — app.WithTelemetry's typed-nil
+// probe treats that as "uninstrumented", so the request path is unchanged.
+// Module declares warren.Optional[app.Telemetry] so boot's nil-provider guard
+// permits it; that declaration is what makes the nil legible as intent.
 func newTelemetry(cfg config, lc lifecycle.Lifecycle) (app.Telemetry, error) {
 	if cfg.sampleRatio < 0 || cfg.sampleRatio > 1 {
 		return nil, errBadSampleRatio(cfg.sampleRatio)

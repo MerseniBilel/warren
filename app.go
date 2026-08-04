@@ -195,7 +195,7 @@ func (a *App) Start(ctx context.Context) error {
 				// Wrapped so a nil return fails the boot rather than the
 				// first request that touches it. outputsOf ran above, on the
 				// ORIGINAL, so substitution matching is unaffected.
-				if err := scope.Provide(nilChecked(ctor, m.name), opts...); err != nil {
+				if err := scope.Provide(nilChecked(ctor, m.name, m.optional), opts...); err != nil {
 					return err
 				}
 			}

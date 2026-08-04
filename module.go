@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"reflect"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -39,6 +40,7 @@ type Module struct {
 	controllers []any
 	consumers   []any
 	exports     []reflect.Type
+	optional    []reflect.Type
 	onStart     []func(context.Context) error
 	onStop      []func(context.Context) error
 }
@@ -120,6 +122,26 @@ func Eager[T any]() ModuleOption {
 func Exports[T any]() ModuleOption {
 	t := reflect.TypeFor[T]()
 	return func(m *Module) { m.exports = append(m.exports, t) }
+}
+
+// Optional declares that a nil T from one of this module's providers is
+// MEANT, and must not fail the boot the way an undeclared nil does.
+//
+// A provider returning nil is normally a boot error: warren.md §1.3's rule is
+// that every detectable error surfaces at boot, and a nil interface otherwise
+// booted clean and became a 500 on the first request to touch it. But some
+// capabilities are legitimately absent. warren/observability returns a nil
+// app.Telemetry when no collector is configured, and app.WithTelemetry drops
+// a nil so the uninstrumented request path stays a pass-through — a no-op
+// value instead would ride every request context and cost real work per
+// request, which is the property the nil exists to preserve.
+//
+// Optional is per TYPE, not per module: declaring one absence does not disarm
+// the check for anything else the module provides. Consumers of an optional
+// binding must handle the nil — that is the contract they are opting into.
+func Optional[T any]() ModuleOption {
+	t := reflect.TypeFor[T]()
+	return func(m *Module) { m.optional = append(m.optional, t) }
 }
 
 // OnStart registers a startup hook for this module, run in dependency order
@@ -264,17 +286,18 @@ func errExportWithoutProvider(module, declared string, t reflect.Type) error {
 // constructed.
 //
 // It wraps only what it must: a constructor with no nilable output is
-// returned untouched, and a variadic one is left alone rather than
-// reconstructed wrongly. The wrapper's own declaration site never reaches a
+// returned untouched, a variadic one is left alone rather than reconstructed
+// wrongly, and one whose every nilable output is declared Optional needs no
+// wrapper at all. The wrapper's own declaration site never reaches a
 // diagnostic, because the site is passed to dig explicitly as an option.
-func nilChecked(ctor any, module string) any {
+func nilChecked(ctor any, module string, optional []reflect.Type) any {
 	t := reflect.TypeOf(ctor)
 	if t == nil || t.Kind() != reflect.Func || t.IsVariadic() {
 		return ctor
 	}
 
 	values, hadErr := valueOutputs(t)
-	if !anyNilable(values) {
+	if !anyChecked(values, optional) {
 		return ctor
 	}
 
@@ -296,7 +319,7 @@ func nilChecked(ctor any, module string) any {
 			got = got[:len(got)-1]
 		}
 		for i, v := range got {
-			if isNil(v) {
+			if isNil(v) && !slices.Contains(optional, values[i]) {
 				out := make([]reflect.Value, len(outs))
 				for j := range values {
 					out[j] = reflect.Zero(values[j])
@@ -326,11 +349,17 @@ func valueOutputs(t reflect.Type) ([]reflect.Type, bool) {
 	return values, hadErr
 }
 
-func anyNilable(ts []reflect.Type) bool {
+// anyChecked reports whether any output is both nilable and NOT declared
+// Optional — that is, whether wrapping this constructor could ever reject
+// anything. A constructor whose only nilable output is a declared absence is
+// returned unwrapped, so Optional costs nothing at boot and nothing after it.
+func anyChecked(ts []reflect.Type, optional []reflect.Type) bool {
 	for _, t := range ts {
 		switch t.Kind() {
 		case reflect.Interface, reflect.Pointer, reflect.Map, reflect.Slice, reflect.Func, reflect.Chan:
-			return true
+			if !slices.Contains(optional, t) {
+				return true
+			}
 		}
 	}
 	return false
