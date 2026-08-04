@@ -267,8 +267,16 @@ func (r *Report) String() string {
 			fmt.Fprintf(&b, "✗ cross-module import\n\n    %s:%d\n      package %s\n        imports %s\n\n%s\n\n",
 				v.File, v.Line, v.Package, v.Imported, explain(v))
 		case "transport":
-			fmt.Fprintf(&b, "✗ handler imports a transport package\n\n    %s:%d\n      package %s          (layer: %s)\n        imports %s\n\n%s\n\n",
-				v.File, v.Line, v.Package, v.Layer, v.Imported, explain(v))
+			// One rule, two layers, and they are not the same mistake. A use
+			// case in application/ has routing that belongs in controller.go;
+			// a type in domain/ has none, and being told to move it is how a
+			// reader decides the linter has not understood their code.
+			headline := "handler imports a transport package"
+			if v.Layer == "domain" {
+				headline = "the domain imports a transport package"
+			}
+			fmt.Fprintf(&b, "✗ %s\n\n    %s:%d\n      package %s          (layer: %s)\n        imports %s\n\n%s\n\n",
+				headline, v.File, v.Line, v.Package, v.Layer, v.Imported, explain(v))
 		}
 	}
 	fmt.Fprintf(&b, "%d violation(s) in %d packages.\n", len(r.Violations), r.Packages)
@@ -276,6 +284,20 @@ func (r *Report) String() string {
 }
 
 func explain(v Violation) string {
+	if v.Rule == "transport" && v.Layer == "domain" {
+		// The domain's version of the rule is the stronger one, and only one
+		// of the two fixes below can apply to it.
+		return "  The domain layer is the one part of the application that depends on\n" +
+			"  nothing — not the other layers, and not a protocol. A domain type\n" +
+			"  holding an HTTP client is reachable only where that client can be\n" +
+			"  built, which means it cannot be tested, reused by a second\n" +
+			"  transport, or moved into another service.\n\n" +
+			"  Fix:\n" +
+			"    • Declare a PORT in the domain — an interface saying what the\n" +
+			"      domain needs, in the domain's own words — and put the client\n" +
+			"      that speaks HTTP in infrastructure, where net/http is allowed.\n" +
+			"      The domain then depends on the interface it owns."
+	}
 	if v.Rule == "transport" {
 		return "  A handler knows nothing about how it is reached. It takes a request\n" +
 			"  type and returns a response type; whether that arrived over HTTP,\n" +

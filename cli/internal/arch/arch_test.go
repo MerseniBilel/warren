@@ -342,3 +342,70 @@ func TestInfrastructureMayUseNetHTTP(t *testing.T) {
 		t.Errorf("an infrastructure adapter was refused for using net/http:\n%s", report)
 	}
 }
+
+// TestDomainImportingTransportIsNotAHandlerProblem — a domain type holding an
+// *http.Client is a transport violation, but it is the DOMAIN's, and the
+// report described the wrong one:
+//
+//	✗ handler imports a transport package
+//	  ...
+//	  Fix one of:
+//	    • Move the routing to the feature's controller.go, ...
+//
+// There is no routing to move. A domain type is not a handler, it has no
+// Register call, and the first fix offered is meaningless in the file it is
+// printed about — which is how a reader concludes the linter does not
+// understand their code and switches it off.
+func TestDomainImportingTransportIsNotAHandlerProblem(t *testing.T) {
+	t.Parallel()
+
+	dir := fixture(t, map[string]string{
+		"internal/modules/user/domain/user.go": "package domain\n\nimport \"net/http\"\n\ntype User struct{ C *http.Client }\n",
+	})
+	report, err := arch.Check(dir, arch.Options{Rules: arch.Layers})
+	if err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	if len(report.Violations) != 1 {
+		t.Fatalf("got %d violations, want 1:\n%s", len(report.Violations), report)
+	}
+	if got := report.Violations[0].Layer; got != "domain" {
+		t.Errorf("layer = %q, want %q", got, "domain")
+	}
+
+	out := report.String()
+	if strings.Contains(out, "handler imports a transport package") {
+		t.Errorf("a domain violation is reported as a handler's:\n%s", out)
+	}
+	if strings.Contains(out, "Move the routing") {
+		t.Errorf("the report offers a fix that does not apply to a domain type:\n%s", out)
+	}
+	for _, want := range []string{"domain", "net/http", "user.go", "infrastructure"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the report does not mention %q:\n%s", want, out)
+		}
+	}
+}
+
+// TestApplicationImportingTransportStillReadsAsAHandler — the corrected
+// wording must not cost the case it was written for. A use case handler DOES
+// live in the application layer, and moving the routing to controller.go is
+// exactly right there.
+func TestApplicationImportingTransportStillReadsAsAHandler(t *testing.T) {
+	t.Parallel()
+
+	dir := fixture(t, map[string]string{
+		"internal/modules/user/application/register.go": "package application\n\nimport _ \"net/http\"\n",
+	})
+	report, err := arch.Check(dir, arch.Options{Rules: arch.Layers})
+	if err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	out := report.String()
+	if !strings.Contains(out, "handler imports a transport package") {
+		t.Errorf("an application-layer violation lost its handler wording:\n%s", out)
+	}
+	if !strings.Contains(out, "Move the routing") {
+		t.Errorf("an application-layer violation lost the fix that applies to it:\n%s", out)
+	}
+}
