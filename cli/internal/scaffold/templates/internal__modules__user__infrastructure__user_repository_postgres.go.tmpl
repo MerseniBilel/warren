@@ -1,0 +1,106 @@
+// Package infrastructure holds the user feature's driver-facing code.
+package infrastructure
+
+import (
+	"context"
+	"errors"
+	"time"
+
+	werrors "github.com/MerseniBilel/warren/errors"
+	"github.com/MerseniBilel/warren/persistence"
+	"github.com/MerseniBilel/warren/persistence/postgres"
+
+	"{{.Module}}/internal/modules/user/domain"
+)
+
+// UserRepository is plain SQL over Postgres. There is no ORM, by design:
+// this file is yours to edit, and the only framework machinery in it is
+// postgres.DB.
+//
+// Three rules hold it together, and none is enforced by the compiler:
+//
+//  1. RequireTx first on every write. Outside a unit of work the row would
+//     autocommit while the aggregate's events stayed pending on an object
+//     about to go out of scope, and they would be lost silently.
+//  2. r.db(ctx) for the handle — never a stored pool. It returns the ambient
+//     transaction if one is in scope and the pool otherwise, so a read works
+//     outside a unit of work and a write does not.
+//  3. persistence.Track after a successful write. That is what enlists the
+//     aggregate so its events reach the outbox in the same commit.
+//
+// This aggregate is NOT versioned: uniqueness on email is what makes a
+// duplicate registration a CONFLICT, and there is no read-modify-write to
+// lose. `warren g entity` generates VERSIONED aggregates, and
+// `warren g repository --driver postgres` writes the optimistic-lock SQL for
+// them — a WHERE clause carrying the loaded version, and zero rows affected
+// meaning someone else committed first.
+type UserRepository struct{ db postgres.DB }
+
+// NewUserRepository returns the repository as its PORT, so the container
+// resolves it by the type the application layer asks for.
+func NewUserRepository(db postgres.DB) domain.UserRepository {
+	return &UserRepository{db: db}
+}
+
+const userColumns = `id, email, name, created_at`
+
+// FindByID returns the user, or an error carrying CodeNotFound.
+func (r *UserRepository) FindByID(ctx context.Context, id domain.UserID) (*domain.User, error) {
+	return r.one(ctx, `SELECT `+userColumns+` FROM users WHERE id = $1`, string(id), string(id))
+}
+
+// FindByEmail returns the user with this address.
+func (r *UserRepository) FindByEmail(ctx context.Context, email domain.Email) (*domain.User, error) {
+	return r.one(ctx, `SELECT `+userColumns+` FROM users WHERE email = $1`, string(email), string(email))
+}
+
+// one runs a single-row lookup. subject is what a NOT_FOUND names — the
+// value the caller asked by, never the Go type, which a client has no
+// business seeing.
+func (r *UserRepository) one(ctx context.Context, sql, arg, subject string) (*domain.User, error) {
+	var (
+		id, email, name string
+		createdAt       time.Time
+	)
+	// ReconstituteUser, never NewUser: the second raises UserRegistered, so
+	// loading a row through it would republish a months-old fact on every
+	// read.
+	if err := r.db(ctx).QueryRow(ctx, sql, arg).Scan(&id, &email, &name, &createdAt); err != nil {
+		if errors.Is(err, postgres.ErrNoRows) {
+			return nil, werrors.NotFound("user", subject)
+		}
+		return nil, err
+	}
+	return domain.ReconstituteUser(domain.UserID(id), domain.Email(email), name), nil
+}
+
+// Save inserts or updates the user.
+//
+// ON CONFLICT (email) DO NOTHING, then zero rows affected meaning CONFLICT,
+// is what turns the unique index into the domain's answer: two concurrent
+// registrations of one address cannot both succeed, and the loser is told
+// so rather than overwriting the winner.
+func (r *UserRepository) Save(ctx context.Context, u *domain.User) error {
+	if err := postgres.RequireTx(ctx, "user.Save"); err != nil {
+		return err
+	}
+
+	n, err := r.db(ctx).Exec(ctx, `
+		INSERT INTO users (id, email, name, created_at)
+		VALUES ($1, $2, $3, now())
+		ON CONFLICT (id) DO UPDATE SET email = EXCLUDED.email, name = EXCLUDED.name
+		WHERE users.email = EXCLUDED.email OR NOT EXISTS (
+			SELECT 1 FROM users other WHERE other.email = EXCLUDED.email
+		)`,
+		string(u.ID()), string(u.Email), u.Name)
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return werrors.Conflict("user %s is already registered", u.Email)
+	}
+
+	// Enlist the aggregate so its events reach the outbox in THIS commit.
+	persistence.Track(ctx, u)
+	return nil
+}

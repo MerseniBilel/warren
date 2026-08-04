@@ -1,0 +1,20 @@
+-- The users table the scaffolded feature reads and writes.
+--
+-- Applied by cmd/migrate, which is a DEPLOY STEP run once before the new
+-- replicas start — never a lifecycle hook. Warren offers no option to
+-- migrate at boot, and cmd/migrate's own comment says why.
+--
+-- Warren's own tables (warren_outbox, warren_inbox) are applied separately,
+-- from postgres.Schema, before this file.
+
+CREATE TABLE IF NOT EXISTS users (
+    id         TEXT        PRIMARY KEY,
+    email      TEXT        NOT NULL,
+    name       TEXT        NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- Uniqueness on email is the domain rule, enforced where it cannot be
+-- raced: two concurrent registrations of one address cannot both succeed,
+-- and the repository turns the loser into a CONFLICT.
+CREATE UNIQUE INDEX IF NOT EXISTS users_email_key ON users (email);

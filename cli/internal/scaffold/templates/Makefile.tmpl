@@ -1,7 +1,18 @@
+{{- if eq .DB "postgres" }}
+.PHONY: run migrate test fmt vet
+
+# A deploy step, run once before the new replicas start — never at boot.
+migrate:
+	go run ./cmd/migrate
+
+run:
+	{{.EnvPrefix}}_NAME={{.Name}} go run ./cmd/{{.Name}}
+{{- else }}
 .PHONY: run test fmt vet
 
 run:
 	{{.EnvPrefix}}_NAME={{.Name}} go run ./cmd/{{.Name}}
+{{- end }}
 
 test:
 	go test -race ./...

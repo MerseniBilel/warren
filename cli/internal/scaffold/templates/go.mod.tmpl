@@ -5,4 +5,7 @@ go {{.GoVersion}}
 require (
 	github.com/MerseniBilel/warren {{.Version}}
 	github.com/MerseniBilel/warren/transport/http {{.Version}}
+{{- if eq .DB "postgres" }}
+	github.com/MerseniBilel/warren/persistence/postgres {{.Version}}
+{{- end }}
 )

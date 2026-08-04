@@ -156,7 +156,7 @@ func newCmd() *cobra.Command {
 	cmd.Flags().StringVar(&opts.Dir, "dir", "", "where to write it (default: the app's name)")
 	cmd.Flags().StringVar(&opts.FrameworkPath, "framework", "", "path to a local Warren checkout, written as replace directives (needed until v0.1.0 is tagged)")
 	cmd.Flags().StringVar(&opts.Transport, "transport", "", "transport adapter (none released yet)")
-	cmd.Flags().StringVar(&opts.DB, "db", "memory", "persistence driver: memory")
+	cmd.Flags().StringVar(&opts.DB, "db", "memory", "persistence driver: memory or postgres")
 	cmd.Flags().StringVar(&opts.Broker, "broker", "memory", "broker driver: memory")
 	return cmd
 }

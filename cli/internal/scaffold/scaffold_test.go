@@ -295,3 +295,125 @@ func TestNoFrameworkPathWritesNoReplace(t *testing.T) {
 		t.Errorf("go.mod carries a replace nobody asked for:\n%s", mod)
 	}
 }
+
+// TestPostgresScaffoldIsWired — field test #4, section C4. `warren new` only
+// accepted --db memory, so reaching Postgres meant manual surgery on the
+// platform module, and `warren g repository --driver postgres` printed
+// instructions that, followed verbatim, produced a boot failure:
+//
+//	✗ ambiguous binding
+//	    persistence.UnitOfWork has 2 providers visible from scope "shipment"
+//
+// because the memory unit of work the scaffold had already wired was still
+// there. The instructions never said "and now delete newUnitOfWork,
+// unitOfWork, appUnitOfWork, newOutboxStore and three Exports".
+func TestPostgresScaffoldIsWired(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	if err := scaffold.New(scaffold.Options{
+		Dir: dir, Name: "app", ModulePath: "example.com/app", Version: "v0.1.0", DB: "postgres",
+	}); err != nil {
+		t.Fatalf("New --db postgres: %v", err)
+	}
+
+	platform := read(t, dir, "internal/platform/module.go")
+	for _, want := range []string{
+		"postgres.Module(",
+		"postgres.WithOutbox()",
+		"postgres.WithInbox()",
+	} {
+		if !strings.Contains(platform, want) {
+			t.Errorf("platform does not wire %q:\n%s", want, platform)
+		}
+	}
+	// The memory drivers must be GONE, not merely joined — two providers of
+	// persistence.UnitOfWork is the ambiguous-binding boot failure above.
+	// Comments are stripped first: the generated file NAMES them, in a note
+	// explaining why they are absent, and a substring check would read that
+	// as wiring.
+	code := stripComments(platform)
+	for _, gone := range []string{
+		"persistence.NewMemoryUnitOfWork",
+		"outbox.NewMemoryStore",
+		"inbox.NewMemoryStore",
+	} {
+		if strings.Contains(code, gone) {
+			t.Errorf("platform still wires the memory driver %q alongside postgres:\n%s", gone, platform)
+		}
+	}
+
+	// The deploy step, and the schema it applies.
+	for _, f := range []string{"cmd/migrate/main.go", "db/migrations/00001_users.sql"} {
+		if _, err := os.Stat(filepath.Join(dir, f)); err != nil {
+			t.Errorf("--db postgres did not write %s: %v", f, err)
+		}
+	}
+
+	mod := read(t, dir, "go.mod")
+	if !strings.Contains(mod, "github.com/MerseniBilel/warren/persistence/postgres") {
+		t.Errorf("go.mod does not require the postgres adapter:\n%s", mod)
+	}
+
+	// The repository must be real SQL, not the in-memory one.
+	repo := read(t, dir, "internal/modules/user/infrastructure/user_repository.go")
+	if !strings.Contains(repo, "postgres.DB") {
+		t.Errorf("the user repository is not the postgres one:\n%s", repo)
+	}
+	if strings.Contains(repo, "MemoryRepository") {
+		t.Errorf("the user repository is still in-memory under --db postgres:\n%s", repo)
+	}
+
+	// And the DSN has somewhere to come from.
+	cfg := read(t, dir, "internal/config/config.go")
+	if !strings.Contains(cfg, "DatabaseURL") {
+		t.Errorf("config has no database URL:\n%s", cfg)
+	}
+}
+
+// TestMemoryScaffoldIsUnchanged — the default must not grow a postgres
+// dependency, a migrate binary, or a migrations directory.
+func TestMemoryScaffoldIsUnchanged(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	if err := scaffold.New(scaffold.Options{
+		Dir: dir, Name: "app", ModulePath: "example.com/app", Version: "v0.1.0",
+	}); err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if strings.Contains(read(t, dir, "go.mod"), "persistence/postgres") {
+		t.Error("the memory scaffold requires the postgres adapter")
+	}
+	for _, f := range []string{"cmd/migrate/main.go", "db/migrations/00001_users.sql"} {
+		if _, err := os.Stat(filepath.Join(dir, f)); err == nil {
+			t.Errorf("the memory scaffold wrote %s", f)
+		}
+	}
+	if !strings.Contains(read(t, dir, "internal/platform/module.go"), "persistence.NewMemoryUnitOfWork") {
+		t.Error("the memory scaffold lost its unit of work")
+	}
+}
+
+// stripComments drops // lines so an assertion about WIRING is not answered
+// by prose that happens to name the thing.
+func stripComments(src string) string {
+	var b strings.Builder
+	for line := range strings.SplitSeq(src, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "//") {
+			continue
+		}
+		b.WriteString(line)
+		b.WriteString("\n")
+	}
+	return b.String()
+}
+
+func read(t *testing.T, dir, rel string) string {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(dir, rel))
+	if err != nil {
+		t.Fatalf("reading %s: %v", rel, err)
+	}
+	return string(b)
+}

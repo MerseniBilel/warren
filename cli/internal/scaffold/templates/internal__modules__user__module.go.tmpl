@@ -16,7 +16,15 @@ import (
 // Module declares the feature. Declared once — see platform.Module for why.
 var Module = sync.OnceValue(func() warren.Module {
 	return warren.NewModule("user",
+{{- if eq .DB "postgres" }}
+		// Postgres() too, because this feature's repository injects
+		// postgres.DB. Exports name what a module PROVIDES, so platform
+		// cannot re-export the adapter's ports on its behalf — a feature
+		// that needs the database says so.
+		warren.Imports(platform.Module(), platform.Postgres()),
+{{- else }}
 		warren.Imports(platform.Module()),
+{{- end }}
 		warren.Providers(
 			infrastructure.NewUserRepository,
 			application.NewRegisterUserHandler,

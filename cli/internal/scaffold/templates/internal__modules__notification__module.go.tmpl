@@ -20,7 +20,14 @@ import (
 // Module declares the feature. Declared once — see platform.Module.
 var Module = sync.OnceValue(func() warren.Module {
 	return warren.NewModule("notification",
+{{- if eq .DB "postgres" }}
+		// Postgres() too, because the consumer chain injects inbox.Store,
+		// which the adapter provides. Exports name what a module PROVIDES,
+		// so platform cannot re-export it on this module's behalf.
+		warren.Imports(platform.Module(), platform.Postgres()),
+{{- else }}
 		warren.Imports(platform.Module()),
+{{- end }}
 		warren.Providers(application.NewOnUserRegisteredHandler, newSubscription),
 		// Eager, not Consumers: this subscription wires its own pipeline and
 		// its own lifecycle hook rather than registering through

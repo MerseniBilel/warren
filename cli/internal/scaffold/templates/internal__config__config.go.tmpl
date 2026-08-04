@@ -12,6 +12,16 @@ type Config struct {
 
 	// Env is the deployment environment.
 	Env string `config:"env" default:"development"`
+{{- if eq .DB "postgres" }}
+
+	// DatabaseURL is here so the value has ONE documented name, and so
+	// `warren explain config` lists it. The pool itself does not read it
+	// from here: postgres.Module builds the pool's provider, so its DSN is
+	// needed while the module graph is being DECLARED — before this struct
+	// exists. internal/platform reads {{.EnvPrefix}}_DATABASE_URL directly,
+	// which is this same variable.
+	DatabaseURL string `config:"database_url" validate:"required"`
+{{- end }}
 
 	Outbox struct {
 		// PollInterval is the relay's safety net; the store signals it

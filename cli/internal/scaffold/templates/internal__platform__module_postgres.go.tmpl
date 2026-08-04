@@ -1,0 +1,168 @@
+// Package platform wires the infrastructure every feature module shares:
+// the broker, the unit of work, the outbox and its relay, and health.
+//
+// Swapping a driver for another is a change to this file and nothing else —
+// which is the point of the ports the rest of the app is written against.
+package platform
+
+import (
+	"context"
+	"log/slog"
+	"os"
+	"sync"
+
+	"github.com/MerseniBilel/warren"
+	"github.com/MerseniBilel/warren/app"
+	"github.com/MerseniBilel/warren/broker"
+	"github.com/MerseniBilel/warren/broker/memory"
+	wconfig "github.com/MerseniBilel/warren/config"
+	"github.com/MerseniBilel/warren/health"
+	"github.com/MerseniBilel/warren/lifecycle"
+	"github.com/MerseniBilel/warren/outbox"
+	"github.com/MerseniBilel/warren/persistence"
+	"github.com/MerseniBilel/warren/persistence/postgres"
+
+	appconfig "{{.Module}}/internal/config"
+)
+
+// ConfigModule loads the application's configuration. It is declared here,
+// beside the code that reads it, so every feature module reaches it through
+// one import of platform rather than each wiring it themselves.
+var ConfigModule = sync.OnceValue(func() warren.Module {
+	return wconfig.Module[appconfig.Config](wconfig.WithEnvPrefix("{{.EnvPrefix}}"))
+})
+
+// Postgres is the persistence adapter: the pool, the unit of work, the DB
+// resolver repositories inject, the outbox store the relay drains, and the
+// inbox store consumers deduplicate through. Declared once, like every
+// module.
+//
+// THE DSN IS READ FROM THE ENVIRONMENT HERE, not from appconfig.Config, and
+// that is deliberate rather than an oversight. postgres.Module builds the
+// pool's provider, so its options are needed while the module graph is being
+// DECLARED — before boot step 4, which is when the config module's value
+// exists. A connection string is bootstrap configuration: the thing you need
+// in order to build the container, not a thing you get out of it.
+//
+// It is the same variable cmd/migrate reads, so the app and its migrations
+// cannot disagree about which database they mean.
+var Postgres = sync.OnceValue(func() warren.Module {
+	return postgres.Module(
+		postgres.DSN(os.Getenv("{{.EnvPrefix}}_DATABASE_URL")),
+		// The outbox and inbox are OPTIONS on this module rather than
+		// modules of their own, because they need the pool and a sibling
+		// module cannot see another module's providers.
+		postgres.WithOutbox(),
+		postgres.WithInbox(),
+	)
+})
+
+// Module is declared once: modules are deduplicated by identity, so a plain
+// factory called by two importers would be two modules sharing a name — a
+// boot error. sync.OnceValue reads like a function and yields one identity.
+//
+// Note what is NOT here. There is no persistence.NewMemoryUnitOfWork, no
+// outbox.NewMemoryStore and no inbox.NewMemoryStore: the postgres module
+// exports all three ports, and providing a second implementation of any of
+// them is an ambiguous binding that fails the boot.
+var Module = sync.OnceValue(func() warren.Module {
+	return warren.NewModule("platform",
+		warren.Imports(ConfigModule(), Postgres()),
+		warren.Providers(
+			newBroker,
+			publisher,
+			subscriber,
+			appUnitOfWork,
+			newRelay,
+		),
+		// Exports name what this module PROVIDES. A module cannot re-export
+		// something it merely imports — Exports without a matching provider
+		// fails the boot — so persistence.UnitOfWork, postgres.DB and
+		// inbox.Store are NOT listed here even though platform imports them.
+		// A feature that needs one imports Postgres() itself, alongside this
+		// module; the user module below shows the shape.
+		warren.Exports[broker.Publisher](),
+		warren.Exports[broker.Subscriber](),
+		warren.Exports[app.UnitOfWork](),
+		// Nothing consumes the relay, so without Eager it would never be
+		// built — and the outbox would never drain.
+		warren.Eager[*outbox.Relay](),
+	)
+})
+
+// broker returns one in-process broker as both ports. Two constructors would
+// build two brokers, and the publisher's messages would never reach the
+// subscriber.
+type brokerPorts struct {
+	pub broker.Publisher
+	sub broker.Subscriber
+}
+
+func newBroker() brokerPorts {
+	b := memory.New()
+	return brokerPorts{pub: b, sub: b}
+}
+
+// newRelay drains the outbox to the broker. It registers its own lifecycle
+// hook and its own health check — the documented pattern for anything
+// created at boot, since warren.OnStart takes a closure fixed at
+// declaration time.
+func newRelay(
+	store outbox.Store,
+	pub broker.Publisher,
+	cfg appconfig.Config,
+	lc lifecycle.Lifecycle,
+	hr health.Registry,
+) (*outbox.Relay, error) {
+	// It takes the PORT, not platform's own broker value: a test that
+	// substitutes a recording publisher must see what the relay publishes.
+	relay := outbox.NewRelay(store, pub,
+		outbox.PollInterval(cfg.Outbox.PollInterval),
+		outbox.BatchSize(cfg.Outbox.BatchSize),
+	)
+
+	// The loop's context must not be OnStart's: that one is the boot
+	// context, cancelled as soon as boot finishes under Start/Stop.
+	ctx, cancel := context.WithCancel(context.Background())
+	lc.Append(lifecycle.Hook{
+		Name: "outbox relay",
+		OnStart: func(context.Context) error {
+			go func() {
+				// Reported, not discarded. The relay writes a detailed
+				// diagnostic when a record is PARKED — it names the record,
+				// the topic, the key and the fact that later records for
+				// that key are now out of order — and dropping Run's return
+				// here would be the second place that report went nowhere.
+				if err := relay.Run(ctx); err != nil {
+					slog.Default().Error("outbox relay stopped", "error", err)
+				}
+			}()
+			return nil
+		},
+		OnStop: func(c context.Context) error {
+			cancel()
+			return relay.Flush(c)
+		},
+	})
+
+	if err := hr.Register(health.NewCheck("outbox", func(context.Context) error { return nil })); err != nil {
+		return nil, err
+	}
+	return relay, nil
+}
+
+// The ports the feature modules actually inject.
+//
+// The publisher is Correlating: a direct publish then carries the correlation
+// ID of the request that made it, so the consumer's log lines belong to the
+// same causal chain instead of to no request at all. Events that go through
+// the outbox are already stamped at commit by outbox.Sink — the relay
+// publishes long after the request is gone — and Correlating leaves a header
+// that is already there alone.
+func publisher(p brokerPorts) broker.Publisher   { return broker.Correlating(p.pub) }
+func subscriber(p brokerPorts) broker.Subscriber { return p.sub }
+
+// appUnitOfWork is the seam app.Transactional takes: the two interfaces
+// differ only in Do's transaction options, which app deliberately does not
+// know about.
+func appUnitOfWork(u persistence.UnitOfWork) app.UnitOfWork { return persistence.ForApp(u) }

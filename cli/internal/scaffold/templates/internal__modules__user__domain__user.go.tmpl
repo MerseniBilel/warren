@@ -58,6 +58,21 @@ func NewUser(id UserID, email Email, name string, now time.Time) *User {
 	return u
 }
 
+// ReconstituteUser rebuilds a user that already exists, from storage.
+//
+// It is a DIFFERENT constructor from NewUser on purpose. NewUser raises
+// UserRegistered, because minting an identity is the moment that fact
+// becomes true — so loading a row through it would announce a registration
+// that happened months ago, every time anyone read the record. A repository
+// uses this one; only the use case that creates a user calls NewUser.
+func ReconstituteUser(id UserID, email Email, name string) *User {
+	return &User{
+		AggregateRoot: wdomain.NewAggregateRoot(id),
+		Email:         email,
+		Name:          name,
+	}
+}
+
 // UserRegistered is a fact that has already happened.
 type UserRegistered struct {
 	UserID UserID    `json:"user_id"`

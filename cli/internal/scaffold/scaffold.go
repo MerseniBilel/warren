@@ -59,12 +59,12 @@ type Options struct {
 var released = map[string][]string{
 	// http is what a scaffold wires by default, so accepting the flag is
 	// honest rather than a no-op: --transport http asks for what you get.
-	// grpc is still refused, and postgres is refused because the scaffold
-	// cannot wire it yet even though the adapter exists — a flag that
-	// silently produced an in-memory repository would be worse than a
-	// refusal naming the manual steps.
+	// grpc is still refused. postgres wires the real adapter: the platform
+	// module imports postgres.Module, the memory unit of work and the memory
+	// outbox and inbox stores are NOT emitted beside it, the user repository
+	// is plain SQL, and cmd/migrate plus db/migrations come with it.
 	"transport": {"http"},
-	"db":        {"memory"},
+	"db":        {"memory", "postgres"},
 	"broker":    {"memory"},
 }
 
@@ -85,17 +85,22 @@ func New(opts Options) error {
 		return errUnreleased(flag, value)
 	}
 
+	db := opts.DB
+	if db == "" {
+		db = "memory"
+	}
 	data := map[string]string{
 		"Name":      opts.Name,
 		"Module":    opts.ModulePath,
 		"Version":   opts.Version,
 		"EnvPrefix": strings.ToUpper(strings.ReplaceAll(opts.Name, "-", "_")),
 		"GoVersion": goVersion,
+		"DB":        db,
 	}
 
 	// Render everything first, then check every target, then write: a
 	// scaffold is all-or-nothing.
-	files, err := render(data, opts.Name)
+	files, err := render(data, opts.Name, db)
 	if err != nil {
 		return err
 	}
@@ -112,9 +117,19 @@ func New(opts Options) error {
 	}
 
 	if opts.FrameworkPath != "" {
-		files["go.mod"] = append(files["go.mod"], []byte(fmt.Sprintf(
-			"\nreplace github.com/MerseniBilel/warren => %s\n\nreplace github.com/MerseniBilel/warren/transport/http => %s/transport/http\n",
-			opts.FrameworkPath, opts.FrameworkPath))...)
+		// One replace per module the go.mod REQUIRES. A missing one is not a
+		// warning: the module is untagged, so `go mod tidy` fails on it and
+		// the scaffold does not build at all — which is the whole reason the
+		// flag exists.
+		mods := []string{"", "/transport/http"}
+		if db == "postgres" {
+			mods = append(mods, "/persistence/postgres")
+		}
+		var b strings.Builder
+		for _, m := range mods {
+			fmt.Fprintf(&b, "\nreplace github.com/MerseniBilel/warren%s => %s%s\n", m, opts.FrameworkPath, m)
+		}
+		files["go.mod"] = append(files["go.mod"], []byte(b.String())...)
 	}
 
 	for path, content := range files {
@@ -136,7 +151,34 @@ const goVersion = "1.26.3"
 // render executes every template, formatting the Go ones. A template that
 // produces unparseable Go is a bug in the CLI, not in the user's project, so
 // it fails here with the file named.
-func render(data map[string]string, appName string) (map[string][]byte, error) {
+// driverTemplate is a template that belongs to ONE --db value: written for
+// that driver, skipped for every other. So a memory scaffold gains no migrate
+// binary, and a postgres one gains no in-memory repository beside the real
+// one — which is the ambiguous-binding boot failure a user hit when they
+// added postgres by hand.
+type driverTemplate struct {
+	db string // the --db value this template is for
+	as string // the template name whose PATH it takes, when they differ
+}
+
+var driverOnly = map[string]driverTemplate{
+	"cmd__migrate__main.go.tmpl":                                       {db: "postgres"},
+	"db__migrations__00001_users.sql.tmpl":                             {db: "postgres"},
+	"internal__platform__module.go.tmpl":                               {db: "memory"},
+	"internal__modules__user__infrastructure__user_repository.go.tmpl": {db: "memory"},
+
+	// The postgres variants land at the SAME paths as the memory ones they
+	// replace, so nothing downstream — g repository, lint arch, the reader —
+	// has to know which driver a project was scaffolded with.
+	"internal__platform__module_postgres.go.tmpl": {
+		db: "postgres", as: "internal__platform__module.go.tmpl",
+	},
+	"internal__modules__user__infrastructure__user_repository_postgres.go.tmpl": {
+		db: "postgres", as: "internal__modules__user__infrastructure__user_repository.go.tmpl",
+	},
+}
+
+func render(data map[string]string, appName, db string) (map[string][]byte, error) {
 	entries, err := templates.ReadDir("templates")
 	if err != nil {
 		return nil, err
@@ -145,6 +187,15 @@ func render(data map[string]string, appName string) (map[string][]byte, error) {
 	for _, e := range entries {
 		if e.IsDir() {
 			continue
+		}
+		name := e.Name()
+		if dt, ok := driverOnly[name]; ok {
+			if dt.db != db {
+				continue
+			}
+			if dt.as != "" {
+				name = dt.as
+			}
 		}
 		raw, err := templates.ReadFile("templates/" + e.Name())
 		if err != nil {
@@ -159,7 +210,7 @@ func render(data map[string]string, appName string) (map[string][]byte, error) {
 			return nil, fmt.Errorf("warren new: template %s: %w", e.Name(), err)
 		}
 
-		path := targetPath(e.Name(), appName)
+		path := targetPath(name, appName)
 		content := []byte(buf.String())
 		if strings.HasSuffix(path, ".go") {
 			formatted, err := Format(content)
