@@ -464,7 +464,8 @@ func TestCommandWiresItsOwnRoute(t *testing.T) {
 	for _, want := range []string{
 		"createProduct",
 		"app.Handler[application.CreateProduct, application.CreateProductResult]",
-		`transport.Post(r, "/create_product", c.createProduct)`,
+		// Create<X> derives the resource path; see TestCommandRouteIsResourceShaped.
+		`transport.Post(r, "/products", c.createProduct)`,
 		"/internal/modules/catalog/application",
 	} {
 		if !strings.Contains(got, want) {
@@ -565,5 +566,62 @@ func TestTwoRealMainsAreStillAmbiguous(t *testing.T) {
 	}
 	if strings.Contains(got, "cmd/migrate") {
 		t.Errorf("a non-application main was listed as a candidate:\n%s", got)
+	}
+}
+
+// TestCommandRouteIsResourceShaped — field test #4, section D1. `warren g
+// command shipment CreateShipment` registered POST /create_shipment: an
+// RPC-shaped path in an otherwise REST-shaped scaffold. The tester rewrote
+// all five by hand.
+//
+// Create<X> is the one derivation that is safe to make automatically: the
+// method does not change, no path parameter appears, and the request is
+// still decoded from the body — so the generated handler keeps working.
+// Anything else keeps the literal, predictable form.
+func TestCommandRouteIsResourceShaped(t *testing.T) {
+	t.Parallel()
+
+	dir := app(t)
+	if _, err := generate.Command(generate.Options{Dir: dir, Module: "user", Name: "CreateShipment"}); err != nil {
+		t.Fatalf("Command: %v", err)
+	}
+	src := read(t, dir, "internal/modules/user/controller.go")
+	if !strings.Contains(src, `transport.Post(r, "/shipments"`) {
+		t.Errorf("CreateShipment did not produce a resource-shaped route:\n%s", src)
+	}
+	if strings.Contains(src, "/create_shipment") {
+		t.Errorf("the RPC-shaped path survived:\n%s", src)
+	}
+}
+
+// TestCommandRouteFlagWins — the explicit answer, for every shape the
+// derivation deliberately does not guess at.
+func TestCommandRouteFlagWins(t *testing.T) {
+	t.Parallel()
+
+	dir := app(t)
+	if _, err := generate.Command(generate.Options{
+		Dir: dir, Module: "user", Name: "SuspendUser", Route: "/users/{id}/suspend",
+	}); err != nil {
+		t.Fatalf("Command: %v", err)
+	}
+	src := read(t, dir, "internal/modules/user/controller.go")
+	if !strings.Contains(src, `transport.Post(r, "/users/{id}/suspend"`) {
+		t.Errorf("--route was not used:\n%s", src)
+	}
+}
+
+// TestAnUnrecognisedVerbKeepsTheLiteralPath — the derivation must not guess.
+// SuspendUser has no REST shape anyone could infer, and inventing one would
+// be worse than the predictable form.
+func TestAnUnrecognisedVerbKeepsTheLiteralPath(t *testing.T) {
+	t.Parallel()
+
+	dir := app(t)
+	if _, err := generate.Command(generate.Options{Dir: dir, Module: "user", Name: "SuspendUser"}); err != nil {
+		t.Fatalf("Command: %v", err)
+	}
+	if !strings.Contains(read(t, dir, "internal/modules/user/controller.go"), `transport.Post(r, "/suspend_user"`) {
+		t.Error("an unrecognised verb did not keep its literal path")
 	}
 }

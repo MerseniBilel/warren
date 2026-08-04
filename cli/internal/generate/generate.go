@@ -46,6 +46,9 @@ type Options struct {
 	// Driver selects a repository implementation: "memory" (the default) or
 	// "postgres".
 	Driver string
+	// Route overrides the path a command's controller serves. Empty derives
+	// one from Name.
+	Route string
 }
 
 // Module creates a feature module, its three layers, and wires it into main.
@@ -301,6 +304,27 @@ func nextMigration(dir string) int {
 	return highest + 1
 }
 
+// routeFor decides the path a command's controller serves.
+//
+// The literal form — POST /create_shipment — is RPC-shaped in an otherwise
+// REST-shaped scaffold, and a user reported rewriting every one of them by
+// hand. But most command names have no REST shape anyone could infer, and
+// inventing one would be worse than a predictable path: GetShipment would
+// want GET and a {id} the generated handler does not bind, so the code would
+// not even compile.
+//
+// So exactly one derivation is made, the one that is safe: Create<X> becomes
+// POST /<xs>. The method does not change, no path parameter appears, and the
+// request is still decoded from the body, so the generated handler keeps
+// working unaltered. Everything else keeps the literal path, and --route is
+// the answer for every shape this deliberately does not guess at.
+func routeFor(name, snakeName string) string {
+	if rest, ok := strings.CutPrefix(name, "Create"); ok && rest != "" {
+		return "/" + plural(snake(rest))
+	}
+	return "/" + snakeName
+}
+
 func plural(s string) string {
 	switch {
 	case strings.HasSuffix(s, "s"), strings.HasSuffix(s, "x"), strings.HasSuffix(s, "ch"), strings.HasSuffix(s, "sh"):
@@ -430,7 +454,7 @@ func provide(data map[string]string, base, layer, ctor string) edit {
 func expose(data map[string]string, base string) edit {
 	field := data["Lower"]
 	handler := fmt.Sprintf("app.Handler[application.%s, application.%sResult]", data["Name"], data["Name"])
-	route := fmt.Sprintf("transport.Post(r, %q, c.%s)", "/"+data["Snake"], field)
+	route := fmt.Sprintf("transport.Post(r, %q, c.%s)", data["Route"], field)
 	appPkg := data["Module"] + "/internal/modules/" + data["Feature"] + "/application"
 
 	return edit{
@@ -681,7 +705,23 @@ func featureData(opts Options) (map[string]string, string, error) {
 		// name and leaves the rest to the user editing one generated line —
 		// which is preferable to a dependency, or to "orderss".
 		"Plural": plural(snake(opts.Name)),
+		// Route is the path a command's controller serves. --route wins;
+		// otherwise routeFor decides, and deliberately guesses at only one
+		// shape.
+		"Route": routeOr(opts.Route, opts.Name, snake(opts.Name)),
 	}, base, nil
+}
+
+// routeOr prefers the explicit path, normalising a leading slash so
+// --route users and --route /users mean the same thing.
+func routeOr(explicit, name, snakeName string) string {
+	if explicit == "" {
+		return routeFor(name, snakeName)
+	}
+	if !strings.HasPrefix(explicit, "/") {
+		return "/" + explicit
+	}
+	return explicit
 }
 
 // goModulePath reads the project's module path out of go.mod, which is what

@@ -84,10 +84,15 @@ func generateCmd() *cobra.Command {
 		Long: "command writes an app.Handler into the module's application layer,\n" +
 			"wrapped in Transactional, together with a test that drives it through a\n" +
 			"hand-written double — a generator that skips the test teaches skipping\n" +
-			"the test.",
+			"the test.\n\n" +
+			"The controller serves POST /<name> unless --route says otherwise.\n" +
+			"Create<X> is derived to /<xs>, because that is the one shape where\n" +
+			"the method, the parameters and the body all stay as generated; every\n" +
+			"other name keeps its literal path rather than being guessed at.",
 		Args: cobra.ExactArgs(2),
 		RunE: run(generate.Command, true),
 	}
+	command.Flags().StringVar(&opts.Route, "route", "", "the path the controller serves (default: derived from the name)")
 
 	repository := &cobra.Command{
 		Use:   "repository <module> <Name>",
