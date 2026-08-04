@@ -864,12 +864,26 @@ func errEmptyPattern(what string) error {
 // errCannotValidate names the route whose request type cannot be planned,
 // and the two ways out. Without the route, a project with fifty of them is
 // told only that "a" request type is wrong.
+// errCannotValidate reports that a route's request type cannot be planned.
+//
+// There are two causes and they do not share a fix. Only one of them is
+// about the SHAPE of the request type — and appending that advice to both
+// meant a handler which already had a perfectly good struct was told to give
+// it a struct, leaving "turn validation off" as the only suggestion left
+// standing. An unsupported constraint already arrives as a complete
+// diagnostic naming the tokens and offering the playground validator, so
+// here it is presented, not re-explained.
 func errCannotValidate(pattern, handler string, cause error) error {
+	if !stderrors.Is(cause, validate.ErrNotAStruct) {
+		return diagnostic(fmt.Sprintf(
+			"✗ cannot validate the request for %s\n\n    handler: %s\n\n%v",
+			pattern, handler, cause))
+	}
 	return diagnostic(fmt.Sprintf(
 		"✗ cannot validate the request for %s\n\n    handler: %s\n    %v\n\n"+
-			"  Either give the handler a struct request type — which is what lets\n"+
-			"  a field carry `validate:\"required\"` and a param tag — or turn\n"+
-			"  validation off for this application:\n\n"+
+			"  Give the handler a struct request type — which is what lets a field\n"+
+			"  carry `validate:\"required\"` and a param tag — or turn validation off\n"+
+			"  for this application:\n\n"+
 			"      a := warren.New(...)\n"+
 			"      if err := a.Validator(validate.None()); err != nil {\n"+
 			"          return err\n"+

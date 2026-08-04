@@ -383,3 +383,74 @@ func TestTheSuggestedFixesAreValidGo(t *testing.T) {
 		}
 	}
 }
+
+// TestATypoIsReportedAsATypo — field test #4, defect B4. A one-character
+// slip in a validate tag produced a diagnostic whose only remedies were a
+// `go get`, a dependency, and a main.go rewrite. The tester followed them
+// exactly, and the playground validator then said what core could have said
+// in the first place: this is a typo.
+//
+// Core knows exactly one token, so "within one edit of required" is a fact it
+// can state with confidence.
+func TestATypoIsReportedAsATypo(t *testing.T) {
+	t.Parallel()
+
+	// The tag is misspelled ON PURPOSE — a transposition, the commonest
+	// typo, and the one the field test actually made.
+	//
+	//nolint:misspell // the defect under test, not a typo in prose
+	type req struct {
+		Carrier string `validate:"requried"`
+	}
+	_, err := validate.Required().Plan(reflect.TypeFor[req]())
+	if err == nil {
+		t.Fatal("Plan accepted an unknown constraint")
+	}
+	got := err.Error()
+	if !strings.Contains(got, `Did you mean validate:"required"?`) {
+		t.Errorf("a one-character typo was not reported as one:\n%s", got)
+	}
+	// The install path stays — it is the right answer when the constraint is
+	// real — but it must not be the FIRST thing a typo is offered.
+	if strings.Index(got, "Did you mean") > strings.Index(got, "go get") {
+		t.Errorf("the typo hint comes after the dependency pitch:\n%s", got)
+	}
+}
+
+// TestARealConstraintIsNotCalledATypo — the hint must not fire on a
+// constraint someone genuinely wants, or it becomes noise that trains people
+// to ignore it.
+func TestARealConstraintIsNotCalledATypo(t *testing.T) {
+	t.Parallel()
+
+	type req struct {
+		Email string `validate:"email"`
+		Age   int    `validate:"gte=18"`
+	}
+	_, err := validate.Required().Plan(reflect.TypeFor[req]())
+	if err == nil {
+		t.Fatal("Plan accepted constraints core cannot enforce")
+	}
+	if strings.Contains(err.Error(), "Did you mean") {
+		t.Errorf("a real constraint was reported as a typo:\n%s", err)
+	}
+}
+
+// TestNotAStructIsADistinctSentinel — transport needs to tell the two causes
+// apart, because their fixes are different sentences.
+func TestNotAStructIsADistinctSentinel(t *testing.T) {
+	t.Parallel()
+
+	_, err := validate.Required().Plan(reflect.TypeFor[string]())
+	if !stderrors.Is(err, validate.ErrNotAStruct) {
+		t.Errorf("a non-struct request type is not reported as validate.ErrNotAStruct: %v", err)
+	}
+
+	type req struct {
+		Email string `validate:"email"`
+	}
+	_, err = validate.Required().Plan(reflect.TypeFor[req]())
+	if stderrors.Is(err, validate.ErrNotAStruct) {
+		t.Errorf("an unsupported constraint was reported as a shape problem: %v", err)
+	}
+}

@@ -77,9 +77,66 @@ type field struct {
 	index []int
 }
 
+// near reports whether a and b are within one edit of each other — one
+// substitution, insertion, deletion, or the transposition of two adjacent
+// characters. It is deliberately not a general edit-distance function: the
+// only word core can suggest is "required", and a hint that fires on
+// anything vaguely similar is worse than none.
+//
+// Transposition has to be in the set, and it is the reason this is not three
+// lines. Swapping two adjacent letters is the commonest typo there is, and it
+// is what the field test actually typed — yet it reads as TWO substitutions
+// to a plain character-by-character comparison, so a Hamming check misses
+// precisely the case most worth catching.
+func near(a, b string) bool {
+	if a == b {
+		return false // an exact match is not a typo
+	}
+	switch len(a) - len(b) {
+	case 0:
+		diff := 0
+		var first int
+		for i := range a {
+			if a[i] != b[i] {
+				if diff == 0 {
+					first = i
+				}
+				diff++
+			}
+		}
+		if diff == 1 {
+			return true
+		}
+		// Two differences that are adjacent and swapped: one transposition.
+		return diff == 2 && first+1 < len(a) &&
+			a[first] == b[first+1] && a[first+1] == b[first]
+	case 1:
+		return oneExtra(a, b)
+	case -1:
+		return oneExtra(b, a)
+	}
+	return false
+}
+
+// oneExtra reports whether long is short with exactly one character inserted.
+func oneExtra(long, short string) bool {
+	for i := range len(long) {
+		if long[:i]+long[i+1:] == short {
+			return true
+		}
+	}
+	return false
+}
+
+// ErrNotAStruct reports that Plan was given a type it cannot walk. It is a
+// sentinel because callers must be able to tell it apart from an unsupported
+// CONSTRAINT: the two have different fixes, and transport's wrapper used to
+// print the advice for this one on both.
+var ErrNotAStruct = stderrors.New("validate: a request type must be a struct")
+
 func (required) Plan(t reflect.Type) (Rule, error) {
 	if t == nil || t.Kind() != reflect.Struct {
-		return nil, fmt.Errorf("validate: Plan requires a struct type, got %v", t)
+		return nil, fmt.Errorf("%w, got %v", ErrNotAStruct, t)
 	}
 	var fields []field
 	var unsupported []string
@@ -279,10 +336,20 @@ type diagnostic string
 func (d diagnostic) Error() string { return string(d) }
 
 func errUnsupported(t reflect.Type, tokens []string) error {
+	// A near-miss of the ONE token core knows is a typo, not a request for a
+	// richer validator, and the fix is a keystroke. Saying so first turns a
+	// dependency install and a main.go rewrite back into what it actually is.
+	var hint string
+	for _, tok := range tokens {
+		if near(tok, "required") {
+			hint = fmt.Sprintf("\n  Did you mean validate:\"required\"? %q is one edit away from it,\n  which is almost always a typo rather than a missing feature.\n", tok)
+			break
+		}
+	}
 	return diagnostic(fmt.Sprintf(
 		"✗ unsupported validation constraint\n\n"+
 			"    %s uses constraints the standard-library validator cannot enforce:\n"+
-			"    %s\n\n"+
+			"    %s\n"+hint+"\n"+
 			"  Core enforces validate:\"required\" only — refusing the rest rather than\n"+
 			"  silently under-validating. Two ways forward:\n\n"+
 			"    • install github.com/MerseniBilel/warren/validate/playground:\n\n"+
