@@ -36,10 +36,10 @@ func TestRegisterUser(t *testing.T) {
 	// The outbox relay publishes asynchronously; the message's Key is the
 	// aggregate id, which is what preserves per-aggregate order.
 	waitFor(t, func() bool {
-		return len(warrentest.Published(app, "user.registered")) == 1
+		return len(warrentest.Published(t, app, "user.registered")) == 1
 	}, "the registration event never reached the broker")
 
-	msg := warrentest.Published(app, "user.registered")[0]
+	msg := warrentest.Published(t, app, "user.registered")[0]
 	if msg.Key != view.ID {
 		t.Errorf("message key = %q, want the aggregate id %q", msg.Key, view.ID)
 	}

@@ -154,7 +154,7 @@ func TestPublishedAndAssertPublished(t *testing.T) {
 	if got.Email != "bob@example.com" {
 		t.Errorf("event = %+v, want the decoded payload", got)
 	}
-	if msgs := warrentest.Published(a, "user.registered"); len(msgs) != 1 {
+	if msgs := warrentest.Published(t, a, "user.registered"); len(msgs) != 1 {
 		t.Errorf("Published = %d messages, want 1", len(msgs))
 	}
 }
@@ -185,6 +185,11 @@ func (r *recordingT) Helper() {}
 
 func (r *recordingT) Fatalf(format string, args ...any) {
 	r.msg = fmt.Sprintf(format, args...)
+	panic("fatal")
+}
+
+func (r *recordingT) Fatal(args ...any) {
+	r.msg = fmt.Sprint(args...)
 	panic("fatal")
 }
 
@@ -371,3 +376,29 @@ func claimsModule() warren.Module {
 }
 
 type claims struct{}
+
+// TestPublishedWithoutTheRecorderFails — field test #4, section C6.
+// AssertPublished fatals with a helpful message when WithMemoryBroker() is
+// missing; Published just handed back an empty slice. A concurrency test
+// therefore "passed" having observed zero events, and the tester nearly
+// believed it.
+//
+// A helper whose answer is indistinguishable from "nothing happened" is the
+// silent-failure class this framework spends its diagnostics budget on.
+func TestPublishedWithoutTheRecorderFails(t *testing.T) {
+	t.Parallel()
+
+	// A module with no broker dependency, so the boot itself succeeds and
+	// the ONLY thing missing is the recorder.
+	bare := warren.NewModule("bare", warren.Providers(func() *struct{} { return &struct{}{} }))
+	a := warrentest.NewModuleTest(t, bare)
+
+	fake := &recordingT{}
+	func() {
+		defer func() { _ = recover() }()
+		warrentest.Published(fake, a, "user.registered")
+	}()
+	if !strings.Contains(fake.msg, "WithMemoryBroker") {
+		t.Errorf("Published returned silently without a recorder; message was %q", fake.msg)
+	}
+}

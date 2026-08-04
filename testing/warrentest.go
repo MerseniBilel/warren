@@ -228,8 +228,16 @@ func (r *Recorder) Subscribe(ctx context.Context, topic string, h broker.Message
 }
 
 // Published returns the messages recorded on a topic, in publish order.
-func Published(a *App, topic string) []broker.Message {
+//
+// It takes t for one reason: without WithMemoryBroker() there is no recorder,
+// and this used to answer that case with an empty slice — indistinguishable
+// from "nothing was published". A test asserting `len(Published(...)) == 0`
+// then passed while observing nothing at all. AssertPublished has always
+// failed loudly here; this now does too, and the argument order matches it.
+func Published(t testing.TB, a *App, topic string) []broker.Message {
+	t.Helper()
 	if a.recorder == nil {
+		t.Fatal("warrentest: Published needs WithMemoryBroker() — without it nothing records what was published, and an empty result would mean two different things")
 		return nil
 	}
 	a.recorder.mu.Lock()
