@@ -230,3 +230,75 @@ func postWith(payload []byte) *http.Request {
 	req.Header.Set("Content-Type", "application/json")
 	return req
 }
+
+// TestFormEncodedPostIsRefused — field test #4, section E5. A JSON API
+// answered 201 to application/x-www-form-urlencoded, multipart/form-data and
+// text/plain. Those three are exactly the set a browser may send
+// CROSS-ORIGIN with no preflight, so an HTML form on any site could post to
+// this API, have the body decode to a struct of zero values, and be told it
+// worked.
+func TestFormEncodedPostIsRefused(t *testing.T) {
+	s := newTestServer(t)
+	for _, ct := range []string{
+		"application/x-www-form-urlencoded",
+		"multipart/form-data; boundary=xyz",
+		"text/plain;charset=UTF-8",
+		"application/xml",
+	} {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest("POST", "/users/u-1?trace=abc", bytes.NewReader([]byte(`{"email":"a@b.c"}`)))
+		req.Header.Set("Content-Type", ct)
+		s.mux.ServeHTTP(rec, req)
+		if rec.Code != http.StatusUnsupportedMediaType {
+			t.Errorf("Content-Type %q returned %d, want 415:\n%s", ct, rec.Code, rec.Body)
+		}
+	}
+}
+
+// TestJSONContentTypesAreAccepted — the check must not cost the ordinary
+// case. Parameters and casing are part of the header's grammar, not a
+// mismatch.
+func TestJSONContentTypesAreAccepted(t *testing.T) {
+	s := newTestServer(t)
+	for _, ct := range []string{
+		"application/json",
+		"application/json; charset=utf-8",
+		"Application/JSON",
+		" application/json ",
+	} {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest("POST", "/users/u-1?trace=abc", bytes.NewReader([]byte(`{"email":"a@b.c"}`)))
+		req.Header.Set("Content-Type", ct)
+		s.mux.ServeHTTP(rec, req)
+		if rec.Code != http.StatusCreated {
+			t.Errorf("Content-Type %q returned %d, want 201:\n%s", ct, rec.Code, rec.Body)
+		}
+	}
+}
+
+// TestAbsentContentTypeIsAccepted — a browser always sets one, so omitting it
+// is not reachable from the simple-request shape this closes; refusing it
+// would break every curl and script that posts a body without the header.
+func TestAbsentContentTypeIsAccepted(t *testing.T) {
+	s := newTestServer(t)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/users/u-1?trace=abc", bytes.NewReader([]byte(`{"email":"a@b.c"}`)))
+	req.Header.Del("Content-Type")
+	s.mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Errorf("a request with no Content-Type returned %d, want 201:\n%s", rec.Code, rec.Body)
+	}
+}
+
+// TestAllowAnyContentTypeReopensIt — the escape hatch works, for a client
+// that cannot be changed.
+func TestAllowAnyContentTypeReopensIt(t *testing.T) {
+	s := newTestServerWith(t, AllowAnyContentType())
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/users/u-1?trace=abc", bytes.NewReader([]byte(`{"email":"a@b.c"}`)))
+	req.Header.Set("Content-Type", "text/plain")
+	s.mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Errorf("AllowAnyContentType still refused text/plain: %d\n%s", rec.Code, rec.Body)
+	}
+}

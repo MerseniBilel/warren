@@ -52,6 +52,7 @@ type config struct {
 	certFile, keyFile string
 	h2c               bool
 	codec             transport.Codec
+	anyContentType    bool
 }
 
 type handleRoute struct {
@@ -254,4 +255,22 @@ func Codec(c transport.Codec) Option {
 			cfg.codec = c
 		}
 	}}
+}
+
+// AllowAnyContentType disables the request media-type check, accepting a body
+// whatever Content-Type it carries.
+//
+// By default a request whose Content-Type the route does not decode is
+// refused with 415. That is a security default, not a tidiness one:
+// application/x-www-form-urlencoded, multipart/form-data and text/plain are
+// exactly the set a browser may send CROSS-ORIGIN with no preflight, so
+// without the check an HTML form on any site could post to a JSON API and be
+// answered 201 — the body decodes to a struct of zero values, and nothing
+// reports a problem. A request with NO Content-Type is still accepted, since
+// a browser always sets one and refusing it would break curl and every script
+// that posts a body without the header.
+//
+// Turn it off for a client you cannot change.
+func AllowAnyContentType() Option {
+	return Option{apply: func(c *config) { c.anyContentType = true }}
 }

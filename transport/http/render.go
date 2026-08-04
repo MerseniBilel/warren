@@ -7,6 +7,7 @@ import (
 	stderrors "errors"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 
 	"github.com/MerseniBilel/warren/errors"
@@ -115,6 +116,21 @@ var jsonContentType = []string{"application/json; charset=utf-8"}
 // for this. Do not "simplify" it back.
 var bodyPool = sync.Pool{New: func() any { return new(bytes.Buffer) }}
 
+// mediaMatches reports whether a request's Content-Type names want, ignoring
+// parameters and case: "application/json; charset=utf-8" matches
+// "application/json".
+//
+// mime.ParseMediaType is not used, deliberately — it allocates a parameter
+// map on every request, and this runs on the hot path to compare against one
+// fixed string. A malformed header simply does not match, which is the answer
+// a parse error would produce anyway.
+func mediaMatches(got, want string) bool {
+	if i := strings.IndexByte(got, ';'); i >= 0 {
+		got = got[:i]
+	}
+	return strings.EqualFold(strings.TrimSpace(got), want)
+}
+
 // typed serves one registered route: guards, then core's pre-built closure —
 // decode, bind params, validate, core middleware, handler, encode — then the
 // success status. Everything except the body read happens inside the closure
@@ -126,6 +142,8 @@ func (s *server) typed(rt transport.HTTPRoute) http.Handler {
 	guards := rt.Guards
 	success := rt.Success
 	limit := s.cfg.maxBodyBytes
+	media := s.cfg.codec.Name()
+	checkMedia := !s.cfg.anyContentType
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// params is pointer-shaped, so putting it in the interface costs no
@@ -137,6 +155,26 @@ func (s *server) typed(rt transport.HTTPRoute) http.Handler {
 				writeError(w, r, err)
 				return
 			}
+		}
+
+		// A body has to be the media type this route decodes. Until this
+		// check existed, a form-encoded or text/plain POST was decoded as
+		// JSON — which fails, leaving every field zero, and then answered
+		// 201. Those two content types plus multipart are exactly the set a
+		// browser can send CROSS-ORIGIN with no preflight, so an HTML form
+		// on any site could reach a JSON API and have it report success.
+		//
+		// An ABSENT Content-Type is allowed: a browser always sets one, so
+		// omitting it is not reachable from the simple-request shape this
+		// closes, and refusing it would break every curl and script that
+		// posts a body without the header.
+		if ct := r.Header.Get(contentType); checkMedia && ct != "" && !mediaMatches(ct, media) {
+			writeJSON(w, http.StatusUnsupportedMediaType, errorBody{Error: errorPayload{
+				Code:          string(errors.CodeInvalid),
+				Message:       "unsupported media type " + ct + "; this route accepts " + media,
+				CorrelationID: log.CorrelationID(ctx),
+			}})
+			return
 		}
 
 		buf := bodyPool.Get().(*bytes.Buffer)

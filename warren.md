@@ -1335,6 +1335,7 @@ func Listener(net.Listener) Option                           // a test binding p
 func Middleware(...func(http.Handler) http.Handler) Option   // stdlib signature
 func Handle(string, http.Handler) Option                     // pprof, static assets, webhooks
 func Codec(transport.Codec) Option                           // transport.JSON(); StrictJSON() rejects unknown members
+func AllowAnyContentType() Option                            // off: a body must be the codec's media type, else 415
 
 func ReadHeaderTimeout(time.Duration) Option                 // 10s — the Slowloris fix
 func ReadTimeout(time.Duration) Option                       // 30s
