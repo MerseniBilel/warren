@@ -691,6 +691,13 @@ func assertPasteable(t *testing.T, out string) {
 			continue
 		}
 		expr = "warren." + expr
+		// An expression containing "..." is a REFERENCE, not something to
+		// type — "add it to warren.Imports(...)" names the option so the
+		// reader can find it. A line you are meant to paste never elides its
+		// own arguments, so the ellipsis tells the two apart.
+		if strings.Contains(expr, "...") {
+			continue
+		}
 		// A Go expression carries no quotes, no spaces, and no slashes — a
 		// slash means a module PATH reached a position only an identifier
 		// can occupy.

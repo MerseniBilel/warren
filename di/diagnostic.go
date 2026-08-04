@@ -67,7 +67,15 @@ func errMissing(target string, chain []string, declared, scope string, candidate
 				if isIdentifier(c.scope) {
 					fmt.Fprintf(&b, "      Add to %s's module: warren.Imports(%s.Module())\n", scope, c.scope)
 				} else {
-					fmt.Fprintf(&b, "      Add module %q to %s's warren.Imports(...).\n", c.scope, scope)
+					// The module VALUE, not a fresh call. A reader who
+					// followed this into a second postgres.Module(...) got
+					// "duplicate module name" — modules are deduplicated by
+					// identity, so the second declaration is a different
+					// module wearing the same name.
+					fmt.Fprintf(&b, "      Add module %q to %s's warren.Imports(...) — the value that\n"+
+						"      already declares it, wherever your project keeps it. Calling its\n"+
+						"      constructor again makes a SECOND module with the same name, which\n"+
+						"      fails the boot.\n", c.scope, scope)
 				}
 			} else {
 				fmt.Fprintf(&b, "    • %s is registered in scope %q but not exported.\n", c.provider, c.scope)
