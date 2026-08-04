@@ -162,6 +162,10 @@ func RunContract[T domain.Root[K], K domain.ID](t *testing.T, newDriver NewDrive
 	})
 }
 
+// versionedContractIDs is how many distinct identities RunVersionedContract
+// needs: one per subtest.
+const versionedContractIDs = 6
+
 // RunVersionedContract certifies a driver's optimistic concurrency, and is
 // run IN ADDITION to RunContract by drivers whose aggregates embed
 // domain.VersionedRoot. It is separate because the version is opt-in: a
@@ -175,14 +179,36 @@ func RunContract[T domain.Root[K], K domain.ID](t *testing.T, newDriver NewDrive
 //
 // newAggregate must return an aggregate implementing domain.Versioned at
 // version 0.
+//
+// ids must hold at least versionedContractIDs DISTINCT, non-zero identities:
+// one per subtest. Unlike RunContract, this suite cannot reuse an identity
+// across subtests, because a store that newDriver does not actually reset —
+// a shared Postgres table, say — would leave the row behind and every later
+// insert would conflict for the wrong reason. Its own diagnostic would then
+// be indistinguishable from the defect it is testing for.
 func RunVersionedContract[T domain.Root[K], K domain.ID](t *testing.T, newDriver NewDriver[T, K], newAggregate func(K) T, ids ...K) {
 	t.Helper()
-	if len(ids) < 1 {
-		t.Fatal("persistence.RunVersionedContract needs at least one identity")
+	if len(ids) < versionedContractIDs {
+		t.Fatalf("persistence.RunVersionedContract needs %d distinct identities, one per subtest, got %d", versionedContractIDs, len(ids))
 	}
-	id := ids[0]
-	if _, ok := any(newAggregate(id)).(domain.Versioned); !ok {
+	var zero K
+	seen := map[K]bool{}
+	for _, id := range ids {
+		if id == zero {
+			t.Fatal("persistence.RunVersionedContract was given the zero identity")
+		}
+		if seen[id] {
+			t.Fatalf("persistence.RunVersionedContract was given %v twice — each subtest needs its own row", id)
+		}
+		seen[id] = true
+	}
+	if _, ok := any(newAggregate(ids[0])).(domain.Versioned); !ok {
 		t.Fatal("persistence.RunVersionedContract was given an aggregate that does not implement domain.Versioned — embed domain.VersionedRoot")
+	}
+	next := func() K {
+		id := ids[0]
+		ids = ids[1:]
+		return id
 	}
 
 	save := func(uow UnitOfWork, repo Repository[T, K], agg T) error {
@@ -193,7 +219,7 @@ func RunVersionedContract[T domain.Root[K], K domain.ID](t *testing.T, newDriver
 
 	t.Run("a first save starts the aggregate at version 1", func(t *testing.T) {
 		uow, repo := newDriver(t)
-		agg := newAggregate(id)
+		agg := newAggregate(next())
 		if err := save(uow, repo, agg); err != nil {
 			t.Fatalf("Do: %v", err)
 		}
@@ -206,6 +232,7 @@ func RunVersionedContract[T domain.Root[K], K domain.ID](t *testing.T, newDriver
 
 	t.Run("a loaded aggregate carries its stored version", func(t *testing.T) {
 		uow, repo := newDriver(t)
+		id := next()
 		if err := save(uow, repo, newAggregate(id)); err != nil {
 			t.Fatalf("Do: %v", err)
 		}
@@ -220,6 +247,7 @@ func RunVersionedContract[T domain.Root[K], K domain.ID](t *testing.T, newDriver
 
 	t.Run("a stale write is CONFLICT, not a silent overwrite", func(t *testing.T) {
 		uow, repo := newDriver(t)
+		id := next()
 		if err := save(uow, repo, newAggregate(id)); err != nil {
 			t.Fatalf("Do: %v", err)
 		}
@@ -244,6 +272,7 @@ func RunVersionedContract[T domain.Root[K], K domain.ID](t *testing.T, newDriver
 
 	t.Run("the winner's write survives the conflict", func(t *testing.T) {
 		uow, repo := newDriver(t)
+		id := next()
 		if err := save(uow, repo, newAggregate(id)); err != nil {
 			t.Fatalf("Do: %v", err)
 		}
@@ -266,7 +295,7 @@ func RunVersionedContract[T domain.Root[K], K domain.ID](t *testing.T, newDriver
 
 	t.Run("sequential saves of one aggregate keep working", func(t *testing.T) {
 		uow, repo := newDriver(t)
-		agg := newAggregate(id)
+		agg := newAggregate(next())
 		for i := range 3 {
 			if err := save(uow, repo, agg); err != nil {
 				t.Fatalf("save %d of the same aggregate failed: %v — the driver reads the version but never advances it", i+1, err)
@@ -279,6 +308,7 @@ func RunVersionedContract[T domain.Root[K], K domain.ID](t *testing.T, newDriver
 
 	t.Run("concurrent writers produce exactly one winner", func(t *testing.T) {
 		uow, repo := newDriver(t)
+		id := next()
 		if err := save(uow, repo, newAggregate(id)); err != nil {
 			t.Fatalf("Do: %v", err)
 		}

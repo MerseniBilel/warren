@@ -18,8 +18,14 @@ func (id InvoiceID) String() string { return string(id) }
 // and saves whole. Add the fields the invariants need, and put every change
 // behind a method — a struct whose fields are all exported is a record, not
 // an aggregate.
+//
+// It embeds VersionedRoot, so writes are checked against the version this
+// invoice was loaded at: two requests that both read version 3 cannot both
+// commit, and the loser gets CodeConflict instead of silently erasing the
+// winner's change. Swap it for wdomain.AggregateRoot (and drop the version
+// column) only if something else already serialises writes to this aggregate.
 type Invoice struct {
-	wdomain.AggregateRoot[InvoiceID]
+	wdomain.VersionedRoot[InvoiceID]
 
 	CreatedAt time.Time
 }
@@ -28,13 +34,31 @@ type Invoice struct {
 // publishes nothing — the unit of work drains the events into the outbox
 // inside the transaction, which is what makes the state change and its
 // announcement atomic.
+//
+// This is the CREATE path only. Loading uses ReconstituteInvoice.
 func NewInvoice(id InvoiceID, now time.Time) *Invoice {
 	x := &Invoice{
-		AggregateRoot: wdomain.NewAggregateRoot(id),
+		VersionedRoot: wdomain.NewVersionedRoot(id),
 		CreatedAt:     now,
 	}
 	x.Raise(InvoiceCreated{InvoiceID: id, At: now})
 	return x
+}
+
+// ReconstituteInvoice rebuilds an invoice from stored state. It
+// is the LOAD path, and it exists for two reasons a repository cannot work
+// around:
+//
+//   - It raises nothing. Loading through NewInvoice would re-raise
+//     InvoiceCreated, and the next Save would publish a creation fact for
+//     an invoice created long ago.
+//   - It carries the version. Reconstituting at 0 would make every update
+//     look like an insert, and the conflict check would never fire.
+func ReconstituteInvoice(id InvoiceID, createdAt time.Time, version int64) *Invoice {
+	return &Invoice{
+		VersionedRoot: wdomain.ReconstituteVersionedRoot(id, version),
+		CreatedAt:     createdAt,
+	}
 }
 
 // InvoiceCreated is a fact that has already happened, which is why it is
@@ -57,6 +81,11 @@ func (e InvoiceCreated) AggregateID() string { return e.InvoiceID.String() }
 // InvoiceRepository is the port the application layer depends on. It
 // lives here, in the domain, so infrastructure depends on the domain and
 // never the other way round.
+//
+// Save returns an error carrying errors.CodeConflict when the invoice was
+// changed by someone else since it was loaded. Handlers that must not lose
+// that change reload and retry; handlers that can let the caller decide let
+// the 409 through.
 type InvoiceRepository interface {
 	FindByID(ctx context.Context, id InvoiceID) (*Invoice, error)
 	Save(ctx context.Context, invoice *Invoice) error

@@ -6,9 +6,15 @@
 -- postgres.Migrate, or with whatever migration tool the project already
 -- runs — these are goose-format files, so goose, atlas and dbmate all read
 -- them unchanged.
+--
+-- version carries the optimistic lock. The repository writes
+-- `WHERE id = $1 AND version = $n`, so two concurrent updates that both read
+-- version 3 cannot both commit — the loser matches no row and gets CONFLICT.
+-- Drop the column only if the aggregate also drops domain.VersionedRoot.
 CREATE TABLE IF NOT EXISTS {{.Plural}} (
     id         TEXT        PRIMARY KEY,
-    created_at TIMESTAMPTZ NOT NULL
+    created_at TIMESTAMPTZ NOT NULL,
+    version    BIGINT      NOT NULL DEFAULT 0
 );
 
 -- +goose Down

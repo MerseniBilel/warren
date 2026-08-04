@@ -181,6 +181,114 @@ func (r userRepo) Delete(ctx context.Context, id userID) error {
 
 func isNoRows(err error) bool { return err != nil && strings.Contains(err.Error(), "no rows") }
 
+// --- the VERSIONED fixture -------------------------------------------------
+//
+// invoice and invoiceRepo mirror, line for line, what `warren g entity` and
+// `warren g repository --driver postgres` now emit. That correspondence is
+// the point: the generated SQL is otherwise only compile-checked, and an
+// optimistic lock that compiles but does not lock is worse than none — it
+// reads as a guarantee in review.
+
+type invoiceID string
+
+func (id invoiceID) String() string { return string(id) }
+
+type invoiced struct {
+	Invoice invoiceID
+	At      time.Time
+}
+
+func (e invoiced) EventName() string     { return "invoice.created" }
+func (e invoiced) OccurredAt() time.Time { return e.At }
+func (e invoiced) AggregateID() string   { return e.Invoice.String() }
+
+type invoice struct {
+	domain.VersionedRoot[invoiceID]
+	Total int
+}
+
+func newInvoice(id invoiceID, total int) *invoice {
+	i := &invoice{VersionedRoot: domain.NewVersionedRoot(id), Total: total}
+	i.Raise(invoiced{Invoice: id, At: time.Unix(1, 0).UTC()})
+	return i
+}
+
+type invoiceRepo struct{ db postgres.DB }
+
+// FindByID reconstitutes — it does NOT call newInvoice, which would re-raise
+// invoiced and republish a creation fact on the next Save, and would come
+// back at version 0 so every update looked like an insert.
+func (r invoiceRepo) FindByID(ctx context.Context, id invoiceID) (*invoice, error) {
+	var (
+		total   int
+		version int64
+	)
+	err := r.db(ctx).QueryRow(ctx,
+		`SELECT total, version FROM invoices WHERE id = $1`, string(id),
+	).Scan(&total, &version)
+	if err != nil {
+		if werrors.Is(err, werrors.CodeNotFound) {
+			return nil, err
+		}
+		if isNoRows(err) {
+			return nil, werrors.NotFound("invoice", id)
+		}
+		return nil, err
+	}
+	return &invoice{
+		VersionedRoot: domain.ReconstituteVersionedRoot(id, version),
+		Total:         total,
+	}, nil
+}
+
+func (r invoiceRepo) Save(ctx context.Context, inv *invoice) error {
+	if err := postgres.RequireTx(ctx, "save invoice"); err != nil {
+		return err
+	}
+	expected := inv.Version()
+	var (
+		n   int64
+		err error
+	)
+	if expected == 0 {
+		// DO NOTHING, not DO UPDATE: if the row is already there, two
+		// requests minted the same identity, and overwriting one with the
+		// other is the bug rather than the fix.
+		n, err = r.db(ctx).Exec(ctx, `
+			INSERT INTO invoices (id, total, version) VALUES ($1, $2, 1)
+			ON CONFLICT (id) DO NOTHING`,
+			string(inv.ID()), inv.Total)
+	} else {
+		n, err = r.db(ctx).Exec(ctx, `
+			UPDATE invoices SET total = $2, version = version + 1
+			WHERE id = $1 AND version = $3`,
+			string(inv.ID()), inv.Total, expected)
+	}
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return werrors.Conflict("invoice %s was changed by another request since it was loaded (expected version %d)", inv.ID(), expected)
+	}
+	inv.SetVersion(expected + 1)
+	persistence.Track(ctx, inv)
+	return nil
+}
+
+func (r invoiceRepo) Delete(ctx context.Context, id invoiceID) error {
+	if err := postgres.RequireTx(ctx, "delete invoice"); err != nil {
+		return err
+	}
+	n, err := r.db(ctx).Exec(ctx, `DELETE FROM invoices WHERE id = $1`, string(id))
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return werrors.NotFound("invoice", id)
+	}
+	return nil
+}
+
 // bootApp brings up a real application on an isolated schema and returns the
 // pieces the tests drive.
 func bootApp(t *testing.T, opts ...postgres.Option) (*warren.App, postgres.DB, *postgres.UnitOfWork, outbox.Store) {
@@ -218,6 +326,15 @@ func bootApp(t *testing.T, opts ...postgres.Option) (*warren.App, postgres.DB, *
 	if _, err := db(context.Background()).Exec(context.Background(),
 		`CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, email TEXT NOT NULL)`); err != nil {
 		t.Fatalf("create users: %v", err)
+	}
+	// The versioned table, exactly as the generated migration writes it.
+	if _, err := db(context.Background()).Exec(context.Background(),
+		`CREATE TABLE IF NOT EXISTS invoices (
+			id      TEXT   PRIMARY KEY,
+			total   BIGINT NOT NULL,
+			version BIGINT NOT NULL DEFAULT 0
+		)`); err != nil {
+		t.Fatalf("create invoices: %v", err)
 	}
 	return a, db, uow, store
 }
@@ -366,6 +483,29 @@ func TestRunContract(t *testing.T) {
 		},
 		func(id userID) *user { return newUser(id, string(id)+"@example.com") },
 		"c-1", "c-2", "c-3",
+	)
+}
+
+// TestRunVersionedContract certifies the optimistic lock against a REAL
+// database. The memory driver detects a conflict with a mutex; Postgres does
+// it with `WHERE version = $n` and a rows-affected count, and only a real
+// server proves that the UPDATE matches nothing when the version has moved.
+//
+// The concurrency subtest is the field-test defect exactly: N transactions
+// that all read the same version, committing at once, of which precisely one
+// may win.
+func TestRunVersionedContract(t *testing.T) {
+	_, db, uow, _ := bootApp(t)
+	if _, err := db(context.Background()).Exec(context.Background(),
+		`TRUNCATE invoices`); err != nil {
+		t.Fatalf("truncate: %v", err)
+	}
+	persistence.RunVersionedContract(t,
+		func(*testing.T) (persistence.UnitOfWork, persistence.Repository[*invoice, invoiceID]) {
+			return uow, invoiceRepo{db: db}
+		},
+		func(id invoiceID) *invoice { return newInvoice(id, 100) },
+		"v-1", "v-2", "v-3", "v-4", "v-5", "v-6",
 	)
 }
 

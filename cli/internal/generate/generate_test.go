@@ -44,8 +44,15 @@ func TestGenerateEntity(t *testing.T) {
 	for _, want := range []string{
 		"type OrderID string",
 		"type Order struct",
-		"AggregateRoot[OrderID]",
+		// Versioned by default. A generated aggregate whose repository blind-
+		// upserts is a lost update waiting for its second concurrent request,
+		// and the generator is where that default is set.
+		"VersionedRoot[OrderID]",
 		"func NewOrder(",
+		// The load path is a DIFFERENT constructor: NewOrder raises
+		// OrderCreated, so reconstituting through it republishes a creation
+		// fact and loses the version.
+		"func ReconstituteOrder(",
 		"type OrderCreated struct",
 		"type OrderRepository interface",
 	} {
