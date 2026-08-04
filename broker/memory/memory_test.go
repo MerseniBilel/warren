@@ -2,8 +2,11 @@ package memory_test
 
 import (
 	"context"
+	stderrors "errors"
+	"log/slog"
 	"runtime"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -217,4 +220,151 @@ func awaitSubscriber(b *testing.B, br *memory.Broker, ctx context.Context, deliv
 			b.Fatal("the subscription never started delivering")
 		}
 	}
+}
+
+// TestADroppedDispositionIsNotSilent — the in-process driver did
+// `_ = h(ctx, msg)`. broker.DeadLetter nacks UNAVAILABLE precisely because
+// "the broker redelivers", and this driver does not redeliver: after the
+// retries were exhausted the message was neither handled, dead-lettered,
+// redelivered nor logged. It was gone, and the app's logs were clean.
+//
+// Whether an in-process broker SHOULD redeliver is a design decision. That
+// it must not lose a message in silence is not: warren.md §5 says duplicates
+// over loss, never silently.
+func TestADroppedDispositionIsNotSilent(t *testing.T) {
+	t.Parallel()
+
+	var buf syncBuffer
+	b := memory.New(memory.WithLogger(slog.New(slog.NewJSONHandler(&buf, nil))))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	handled := make(chan struct{}, 1)
+	go func() {
+		_ = b.Subscribe(ctx, "t", func(context.Context, broker.Message) error {
+			handled <- struct{}{}
+			return werrors.Unavailable("payments", stderrors.New("down"))
+		})
+	}()
+
+	awaitDelivery(t, b, ctx, handled)
+	if err := b.Publish(ctx, "t", broker.Message{ID: "evt-1", Type: "t"}); err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
+	select {
+	case <-handled:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the handler never ran")
+	}
+
+	waitFor(t, &buf, "evt-1")
+	logged := buf.String()
+	for _, want := range []string{"evt-1", "UNAVAILABLE"} {
+		if !strings.Contains(logged, want) {
+			t.Errorf("the dropped disposition does not mention %q:\n%s", want, logged)
+		}
+	}
+}
+
+// TestMessagesAbandonedAtShutdownAreCounted — Subscribe's doc says a
+// cancelled context is "a drain, not an abort", but the buffered queue was
+// abandoned with the goroutine: five messages published, one handled, four
+// discarded, and the shutdown log said only "stopped".
+func TestMessagesAbandonedAtShutdownAreCounted(t *testing.T) {
+	t.Parallel()
+
+	var buf syncBuffer
+	b := memory.New(memory.WithLogger(slog.New(slog.NewJSONHandler(&buf, nil))))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = b.Subscribe(ctx, "t", func(context.Context, broker.Message) error {
+			once.Do(func() { close(entered) })
+			<-release
+			return nil
+		})
+	}()
+
+	// Wedge the handler, then queue more behind it. Published in a loop
+	// because a topic with no LIVE subscription accepts and discards, so a
+	// single publish can land before Subscribe has registered.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if err := b.Publish(context.Background(), "t", broker.Message{ID: "wedge", Type: "t"}); err != nil {
+			t.Fatalf("Publish: %v", err)
+		}
+		select {
+		case <-entered:
+		case <-time.After(20 * time.Millisecond):
+			if time.Now().After(deadline) {
+				t.Fatal("the handler never started")
+			}
+			continue
+		}
+		break
+	}
+	for i := range 4 {
+		if err := b.Publish(context.Background(), "t", broker.Message{ID: "q-" + strconv.Itoa(i), Type: "t"}); err != nil {
+			t.Fatalf("Publish %d: %v", i, err)
+		}
+	}
+
+	cancel()
+	close(release)
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Subscribe did not return")
+	}
+
+	waitFor(t, &buf, "abandoned")
+	if logged := buf.String(); !strings.Contains(logged, "abandoned") {
+		t.Errorf("nothing said the queued messages were discarded:\n%s", logged)
+	}
+}
+
+func waitFor(t *testing.T, buf *syncBuffer, want string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for !strings.Contains(buf.String(), want) && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func awaitDelivery(t *testing.T, b *memory.Broker, ctx context.Context, handled <-chan struct{}) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if err := b.Publish(ctx, "t", broker.Message{ID: "probe", Type: "t"}); err != nil {
+			t.Fatalf("probe publish: %v", err)
+		}
+		select {
+		case <-handled:
+			return
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+	t.Fatal("the subscription never started delivering")
+}
+
+type syncBuffer struct {
+	mu sync.Mutex
+	b  strings.Builder
+}
+
+func (s *syncBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+
+func (s *syncBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.String()
 }

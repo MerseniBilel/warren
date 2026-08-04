@@ -173,14 +173,111 @@ func (r *MemoryRepository[T, K]) FindByID(ctx context.Context, id K) (T, error) 
 // materialising rows; the memory driver must do it deliberately, or every
 // caller shares one object and the "confined to one goroutine" contract
 // domain.AggregateRoot states becomes unkeepable through the repository.
+// copyAggregate returns a DEEP copy, so staged state and committed state
+// share no memory at all.
+//
+// A shallow copy — reflect.New plus Elem().Set — duplicates the struct and
+// aliases every slice, map and pointer inside it. That made the driver's own
+// promise false in the ordinary case: an aggregate with line items, mutated
+// inside a transaction that then failed, kept the mutation after the
+// rollback, and two concurrent readers saw each other's uncommitted edits.
+// An invoice with a []Line is the canonical aggregate, not an exotic one.
+//
+// The cost is confined to the in-process driver, which is dev/test grade and
+// already copies on every read and write; a real driver's isolation comes
+// from the database.
 func copyAggregate(v any) any {
 	rv := reflect.ValueOf(v)
 	if rv.Kind() != reflect.Pointer || rv.IsNil() {
 		return v
 	}
-	dup := reflect.New(rv.Type().Elem())
-	dup.Elem().Set(rv.Elem())
-	return dup.Interface()
+	return deepCopy(rv, map[uintptr]reflect.Value{}).Interface()
+}
+
+// deepCopy duplicates v. seen carries pointers already copied, so a cyclic
+// aggregate terminates and keeps its shape rather than recursing for ever.
+func deepCopy(v reflect.Value, seen map[uintptr]reflect.Value) reflect.Value {
+	switch v.Kind() {
+	case reflect.Pointer:
+		if v.IsNil() {
+			return v
+		}
+		if prev, ok := seen[v.Pointer()]; ok {
+			return prev
+		}
+		dup := reflect.New(v.Type().Elem())
+		seen[v.Pointer()] = dup
+		dup.Elem().Set(deepCopy(v.Elem(), seen))
+		return dup
+
+	case reflect.Slice:
+		if v.IsNil() {
+			return v
+		}
+		dup := reflect.MakeSlice(v.Type(), v.Len(), v.Cap())
+		for i := range v.Len() {
+			dup.Index(i).Set(deepCopy(v.Index(i), seen))
+		}
+		return dup
+
+	case reflect.Map:
+		if v.IsNil() {
+			return v
+		}
+		dup := reflect.MakeMapWithSize(v.Type(), v.Len())
+		iter := v.MapRange()
+		for iter.Next() {
+			dup.SetMapIndex(deepCopy(iter.Key(), seen), deepCopy(iter.Value(), seen))
+		}
+		return dup
+
+	case reflect.Array:
+		dup := reflect.New(v.Type()).Elem()
+		for i := range v.Len() {
+			dup.Index(i).Set(deepCopy(v.Index(i), seen))
+		}
+		return dup
+
+	case reflect.Interface:
+		if v.IsNil() {
+			return v
+		}
+		dup := reflect.New(v.Type()).Elem()
+		dup.Set(deepCopy(v.Elem(), seen))
+		return dup
+
+	case reflect.Struct:
+		dup := reflect.New(v.Type()).Elem()
+		for i := range v.NumField() {
+			// An unexported field cannot be Set through reflection. Copying
+			// the whole struct first means it keeps its shallow value —
+			// which is what it had before — and every exported field is then
+			// deep-copied over the top.
+			if !v.Type().Field(i).IsExported() {
+				continue
+			}
+			dup.Field(i).Set(deepCopy(v.Field(i), seen))
+		}
+		copyUnexported(dup, v)
+		return dup
+
+	default:
+		return v
+	}
+}
+
+// copyUnexported fills in the fields deepCopy could not Set, by copying the
+// whole struct value first and then leaving the deep-copied exported fields
+// in place. domain.AggregateRoot keeps its events this way.
+func copyUnexported(dst, src reflect.Value) {
+	shallow := reflect.New(src.Type()).Elem()
+	shallow.Set(src)
+	for i := range src.NumField() {
+		if src.Type().Field(i).IsExported() {
+			shallow.Field(i).Set(dst.Field(i))
+		}
+	}
+	dst.Set(shallow)
 }
 
 // Save stages the aggregate and enlists it, so its events reach the outbox

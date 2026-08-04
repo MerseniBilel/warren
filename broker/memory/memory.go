@@ -13,10 +13,13 @@ package memory
 
 import (
 	"context"
+	stderrors "errors"
+	"log/slog"
 	"sync"
 
 	"github.com/MerseniBilel/warren/broker"
 	"github.com/MerseniBilel/warren/errors"
+	"github.com/MerseniBilel/warren/log"
 )
 
 // Option configures the broker.
@@ -36,9 +39,26 @@ func WithBuffer(n int) Option {
 // usable; construct one with New. It is safe for concurrent use.
 type Broker struct {
 	buffer int
+	logger *slog.Logger
 
 	mu     sync.RWMutex
 	topics map[string][]*subscription
+}
+
+// WithLogger sets where a dropped disposition and an abandoned queue are
+// reported. The default is slog.Default() at the moment the record is
+// emitted, so an application that installs its handler in main is covered
+// without wiring anything.
+func WithLogger(l *slog.Logger) Option {
+	return func(b *Broker) { b.logger = l }
+}
+
+// at returns the logger to report through.
+func (b *Broker) at(ctx context.Context) *slog.Logger {
+	if b.logger != nil {
+		return b.logger
+	}
+	return log.FromContext(ctx)
 }
 
 // New returns an in-process broker.
@@ -94,7 +114,8 @@ func (b *Broker) Publish(ctx context.Context, topic string, msgs ...broker.Messa
 // time, in publish order. It blocks until ctx is cancelled, then returns
 // nil: the in-flight message finishes first, so a cancelled Subscribe is a
 // drain, not an abort. A handler error does not end the subscription — the
-// consumer chain owns dispositions.
+// consumer chain owns dispositions, and a disposition this driver cannot
+// honour is logged rather than dropped in silence.
 func (b *Broker) Subscribe(ctx context.Context, topic string, h broker.MessageHandler) error {
 	if h == nil {
 		panic("memory: Subscribe with a nil handler")
@@ -121,11 +142,69 @@ func (b *Broker) Subscribe(ctx context.Context, topic string, h broker.MessageHa
 	for {
 		select {
 		case msg := <-s.queue:
-			// The handler's error is the chain's business; the subscription
-			// survives it.
-			_ = h(ctx, msg)
+			// The handler's error is the chain's business and the
+			// subscription survives it — but it must not vanish.
+			//
+			// broker.DeadLetter nacks UNAVAILABLE on the stated grounds that
+			// "the broker redelivers". This driver does not: there is no
+			// durable log to re-read and no acknowledgement protocol. So an
+			// exhausted retry used to be neither handled, dead-lettered,
+			// redelivered nor logged — the silent loss warren.md §5 forbids.
+			//
+			// Whether an in-process broker SHOULD redeliver is a design
+			// decision with real consequences (a poison message would loop
+			// for ever). Saying so out loud is not.
+			if err := h(ctx, msg); err != nil {
+				b.at(ctx).ErrorContext(ctx, "message dropped: the in-process broker does not redeliver",
+					"topic", topic,
+					"message_id", msg.ID,
+					"code", string(codeOf(err)),
+					"error", err.Error())
+			}
 		case <-ctx.Done():
+			b.abandon(ctx, topic, s)
 			return nil
 		}
 	}
+}
+
+// abandon reports the messages still queued when the subscription's context
+// was cancelled.
+//
+// They are lost: this driver holds them in a channel, not on disk, so a
+// process that is going away takes them with it. What is fixable is the
+// silence — five messages published, one handled and four discarded used to
+// produce a shutdown log reading only "stopped".
+func (b *Broker) abandon(ctx context.Context, topic string, s *subscription) {
+	n := len(s.queue)
+	if n == 0 {
+		return
+	}
+	ids := make([]string, 0, n)
+	for range n {
+		select {
+		case msg := <-s.queue:
+			ids = append(ids, msg.ID)
+		default:
+		}
+	}
+	// The context is already cancelled, so this record is emitted against a
+	// background one: a cancelled ctx is not a reason to lose the report of
+	// what was lost.
+	b.at(ctx).ErrorContext(context.WithoutCancel(ctx),
+		"messages abandoned: the in-process broker holds its queue in memory",
+		"topic", topic,
+		"count", n,
+		"message_ids", ids)
+}
+
+// codeOf reads the OUTERMOST warren/errors code, which is the one an adapter
+// maps — wrapping is recategorization. An error from outside the vocabulary
+// is INTERNAL, the same default the §2.6 table uses.
+func codeOf(err error) errors.Code {
+	var e *errors.Error
+	if stderrors.As(err, &e) && e != nil {
+		return e.Code()
+	}
+	return errors.CodeInternal
 }

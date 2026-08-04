@@ -317,3 +317,109 @@ func TestCommitSinkMayUseTheUnitOfWork(t *testing.T) {
 		t.Errorf("the sink's write did not commit: %v", err)
 	}
 }
+
+// --- reference-typed fields ------------------------------------------------
+
+// lineItem makes the fixture aggregate look like a real one. An invoice with
+// line items, an order with lines, a cart with entries — a slice on the
+// aggregate is the canonical shape, not an exotic one.
+type lineItem struct {
+	SKU      string
+	Quantity int
+}
+
+type invoice struct {
+	domain.AggregateRoot[orderID]
+	Lines []lineItem
+	Meta  map[string]string
+}
+
+func newInvoice(id orderID) *invoice {
+	return &invoice{
+		AggregateRoot: domain.NewAggregateRoot(id),
+		Lines:         []lineItem{{SKU: "a", Quantity: 2}},
+		Meta:          map[string]string{"channel": "web"},
+	}
+}
+
+var _ domain.Aggregate = (*invoice)(nil)
+
+// TestRollbackDoesNotReachThroughAReferenceField — MemoryUnitOfWork's doc
+// promises "a rolled-back transaction leaves the committed aggregate
+// untouched". The staging copy was SHALLOW (reflect.New + Elem().Set), so
+// every slice, map and pointer field was shared with committed state: a
+// transaction that returned an error still rewrote what it had mutated
+// through the alias, and the invoice total was silently wrong afterwards.
+func TestRollbackDoesNotReachThroughAReferenceField(t *testing.T) {
+	t.Parallel()
+
+	uow := persistence.NewMemoryUnitOfWork()
+	repo := persistence.NewMemoryRepository[*invoice, orderID](uow)
+	ctx := context.Background()
+
+	if err := uow.Do(ctx, func(ctx context.Context) error {
+		return repo.Save(ctx, newInvoice("inv-1"))
+	}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	boom := stderrors.New("rolled back")
+	err := uow.Do(ctx, func(ctx context.Context) error {
+		got, ferr := repo.FindByID(ctx, "inv-1")
+		if ferr != nil {
+			return ferr
+		}
+		got.Lines[0].Quantity = 999
+		got.Meta["channel"] = "tampered"
+		got.Lines = append(got.Lines, lineItem{SKU: "b", Quantity: 1})
+		return boom
+	})
+	if !stderrors.Is(err, boom) {
+		t.Fatalf("Do = %v, want the rolled-back error", err)
+	}
+
+	after, err := repo.FindByID(ctx, "inv-1")
+	if err != nil {
+		t.Fatalf("FindByID after rollback: %v", err)
+	}
+	if got := after.Lines[0].Quantity; got != 2 {
+		t.Errorf("committed line quantity = %d, want 2 — the rollback reached through the shared slice", got)
+	}
+	if got := after.Meta["channel"]; got != "web" {
+		t.Errorf("committed meta = %q, want %q — the rollback reached through the shared map", got, "web")
+	}
+	if len(after.Lines) != 1 {
+		t.Errorf("committed line count = %d, want 1", len(after.Lines))
+	}
+}
+
+// TestTwoReadersDoNotShareMutableState — the same aliasing let one
+// transaction observe another's uncommitted edits, which contradicts the
+// isolation the driver's own comment claims.
+func TestTwoReadersDoNotShareMutableState(t *testing.T) {
+	t.Parallel()
+
+	uow := persistence.NewMemoryUnitOfWork()
+	repo := persistence.NewMemoryRepository[*invoice, orderID](uow)
+	ctx := context.Background()
+
+	if err := uow.Do(ctx, func(ctx context.Context) error {
+		return repo.Save(ctx, newInvoice("inv-2"))
+	}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	first, err := repo.FindByID(ctx, "inv-2")
+	if err != nil {
+		t.Fatalf("first read: %v", err)
+	}
+	first.Lines[0].Quantity = 42
+
+	second, err := repo.FindByID(ctx, "inv-2")
+	if err != nil {
+		t.Fatalf("second read: %v", err)
+	}
+	if got := second.Lines[0].Quantity; got != 2 {
+		t.Errorf("second reader saw %d, want 2 — the two reads share one backing array", got)
+	}
+}
