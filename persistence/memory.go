@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"reflect"
+	"strings"
 	"sync"
 
 	"github.com/MerseniBilel/warren/domain"
@@ -208,15 +209,39 @@ func currentVersion(v any) int64 {
 // MemoryRepository is the in-process Repository for one aggregate type. Its
 // Save calls Track, as the port's contract requires.
 type MemoryRepository[T domain.Root[K], K domain.ID] struct {
-	uow  *MemoryUnitOfWork
-	kind string
+	uow      *MemoryUnitOfWork
+	kind     string // key namespace: fully qualified, never shown
+	resource string // NOT_FOUND's noun: what a client is allowed to read
 }
 
 // NewMemoryRepository returns an in-process Repository backed by uow.
 func NewMemoryRepository[T domain.Root[K], K domain.ID](uow *MemoryUnitOfWork) *MemoryRepository[T, K] {
 	// The type name namespaces the keys, so two aggregate types sharing an
-	// identifier value do not collide.
-	return &MemoryRepository[T, K]{uow: uow, kind: reflect.TypeFor[T]().String()}
+	// identifier value do not collide. It must stay fully qualified for that
+	// — and must never be the string a 404 body carries, which is why the
+	// resource noun is derived separately.
+	t := reflect.TypeFor[T]()
+	return &MemoryRepository[T, K]{uow: uow, kind: t.String(), resource: resourceName(t)}
+}
+
+// resourceName renders an aggregate type as the noun an API client sees:
+// *domain.Invoice becomes "invoice". The memory driver is what `warren new`
+// wires, so this string ships in every new application's 404 bodies — and
+// "*domain.Invoice inv-1 not found" tells a caller the package layout, the
+// Go type name, and that the aggregate is held by pointer. It matches the
+// convention hand-written repositories already follow: errors.NotFound(
+// "invoice", id).
+func resourceName(t reflect.Type) string {
+	for t.Kind() == reflect.Pointer {
+		t = t.Elem()
+	}
+	name := t.Name()
+	if name == "" {
+		// An unnamed type has nothing safe to say; the code alone will have
+		// to do.
+		return "resource"
+	}
+	return strings.ToLower(name)
 }
 
 func (r *MemoryRepository[T, K]) key(id K) string { return r.kind + "/" + id.String() }
@@ -232,7 +257,7 @@ func (r *MemoryRepository[T, K]) FindByID(ctx context.Context, id K) (T, error) 
 		s.mu.Lock()
 		if s.deletes[k] {
 			s.mu.Unlock()
-			return zero, errors.NotFound(r.kind, id)
+			return zero, errors.NotFound(r.resource, id)
 		}
 		if v, ok := s.puts[k]; ok {
 			s.mu.Unlock()
@@ -247,7 +272,7 @@ func (r *MemoryRepository[T, K]) FindByID(ctx context.Context, id K) (T, error) 
 	defer r.uow.mu.Unlock()
 	v, ok := r.uow.entities[k]
 	if !ok {
-		return zero, errors.NotFound(r.kind, id)
+		return zero, errors.NotFound(r.resource, id)
 	}
 	return copyAggregate(v).(T), nil
 }

@@ -563,3 +563,66 @@ func TestSavingAnAggregateWithNoIDIsRefused(t *testing.T) {
 		t.Errorf("Save outside a transaction = %v, want INVALID", err)
 	}
 }
+
+// TestNotFoundDoesNotLeakTheGoTypeName — the memory driver is what `warren
+// new` wires, so its NotFound message is the one every new application ships
+// to its clients. It namespaced its keys with reflect.TypeFor[T]().String()
+// and then reused that string as the error's resource, so a 404 body read
+//
+//	{"error":{"code":"NOT_FOUND","message":"*persistence_test.order o-1 not found"}}
+//
+// which tells a client the aggregate's Go package, its Go type name, and that
+// it is held by pointer. The hand-written convention — and the one the
+// postgres adapter's own doc comment shows — is errors.NotFound("order", id).
+// Keys still need the fully qualified name; the message does not.
+func TestNotFoundDoesNotLeakTheGoTypeName(t *testing.T) {
+	t.Parallel()
+
+	uow := persistence.NewMemoryUnitOfWork()
+	repo := persistence.NewMemoryRepository[*order, orderID](uow)
+
+	_, err := repo.FindByID(context.Background(), "o-1")
+	if !werrors.Is(err, werrors.CodeNotFound) {
+		t.Fatalf("FindByID of an absent aggregate = %v, want NOT_FOUND", err)
+	}
+	// Message is what the transport puts in the response body.
+	var werr *werrors.Error
+	if !stderrors.As(err, &werr) {
+		t.Fatalf("FindByID error is not a *errors.Error: %T", err)
+	}
+	msg := werr.Message()
+	for _, leak := range []string{"*", "persistence_test", "."} {
+		if strings.Contains(msg, leak) {
+			t.Errorf("the 404 body leaks the Go type (%q): %q", leak, msg)
+		}
+	}
+	if msg != "order o-1 not found" {
+		t.Errorf("FindByID message = %q, want %q", msg, "order o-1 not found")
+	}
+}
+
+// TestTwoAggregateTypesWithOneIDDoNotCollide — the resource noun in the
+// message is now a different string from the key prefix, so the property the
+// key prefix exists for needs its own test.
+func TestTwoAggregateTypesWithOneIDDoNotCollide(t *testing.T) {
+	t.Parallel()
+
+	uow := persistence.NewMemoryUnitOfWork()
+	orders := persistence.NewMemoryRepository[*order, orderID](uow)
+	invoices := persistence.NewMemoryRepository[*invoice, orderID](uow)
+	ctx := context.Background()
+
+	if err := uow.Do(ctx, func(ctx context.Context) error {
+		return orders.Save(ctx, newOrder("shared-1", 7))
+	}); err != nil {
+		t.Fatalf("saving the order: %v", err)
+	}
+
+	// Same identifier value, different aggregate type: still absent.
+	if _, err := invoices.FindByID(ctx, "shared-1"); !werrors.Is(err, werrors.CodeNotFound) {
+		t.Fatalf("an invoice resolved from an order's key = %v, want NOT_FOUND", err)
+	}
+	if _, err := orders.FindByID(ctx, "shared-1"); err != nil {
+		t.Fatalf("the order itself no longer loads: %v", err)
+	}
+}
