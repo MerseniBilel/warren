@@ -691,13 +691,29 @@ stays the standard library (see §6.1).
 | `CONFLICT` | 409 | `AlreadyExists` | ack (idempotent replay) |
 | `UNAUTHENTICATED` | 401 | `Unauthenticated` | → DLQ (never retry) |
 | `PERMISSION_DENIED` | 403 | `PermissionDenied` | → DLQ (never retry) |
-| `UNAVAILABLE` | 503 | `Unavailable` | nack + backoff retry |
+| `UNAVAILABLE` | 503 | `Unavailable` | nack + backoff retry (see below) |
 | `INTERNAL` | 500 | `Internal` | nack + retry, then DLQ |
 
 This table is why domain code can return `errors.Conflict(...)` and never import `net/http`.
 
 A `Code` the table does not list is treated by every adapter as `INTERNAL` —
 the safe default for the unknown: 500, `Internal`, nack + retry, then DLQ.
+
+**`UNAVAILABLE`'s "nack + backoff retry" rests on a premise: that nacking
+returns the message.** A broker with a durable log and an acknowledgement
+protocol redelivers, so a nack is lossless and a DLQ would turn a transient
+blip into a queue of messages that would have succeeded on the next attempt.
+An in-process broker has neither — a nack there is a DROP, which made
+`UNAVAILABLE`, the code that means "try again", the ONLY lossy one while
+`INVALID` and `INTERNAL` were preserved. So the driver declares the premise
+(`broker.Redeliverer`), and when it does not hold, an `UNAVAILABLE` whose
+local retry budget is spent is dead-lettered instead: a DLQ entry is
+inspectable and replayable, which "gone" is not. A driver that does not
+implement `Redeliverer` is assumed to redeliver, so every durable broker keeps
+the row exactly as written. Every decorator in `broker/` forwards it — one
+that swallows it would restore the drop in the configuration the scaffold
+ships, since `platform` hands the pipeline a `Correlating` publisher and never
+the raw broker.
 
 **Why the two auth codes dead-letter rather than retry or ack.** The message
 won't get a better token by waiting — retrying an expired credential just burns

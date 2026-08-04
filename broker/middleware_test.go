@@ -809,3 +809,121 @@ func TestNonPositiveDedupeTTLPanics(t *testing.T) {
 		}()
 	}
 }
+
+// nonRedelivering is a Publisher that also declares it will not redeliver a
+// nacked message — the shape broker/memory has.
+type nonRedelivering struct {
+	mu   sync.Mutex
+	sent map[string][]broker.Message
+}
+
+func (p *nonRedelivering) Publish(_ context.Context, topic string, msgs ...broker.Message) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.sent == nil {
+		p.sent = map[string][]broker.Message{}
+	}
+	p.sent[topic] = append(p.sent[topic], msgs...)
+	return nil
+}
+
+func (p *nonRedelivering) Redelivers() bool { return false }
+
+func (p *nonRedelivering) count(topic string) int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return len(p.sent[topic])
+}
+
+// TestExhaustedUnavailableIsDeadLetteredOnANonRedeliveringBroker — field test
+// #4, defect A3. §2.6 says the consumer disposition for UNAVAILABLE is "nack
+// + backoff retry" with no DLQ, and that is right — but it rests on a
+// PREMISE: that nacking returns the message to the broker for another
+// attempt. An in-process broker has no durable log and no acknowledgement
+// protocol, so a nack there is a drop.
+//
+// The result was that UNAVAILABLE — the TRANSIENT code, the one that means
+// "try again" — was the only lossy one, while INVALID and INTERNAL were
+// preserved. A downstream unavailable for longer than the retry budget lost
+// the event permanently, in the driver every scaffolded app runs.
+func TestExhaustedUnavailableIsDeadLetteredOnANonRedeliveringBroker(t *testing.T) {
+	t.Parallel()
+
+	dlq := &nonRedelivering{}
+	attempts := 0
+	handle := func(context.Context, broker.Message) error {
+		attempts++
+		return werrors.Unavailable("downstream", stderrors.New("connection refused"))
+	}
+
+	pipeline, _ := broker.Pipeline("test.sub", "orders", handle,
+		inbox.NewMemoryStore(), dlq,
+		broker.WithRetry(broker.ExponentialBackoff(2)),
+	)
+
+	err := pipeline(context.Background(), broker.Message{ID: "m1", Type: "order.placed"})
+	if err != nil {
+		t.Errorf("the message was nacked back to a broker that cannot redeliver: %v", err)
+	}
+	if attempts < 2 {
+		t.Errorf("handler ran %d times; the retry budget was not spent first", attempts)
+	}
+	if n := dlq.count("orders.dlq"); n != 1 {
+		t.Errorf("dead-lettered %d messages, want 1 — the event was dropped", n)
+	}
+}
+
+// TestExhaustedUnavailableIsStillNackedOnARedeliveringBroker — the change
+// must not cost the case §2.6 was written for. A real broker redelivers, and
+// dead-lettering there would turn a transient blip into a DLQ full of
+// messages that would have succeeded on the next attempt.
+func TestExhaustedUnavailableIsStillNackedOnARedeliveringBroker(t *testing.T) {
+	t.Parallel()
+
+	dlq := &recordingPublisher{} // no Redelivers method: assumed to redeliver
+	handle := func(context.Context, broker.Message) error {
+		return werrors.Unavailable("downstream", stderrors.New("connection refused"))
+	}
+
+	pipeline, _ := broker.Pipeline("test.sub2", "orders", handle,
+		inbox.NewMemoryStore(), dlq,
+		broker.WithRetry(broker.ExponentialBackoff(2)),
+	)
+
+	err := pipeline(context.Background(), broker.Message{ID: "m2", Type: "order.placed"})
+	if !werrors.Is(err, werrors.CodeUnavailable) {
+		t.Errorf("err = %v, want UNAVAILABLE nacked back for redelivery", err)
+	}
+	if n := len(dlq.msgs); n != 0 {
+		t.Errorf("dead-lettered %d messages on a redelivering broker, want 0", n)
+	}
+}
+
+// TestWrappersDoNotHideNonRedelivery — the scaffold does not hand the raw
+// broker to Pipeline; it hands broker.Correlating(b). A wrapper that does not
+// forward Redelivers turns the driver's honest "I cannot redeliver" into the
+// default assumption that it can, and the fix above silently stops applying
+// in the only configuration that ships.
+//
+// This is the failure this test exists to catch, because everything still
+// compiles and every other test still passes.
+func TestWrappersDoNotHideNonRedelivery(t *testing.T) {
+	t.Parallel()
+
+	dlq := &nonRedelivering{}
+	handle := func(context.Context, broker.Message) error {
+		return werrors.Unavailable("downstream", stderrors.New("connection refused"))
+	}
+
+	// Exactly what platform hands Pipeline: never the raw broker.
+	pipeline, _ := broker.Pipeline("wrap.sub", "orders", handle,
+		inbox.NewMemoryStore(), broker.Correlating(dlq),
+		broker.WithRetry(broker.ExponentialBackoff(2)),
+	)
+	if err := pipeline(context.Background(), broker.Message{ID: "w1", Type: "order.placed"}); err != nil {
+		t.Errorf("Correlating hid the driver's non-redelivery; the message was nacked into nothing: %v", err)
+	}
+	if n := dlq.count("orders.dlq"); n != 1 {
+		t.Errorf("dead-lettered %d messages through a Correlating wrapper, want 1", n)
+	}
+}

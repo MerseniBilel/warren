@@ -431,6 +431,10 @@ func DeadLetter(pub Publisher, originTopic, dlqTopic string) Middleware {
 	if pub == nil {
 		panic("broker: DeadLetter composed with a nil publisher")
 	}
+	// Whether a nack is lossless is a property of the DRIVER, not of this
+	// code — see Redeliverer. Asked once, at composition time, because the
+	// answer cannot change while the process runs.
+	nackComesBack := redelivers(pub)
 	return func(next MessageHandler) MessageHandler {
 		return func(ctx context.Context, msg Message) error {
 			err := next(ctx, msg)
@@ -441,7 +445,17 @@ func DeadLetter(pub Publisher, originTopic, dlqTopic string) Middleware {
 			case errors.CodeNotFound, errors.CodeConflict:
 				return nil
 			case errors.CodeUnavailable:
-				return err
+				// Nack, so the broker brings it back — §2.6's disposition,
+				// and the right one whenever the premise holds.
+				//
+				// It does not hold on a broker that cannot redeliver, and
+				// there a nack is a silent drop. Once the local retry budget
+				// is spent there is nothing left to try, so the message is
+				// preserved instead: a DLQ entry is inspectable and
+				// replayable, which "gone" is not.
+				if nackComesBack || attemptsOf(err) <= 1 {
+					return err
+				}
 			}
 			// Terminal: INVALID, UNAUTHENTICATED, PERMISSION_DENIED,
 			// INTERNAL (retries exhausted), and every unknown code.

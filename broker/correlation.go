@@ -43,6 +43,16 @@ func Correlating(next Publisher) Publisher {
 
 type correlatingPublisher struct{ next Publisher }
 
+// Redelivers forwards the wrapped driver's answer.
+//
+// A decorator that swallows it is worse than one that never existed: the
+// driver says "I cannot redeliver", the wrapper reports the default "I can",
+// and DeadLetter nacks an exhausted message into nothing — in exactly the
+// configuration the scaffold ships, since platform hands Pipeline a
+// Correlating publisher and never the raw broker. Every decorator added to
+// this package has to forward it.
+func (p correlatingPublisher) Redelivers() bool { return redelivers(p.next) }
+
 func (p correlatingPublisher) Publish(ctx context.Context, topic string, msgs ...Message) error {
 	id := log.CorrelationID(ctx)
 	if id == "" {

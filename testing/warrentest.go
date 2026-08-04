@@ -222,6 +222,12 @@ func (r *Recorder) Publish(ctx context.Context, topic string, msgs ...broker.Mes
 	return r.inner.Publish(ctx, topic, msgs...)
 }
 
+// Redelivers forwards the wrapped broker's answer, so a module test sees the
+// same dead-letter behaviour the application will. Swallowing it would make
+// the harness disagree with production about whether an exhausted
+// UNAVAILABLE is preserved.
+func (r *Recorder) Redelivers() bool { return r.inner.Redelivers() }
+
 // Subscribe forwards to the in-process broker.
 func (r *Recorder) Subscribe(ctx context.Context, topic string, h broker.MessageHandler) error {
 	return r.inner.Subscribe(ctx, topic, h)

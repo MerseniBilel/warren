@@ -110,6 +110,18 @@ func (b *Broker) Publish(ctx context.Context, topic string, msgs ...broker.Messa
 	return nil
 }
 
+// Redelivers reports false: this driver holds messages in a channel, not on
+// disk, and has no acknowledgement protocol — so a nacked message does not
+// come back, it is simply gone.
+//
+// Saying so is what lets broker.DeadLetter preserve an exhausted UNAVAILABLE
+// here instead of nacking it into nothing. §2.6's "nack + backoff retry" for
+// UNAVAILABLE assumes the broker redelivers; this is the driver declaring it
+// does not, rather than the chain guessing.
+func (b *Broker) Redelivers() bool { return false }
+
+var _ broker.Redeliverer = (*Broker)(nil)
+
 // Subscribe registers h against topic and RETURNS ONCE IT IS LIVE — the
 // registration below happens before this function returns, so a Publish that
 // is ordered after it cannot miss the subscription. Delivery then runs in the

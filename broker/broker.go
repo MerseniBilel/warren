@@ -83,6 +83,34 @@ type Subscriber interface {
 	Subscribe(ctx context.Context, topic string, h MessageHandler) error
 }
 
+// Redeliverer is implemented by a driver that can say whether nacking a
+// message returns it for another attempt.
+//
+// warren.md §2.6 gives UNAVAILABLE the consumer disposition "nack + backoff
+// retry" and no dead-letter, which is right — but it rests on a PREMISE, and
+// the premise is this method. A broker with a durable log and an
+// acknowledgement protocol redelivers, so nacking is lossless and a DLQ
+// would turn a transient blip into a queue of messages that would have
+// succeeded. An in-process broker has neither, so a nack there is a DROP —
+// and UNAVAILABLE, the code that means "try again", became the only lossy
+// one while INVALID and INTERNAL were preserved.
+//
+// A driver that does not implement this is assumed to redeliver, which is
+// true of every durable broker and keeps the documented behaviour for them.
+type Redeliverer interface {
+	// Redelivers reports whether a nacked message comes back.
+	Redelivers() bool
+}
+
+// redelivers reports whether v is a driver that has declared it will not
+// redeliver. Anything else — including a plain Publisher — is assumed to.
+func redelivers(v any) bool {
+	if r, ok := v.(Redeliverer); ok {
+		return r.Redelivers()
+	}
+	return true
+}
+
 // MessageHandler processes one message. Returning nil acknowledges it;
 // returning an error hands it to the retry and dead-letter middleware, which
 // decide by the error's warren/errors code — the consumer column of the
