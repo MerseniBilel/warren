@@ -3,6 +3,7 @@ package outbox_test
 import (
 	"context"
 	stderrors "errors"
+	"log/slog"
 	"runtime"
 	"strings"
 	"sync"
@@ -448,4 +449,80 @@ func TestSinkBridgesPersistenceToTheOutbox(t *testing.T) {
 	if recs, _ := store.Pending(context.Background(), 10); len(recs) != 2 {
 		t.Error("an empty drain appended something")
 	}
+}
+
+// TestRelayRunReportsADrainFailure — Run's inner loop was
+// `if err != nil || n == 0 { break }`, so DrainOnce's error was discarded
+// and the loop went back to waiting. Warren writes one of its best
+// diagnostics when a record is parked — naming the record, the topic, the
+// key, the attempt count and the ordering consequence — and Run routed it
+// to nothing. The scaffolded platform module then swallows Run's own return
+// too, so in every new Warren app an event could be parked for ever with
+// nothing printed anywhere.
+func TestRelayRunReportsADrainFailure(t *testing.T) {
+	t.Parallel()
+
+	var buf syncBuffer
+	store := outbox.NewMemoryStore()
+	pub := &failingPublisher{}
+	relay := outbox.NewRelay(store, pub,
+		outbox.PollInterval(10*time.Millisecond),
+		outbox.Backoff(broker.ExponentialBackoff(1)),
+		outbox.ReportTo(slog.New(slog.NewJSONHandler(&buf, nil))),
+	)
+
+	if err := store.Append(context.Background(), outbox.Record{
+		Topic:   "orders",
+		Message: broker.Message{ID: "o-1", Key: "o-1", Payload: []byte(`{}`)},
+	}); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	done := make(chan struct{})
+	go func() { defer close(done); _ = relay.Run(ctx) }()
+
+	deadline := time.Now().Add(3 * time.Second)
+	for !strings.Contains(buf.String(), "parked") && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel()
+	<-done
+
+	// The whole parking diagnostic must survive the trip: the record, the
+	// topic, the key, and the ordering consequence a reader needs to act on.
+	logged := buf.String()
+	for _, want := range []string{"parked", "o-1", "orders", "out of order"} {
+		if !strings.Contains(logged, want) {
+			t.Errorf("the relay's report does not mention %q:\n%s", want, logged)
+		}
+	}
+}
+
+// failingPublisher refuses everything, which is what parks a record.
+type failingPublisher struct{}
+
+// Invalid, not Unavailable: UNAVAILABLE is transient and retries for ever
+// by design, so it never parks. A terminal code is what produces the parked
+// record — the diagnostic that used to be written and dropped.
+func (failingPublisher) Publish(context.Context, string, ...broker.Message) error {
+	return werrors.Invalid("topic", stderrors.New("no such topic"))
+}
+
+type syncBuffer struct {
+	mu sync.Mutex
+	b  strings.Builder
+}
+
+func (s *syncBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+
+func (s *syncBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.String()
 }

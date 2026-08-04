@@ -423,3 +423,81 @@ func TestTwoReadersDoNotShareMutableState(t *testing.T) {
 		t.Errorf("second reader saw %d, want 2 — the two reads share one backing array", got)
 	}
 }
+
+// TestUnsupportedTransactionOptionsAreRefused — warren.md §3.3 says "An
+// unsupported Option is INVALID, never a silent downgrade", and
+// MemoryUnitOfWork.Do contained `_ = Configure(opts...)` with the comment
+// "a real driver begins the transaction it describes". It described nothing:
+// a write inside persistence.ReadOnly() committed, and
+// Isolation(Serializable) was accepted by a driver that cannot detect a
+// write conflict at all.
+//
+// Refusing is the honest answer for the in-process driver. Claiming
+// Serializable while two concurrent writers both win would be worse than
+// refusing.
+func TestUnsupportedTransactionOptionsAreRefused(t *testing.T) {
+	t.Parallel()
+
+	uow := persistence.NewMemoryUnitOfWork()
+	ctx := context.Background()
+
+	err := uow.Do(ctx, func(context.Context) error { return nil },
+		persistence.Isolation(persistence.Serializable))
+	if !werrors.Is(err, werrors.CodeInvalid) {
+		t.Errorf("Isolation(Serializable) = %v, want INVALID — the in-process driver cannot honour it", err)
+	}
+	if err != nil && !strings.Contains(err.Error(), "serializable") {
+		t.Errorf("the diagnostic does not name the level asked for:\n%v", err)
+	}
+}
+
+// TestReadOnlyRefusesAWrite — persistence.ReadOnly() accepted a write and
+// committed it. A read-only transaction that commits is not a downgrade, it
+// is the opposite of what was asked for.
+func TestReadOnlyRefusesAWrite(t *testing.T) {
+	t.Parallel()
+
+	uow := persistence.NewMemoryUnitOfWork()
+	repo := persistence.NewMemoryRepository[*order, orderID](uow)
+	ctx := context.Background()
+
+	err := uow.Do(ctx, func(ctx context.Context) error {
+		return repo.Save(ctx, newOrder("ro-1", 1))
+	}, persistence.ReadOnly())
+	if !werrors.Is(err, werrors.CodeInvalid) {
+		t.Fatalf("a write inside ReadOnly() = %v, want INVALID", err)
+	}
+
+	// And it did not commit.
+	if _, ferr := repo.FindByID(ctx, "ro-1"); !werrors.Is(ferr, werrors.CodeNotFound) {
+		t.Errorf("FindByID = %v, want NOT_FOUND — the read-only transaction committed", ferr)
+	}
+}
+
+// TestAReadOnlyTransactionStillReads is the other half: refusing writes must
+// not refuse the thing read-only transactions exist for.
+func TestAReadOnlyTransactionStillReads(t *testing.T) {
+	t.Parallel()
+
+	uow := persistence.NewMemoryUnitOfWork()
+	repo := persistence.NewMemoryRepository[*order, orderID](uow)
+	ctx := context.Background()
+
+	if err := uow.Do(ctx, func(ctx context.Context) error {
+		return repo.Save(ctx, newOrder("ro-2", 7))
+	}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if err := uow.Do(ctx, func(ctx context.Context) error {
+		got, ferr := repo.FindByID(ctx, "ro-2")
+		if ferr != nil {
+			return ferr
+		}
+		if got.Total != 7 {
+			t.Errorf("Total = %d, want 7", got.Total)
+		}
+		return nil
+	}, persistence.ReadOnly()); err != nil {
+		t.Errorf("a read inside ReadOnly() was refused: %v", err)
+	}
+}

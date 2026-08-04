@@ -2,6 +2,7 @@ package persistence
 
 import (
 	"context"
+	"fmt"
 	"reflect"
 	"sync"
 
@@ -47,9 +48,10 @@ type stagingKey struct{}
 
 // staging is one transaction's pending writes and deletes.
 type staging struct {
-	mu      sync.Mutex
-	puts    map[string]any
-	deletes map[string]bool
+	mu       sync.Mutex
+	puts     map[string]any
+	deletes  map[string]bool
+	readOnly bool
 }
 
 // Do runs fn in a transaction. A nested call joins: it runs fn on the
@@ -63,8 +65,16 @@ func (u *MemoryUnitOfWork) Do(ctx context.Context, fn func(context.Context) erro
 		return fn(ctx)
 	}
 
-	_ = Configure(opts...) // a real driver begins the transaction it describes
-	s := &staging{puts: map[string]any{}, deletes: map[string]bool{}}
+	// The options are HONOURED or REFUSED, never parsed and discarded.
+	// warren.md §3.3: an unsupported Option is INVALID, never a silent
+	// downgrade — and this line used to be `_ = Configure(opts...)`, so a
+	// write inside ReadOnly() committed and Isolation(Serializable) was
+	// accepted by a driver that cannot detect a write conflict at all.
+	tx := Configure(opts...)
+	if tx.Isolation != "" {
+		return errUnsupportedIsolation(tx.Isolation)
+	}
+	s := &staging{puts: map[string]any{}, deletes: map[string]bool{}, readOnly: tx.ReadOnly}
 	txCtx := context.WithValue(ctx, stagingKey{}, s)
 	txCtx, drain := Collect(txCtx)
 
@@ -287,6 +297,9 @@ func (r *MemoryRepository[T, K]) Save(ctx context.Context, root T) error {
 
 	k := r.key(root.ID())
 	if s, ok := ctx.Value(stagingKey{}).(*staging); ok {
+		if s.readOnly {
+			return errReadOnlyWrite("Save")
+		}
 		s.mu.Lock()
 		s.puts[k] = root
 		delete(s.deletes, k)
@@ -305,6 +318,9 @@ func (r *MemoryRepository[T, K]) Save(ctx context.Context, root T) error {
 
 // Delete removes the aggregate, or returns CodeNotFound.
 func (r *MemoryRepository[T, K]) Delete(ctx context.Context, id K) error {
+	if s, ok := ctx.Value(stagingKey{}).(*staging); ok && s.readOnly {
+		return errReadOnlyWrite("Delete")
+	}
 	if _, err := r.FindByID(ctx, id); err != nil {
 		return err
 	}
@@ -320,4 +336,22 @@ func (r *MemoryRepository[T, K]) Delete(ctx context.Context, id K) error {
 	defer r.uow.mu.Unlock()
 	delete(r.uow.entities, k)
 	return nil
+}
+
+// errUnsupportedIsolation refuses a level this driver cannot provide.
+//
+// It refuses rather than downgrades because the downgrade would be a lie
+// with money attached: the in-process driver detects no write conflict at
+// all, so accepting Serializable would tell a caller their two concurrent
+// writers are ordered when both of them win.
+func errUnsupportedIsolation(level Level) error {
+	return errors.Invalid("isolation",
+		fmt.Errorf("the in-process driver cannot honour %s: it stages writes behind a mutex and detects no write conflict, so accepting the level would be a silent downgrade. Use a real driver, or drop the option", level))
+}
+
+// errReadOnlyWrite refuses a write in a transaction the caller declared
+// read-only — which used to commit.
+func errReadOnlyWrite(op string) error {
+	return errors.Invalid("read-only transaction",
+		fmt.Errorf("%s was called inside persistence.ReadOnly(): a read-only transaction that writes is not a downgrade, it is the opposite of what was asked for", op))
 }

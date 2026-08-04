@@ -8,6 +8,7 @@ package platform
 
 import (
 	"context"
+	"log/slog"
 	"sync"
 
 	"github.com/MerseniBilel/warren"
@@ -110,7 +111,19 @@ func newRelay(
 	ctx, cancel := context.WithCancel(context.Background())
 	lc.Append(lifecycle.Hook{
 		Name:    "outbox relay",
-		OnStart: func(context.Context) error { go func() { _ = relay.Run(ctx) }(); return nil },
+		OnStart: func(context.Context) error {
+			go func() {
+				// Reported, not discarded. The relay writes a detailed
+				// diagnostic when a record is PARKED — it names the record,
+				// the topic, the key and the fact that later records for
+				// that key are now out of order — and dropping Run's return
+				// here would be the second place that report went nowhere.
+				if err := relay.Run(ctx); err != nil {
+					slog.Default().Error("outbox relay stopped", "error", err)
+				}
+			}()
+			return nil
+		},
 		OnStop: func(c context.Context) error {
 			cancel()
 			return relay.Flush(c)

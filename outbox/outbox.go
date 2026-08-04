@@ -16,12 +16,14 @@ import (
 	"encoding/json"
 	stderrors "errors"
 	"fmt"
+	"log/slog"
 	"strconv"
 	"sync"
 	"time"
 
 	"github.com/MerseniBilel/warren/app"
 	"github.com/MerseniBilel/warren/broker"
+	"github.com/MerseniBilel/warren/log"
 	"github.com/MerseniBilel/warren/domain"
 	"github.com/MerseniBilel/warren/errors"
 )
@@ -192,8 +194,27 @@ type Relay struct {
 	flush   time.Duration
 	elector Elector
 
+	report *slog.Logger
+
 	mu       sync.Mutex
 	attempts map[string]int
+}
+
+// ReportTo sets where the relay reports a drain it could not complete —
+// most importantly a PARKED record, whose diagnostic names the record, the
+// topic, the key, the attempt count, and the fact that later records for
+// that key are now out of order.
+//
+// It exists because Run used to discard that error. Its inner loop was
+// `if err != nil || n == 0 { break }`, so the best diagnostic in the
+// package was written and then dropped, and the scaffolded platform module
+// swallows Run's own return as well. The net effect in every new Warren app
+// was an event parked for ever with nothing printed anywhere.
+//
+// The default is slog.Default() at emit time, so an application that
+// installs its handler in main is covered without wiring anything.
+func ReportTo(l *slog.Logger) RelayOption {
+	return func(r *Relay) { r.report = l }
 }
 
 // RelayOption configures a Relay.
@@ -239,6 +260,14 @@ func BatchSize(n int) RelayOption {
 // ExponentialBackoff(10).
 func Backoff(p app.RetryPolicy) RelayOption {
 	return func(r *Relay) { r.backoff = p }
+}
+
+// reporter returns the logger to report through.
+func (r *Relay) reporter(ctx context.Context) *slog.Logger {
+	if r.report != nil {
+		return r.report
+	}
+	return log.FromContext(ctx)
 }
 
 // NewRelay returns a relay over store and pub.
@@ -301,7 +330,17 @@ func (r *Relay) Run(ctx context.Context) error {
 			// Drain everything currently pending, not just one batch.
 			for {
 				n, err := r.DrainOnce(ctx)
-				if err != nil || n == 0 {
+				if err != nil {
+					// Reported, not returned: one unpublishable record must
+					// not stop the relay, and silence is what let a parked
+					// record go unnoticed for ever. ctx cancellation during
+					// shutdown is the loop ending, not a failure.
+					if ctx.Err() == nil {
+						r.reporter(ctx).ErrorContext(ctx, "outbox drain failed", "error", err.Error())
+					}
+					break
+				}
+				if n == 0 {
 					break
 				}
 			}
