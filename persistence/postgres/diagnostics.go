@@ -107,9 +107,10 @@ func errCannotConnect(dsn string, cause error) error {
 		"✗ cannot connect to postgres\n\n    %s\n    %v\n\n"+
 			"  The connection string parsed, so this is the database, the network,\n"+
 			"  or the credentials. Check that the server is reachable from here and\n"+
-			"  that the role exists:\n\n"+
-			"      psql '%s' -c 'select 1'",
-		redact(dsn), cause, redact(dsn)))
+			"  that the role exists — using the variable you set the DSN in, since\n"+
+			"  the one printed above has its password removed and would fail auth:\n\n"+
+			"      psql \"$DATABASE_URL\" -c 'select 1'",
+		redact(dsn), cause))
 }
 
 func errNotStarted() error {

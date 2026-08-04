@@ -308,7 +308,9 @@ func errCannotListen(addr string, cause error) error {
 	if errors.Is(cause, syscall.EADDRINUSE) {
 		hint = "  Another process is already listening there. Find it with:\n\n" +
 			"      lsof -nP -iTCP" + portOf(addr) + " -sTCP:LISTEN\n\n" +
-			"  or give this one a different port: http.Port(8081)."
+			"  or give this one a different port — the Port option of whichever\n" +
+			"  name you imported warren/transport/http under (`whttp` in a\n" +
+			"  scaffolded project, since `http` is taken by the standard library)."
 	} else if errors.Is(cause, syscall.EACCES) {
 		hint = "  Binding this port needs privileges the process does not have.\n" +
 			"  Ports below 1024 are restricted; use http.Port(8080) and map it\n" +

@@ -28,9 +28,10 @@
 
   The connection string parsed, so this is the database, the network,
   or the credentials. Check that the server is reachable from here and
-  that the role exists:
+  that the role exists — using the variable you set the DSN in, since
+  the one printed above has its password removed and would fail auth:
 
-      psql 'postgres://app:xxxxx@db:5432/app' -c 'select 1'
+      psql "$DATABASE_URL" -c 'select 1'
 
 ── not started
 ✗ postgres pool used before it was started
