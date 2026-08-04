@@ -1204,7 +1204,8 @@ func Named(name string) RouteOption
 
 type Invoker func(ctx context.Context, raw []byte) ([]byte, error)
 type Codec interface{ Name() string; Decode([]byte, any) error; Encode(any) ([]byte, error) }
-func JSON() Codec
+func JSON() Codec        // unknown members ignored — the default for HTTP and for events
+func StrictJSON() Codec  // rejects unknown members and trailing data; opt in per HTTP server
 
 type HTTPRoute struct { Verb, Pattern, Name string; Success int
     Guards []app.AuthorizationPolicy; Request, Response reflect.Type
@@ -1240,6 +1241,32 @@ and lives in an adapter module, so a core-built closure could never serve
 gRPC. Handing out a boot-time factory keeps the erasure — the part that needs
 `Req`/`Res` — in core where the type parameters exist, and the serialisation
 in the adapter where the driver is.
+
+**Unknown members are ignored, and that is a decision, not an oversight.** One
+`Codec` serves HTTP and events, and on the event path a decode failure is
+`INVALID` — §2.6's terminal row, dead-lettered without retry and paged on. A
+producer adding a field to an event payload is normal schema evolution, not a
+poison message, so a strict default would take out 100% of a consumer's
+traffic on an ordinary deploy. On the HTTP side the same leniency is what lets
+a client ship an additive change before the server, which is the property
+§1.3's drain ordering exists to protect. And the gRPC adapter (§4.2) is binary
+proto, whose wire format ignores unknown fields as a matter of specification —
+so a strict JSON default would give one handler two different acceptance sets
+across the two transports §3.5 registers it on.
+
+`StrictJSON()` exists for services whose HTTP clients are first-party and
+versioned in lockstep. It is installed per server with `http.Codec(...)`
+(§4.1), and there is deliberately no way to put it on the event path.
+`StrictJSON` also rejects trailing data after the JSON value: `json.Decoder`
+alone does NOT — it consumes the first value and discards the rest in silence,
+accepting `{"a":1} {"a":2}` where `json.Unmarshal` errors — so the obvious
+implementation of "strict" is laxer than the default it tightens. Measured on
+go1.26.3/darwin-arm64, the strict codec costs 3 allocations per request more
+than the default (20 against 17).
+
+The right fix for "clients cannot spell my field names" is a schema they are
+generated from — that is `warren/openapi` (§4.3), whose input, `HTTPRoute`'s
+`Request`/`Response` types, already ships.
 
 **Guards travel as data**, not composed into the closure, so a denial
 precedes the decoder: an unauthorized caller's malformed body is a 403, not a
@@ -1278,6 +1305,7 @@ func Addr(string) Option                                     // "127.0.0.1:8080"
 func Listener(net.Listener) Option                           // a test binding port 0; overrides both
 func Middleware(...func(http.Handler) http.Handler) Option   // stdlib signature
 func Handle(string, http.Handler) Option                     // pprof, static assets, webhooks
+func Codec(transport.Codec) Option                           // transport.JSON(); StrictJSON() rejects unknown members
 
 func ReadHeaderTimeout(time.Duration) Option                 // 10s — the Slowloris fix
 func ReadTimeout(time.Duration) Option                       // 30s
@@ -1305,7 +1333,11 @@ Measured on go1.26.3/darwin-arm64: **17 allocations** for a POST with a JSON
 body and a path and query parameter, asserted at a budget of 18 — 2 for
 `ServeMux` dispatch, 6 for the edge ring, the rest for the typed path of which
 ~7 are `encoding/json`. The same handler
-called directly allocates **0**. `TestAllocations` asserts the exact number.
+called directly allocates **0**. `TestAllocations` asserts the exact number,
+and it is asserted against the DEFAULT codec: `transport.StrictJSON()` costs 3
+more (20, budget 21), because `json.Decoder` has no `Reset` in `encoding/json`
+v1, so its reader and decoder are per-request and cannot be pooled the way the
+body buffer is. `TestStrictCodecAllocations` carries that number.
 
 **Usage**
 

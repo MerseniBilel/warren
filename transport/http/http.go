@@ -51,6 +51,7 @@ type config struct {
 	tls               *tls.Config
 	certFile, keyFile string
 	h2c               bool
+	codec             transport.Codec
 }
 
 type handleRoute struct {
@@ -69,6 +70,7 @@ func defaults() config {
 		maxBodyBytes:      1 << 20,
 		drainDelay:        5 * time.Second,
 		shutdownTimeout:   15 * time.Second,
+		codec:             transport.JSON(),
 	}
 }
 
@@ -221,5 +223,35 @@ func H2C() Option {
 func Handle(pattern string, h http.Handler) Option {
 	return Option{apply: func(c *config) {
 		c.extra = append(c.extra, handleRoute{pattern: pattern, handler: h})
+	}}
+}
+
+// Codec chooses the codec every typed route on this server decodes and
+// encodes with. The default is transport.JSON().
+//
+// The one Warren ships as an alternative is transport.StrictJSON(), which
+// rejects a body carrying a member the request type does not declare:
+//
+//	http.Server(http.Codec(transport.StrictJSON()))
+//
+// That is a decision about your API's compatibility policy, which is why it
+// is a line in main.go rather than a default. It costs 3 allocations per
+// request, and it means a client that adds a field before this server is
+// deployed gets a 400 rather than being ignored — right when every HTTP
+// client is first-party and versioned with the server, wrong when they are
+// not.
+//
+// It applies to HTTP routes only. The event path always decodes leniently
+// and there is no option here that changes it: a decode failure on a
+// consumer is INVALID, which dead-letters without retry, so a strict event
+// codec turns a producer's additive change into a dead-letter storm.
+//
+// A nil codec is ignored rather than installed, because a nil one would
+// panic on the first request instead of at boot.
+func Codec(c transport.Codec) Option {
+	return Option{apply: func(cfg *config) {
+		if c != nil {
+			cfg.codec = c
+		}
 	}}
 }

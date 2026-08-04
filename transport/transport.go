@@ -19,8 +19,10 @@
 package transport
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	stderrors "errors"
 	"fmt"
 	"reflect"
 	"runtime"
@@ -66,7 +68,21 @@ type Codec interface {
 	Encode(v any) ([]byte, error)
 }
 
-// JSON returns the standard-library codec.
+// JSON returns the standard-library codec. It is the default for HTTP and
+// the only codec on the event path.
+//
+// Unknown members are IGNORED, and that is a decision rather than an
+// oversight — warren.md §3.5 records the argument. In short: this same Codec
+// decodes events, where a decode failure is INVALID and §2.6 dead-letters
+// INVALID without retrying, so a producer adding a field to a payload would
+// take out 100% of a consumer's traffic; on the HTTP side leniency is what
+// lets a client ship an additive change before the server, which is the
+// property §1.3's drain ordering exists to protect; and the gRPC adapter is
+// binary proto, whose wire format ignores unknown fields as a matter of
+// specification, so a strict JSON default would give one handler two
+// acceptance sets across the two transports §3.5 registers it on.
+//
+// StrictJSON is the opt-in for services whose HTTP clients are first-party.
 func JSON() Codec { return jsonCodec{} }
 
 type jsonCodec struct{}
@@ -74,6 +90,58 @@ type jsonCodec struct{}
 func (jsonCodec) Name() string                    { return "application/json" }
 func (jsonCodec) Decode(data []byte, v any) error { return json.Unmarshal(data, v) }
 func (jsonCodec) Encode(v any) ([]byte, error)    { return json.Marshal(v) }
+
+// StrictJSON returns a codec that rejects a body carrying a member the target
+// type does not declare — so a misspelled field is a 400 naming it, not a 200
+// with that field left at its zero value.
+//
+// It is opt-in, installed per HTTP server with http.Codec, and there is
+// deliberately no way to put it on the event path. It costs 3 allocations per
+// request more than JSON: json.Decoder has no Reset in encoding/json v1, so
+// the reader and the decoder are both per-request. Measured on
+// go1.26.3/darwin-arm64; transport/http's allocation budget is asserted
+// against the DEFAULT codec, and this is why.
+//
+// Encoding is identical to JSON's. Strictness is a decode policy.
+func StrictJSON() Codec { return strictJSONCodec{} }
+
+type strictJSONCodec struct{}
+
+func (strictJSONCodec) Name() string { return "application/json" }
+
+func (strictJSONCodec) Encode(v any) ([]byte, error) { return json.Marshal(v) }
+
+// Decode rejects unknown members AND trailing data.
+//
+// The second half is not optional, and it is the reason this is not a
+// two-line function. json.Unmarshal refuses a body that carries anything
+// after the JSON value; json.Decoder.Decode does NOT — it consumes the first
+// value, returns nil, and discards the rest in silence. So the obvious
+// implementation of "strict" is laxer than the lenient codec it tightens:
+//
+//	body                              JSON()   Decoder alone   this
+//	{"email":"a"} {"email":"b"}       INVALID  accepted        INVALID
+//	{"email":"a"} garbage             INVALID  accepted        INVALID
+//	{"email":"a"}\n                   ok       ok              ok
+//
+// More reports whether another value follows, and it treats trailing
+// whitespace as the end — which is what every curl and every editor appends.
+func (strictJSONCodec) Decode(data []byte, v any) error {
+	d := json.NewDecoder(bytes.NewReader(data))
+	d.DisallowUnknownFields()
+	if err := d.Decode(v); err != nil {
+		return err
+	}
+	if d.More() {
+		return errTrailingData
+	}
+	return nil
+}
+
+// errTrailingData is a plain error: the invoker wraps whatever Decode returns
+// in errors.Invalid("body", err), so the code and the field are already
+// right and this only has to say what happened.
+var errTrailingData = stderrors.New("unexpected data after the JSON value")
 
 // Params carries path and query parameters. The adapter seeds them; the
 // route closure binds them into Req from `param:` and `query:` tags using

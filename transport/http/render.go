@@ -120,7 +120,9 @@ var bodyPool = sync.Pool{New: func() any { return new(bytes.Buffer) }}
 // success status. Everything except the body read happens inside the closure
 // the Builder froze at boot.
 func (s *server) typed(rt transport.HTTPRoute) http.Handler {
-	invoke := rt.Bind(transport.JSON())
+	// Bound once, at boot: the codec is frozen into the closure like
+	// everything else on this path, so choosing it costs nothing per request.
+	invoke := rt.Bind(s.cfg.codec)
 	guards := rt.Guards
 	success := rt.Success
 	limit := s.cfg.maxBodyBytes

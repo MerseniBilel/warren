@@ -749,7 +749,22 @@ scope. What genuinely remains:
    registered as eager singletons, but nothing stops a user appending a
    `lifecycle.Hook` later. A `lifecycle.Hook` phase field would enforce it —
    deferred, because it changes a kernel port.
-2. **Who chooses the HTTP `Codec`.** `HTTPRoute.Bind(Codec)` is a seam with
+2. ~~**Who chooses the HTTP `Codec`.**~~ **RESOLVED (2026-08-04)** — someone
+   asked. A field test reported that a misspelled body field is a silent 200,
+   and an architect ruling settled it: `transport.JSON()` stays lenient and
+   `transport.StrictJSON()` is the opt-in, installed per server with
+   `http.Codec(...)`. The default does NOT change, and the reasons are not
+   about cost: one `Codec` also decodes events, where `INVALID` dead-letters
+   without retry, so a strict default turns a producer's additive change into
+   a DLQ storm; the gRPC adapter is binary proto, which ignores unknown fields
+   by wire format, so a strict JSON default would give one handler two
+   acceptance sets; and leniency is what lets a client deploy an additive
+   change before the server. Verified along the way: the naive strict
+   implementation is LAXER than the lenient one — `json.Decoder.Decode`
+   accepts `{"a":1} {"a":2}` and `{"a":1} garbage`, both of which
+   `json.Unmarshal` rejects — so `StrictJSON` carries a `More()` framing
+   check. Measured cost 3 allocations; the committed budget for the default
+   path stayed at 18. Original text: `HTTPRoute.Bind(Codec)` is a seam with
    exactly one caller and no way for a user to supply a faster JSON codec per
    server. Deferred to whenever someone asks.
 3. **Per-prefix middleware.** Global-only in v0.1; `Guard` covers authorization

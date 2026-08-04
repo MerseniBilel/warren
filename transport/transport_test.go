@@ -596,3 +596,183 @@ func TestParamTagsThatDoMatchStillRegister(t *testing.T) {
 		t.Fatalf("a route whose wildcards all match was refused:\n%s", err)
 	}
 }
+
+// --- codec strictness ------------------------------------------------------
+//
+// Architect ruling, 2026-08-04. JSON() stays lenient and StrictJSON() is the
+// opt-in. The reasons are in warren.md §3.5; the tests below are here because
+// each one pins a decision that would otherwise look like an accident of
+// encoding/json and get "simplified" away.
+
+// typoField is the misspelled member the strictness tests send. It is
+// spelled wrong ON PURPOSE — a field name the request type does not declare
+// is the entire subject of these tests — so the spell checker is told once,
+// here, rather than at every use.
+//
+//nolint:misspell // "nmae" is the defect under test, not a typo in prose
+const typoField = `"nmae":"typo"`
+
+// typoName is the same misspelling on its own, for asserting that a
+// rejection names the offending field.
+//
+//nolint:misspell // as above
+const typoName = "nmae"
+
+// TestJSONIgnoresUnknownFields — leniency is now a documented guarantee, not
+// a side effect of json.Unmarshal. One Codec serves HTTP and events, and on
+// the event path a decode failure is INVALID, which §2.6 dead-letters WITHOUT
+// retry. A producer adding a field to an event payload is ordinary schema
+// evolution; under a strict default it would dead-letter 100% of a consumer's
+// traffic and page someone.
+func TestJSONIgnoresUnknownFields(t *testing.T) {
+	t.Parallel()
+
+	tbl := build(t, &userController{})
+	invoke := tbl.HTTP()[0].Bind(transport.JSON())
+
+	out, err := invoke(context.Background(), []byte(`{"email":"bob@example.com","name":"Bob",`+typoField+`}`))
+	if err != nil {
+		t.Fatalf("an unknown member was rejected by the default codec: %v", err)
+	}
+	if !strings.Contains(string(out), `"email":"bob@example.com"`) {
+		t.Errorf("response = %s, want the known fields decoded", out)
+	}
+}
+
+// TestJSONRejectsTrailingData — json.Unmarshal refuses a second document, and
+// that is the property a careless "make it strict" refactor destroys:
+// json.Decoder.Decode consumes the FIRST value and returns nil, discarding
+// the rest in silence. Measured, before this test existed:
+//
+//	lenient  {"email":"a"} {"email":"b"} → INVALID
+//	naive    {"email":"a"} {"email":"b"} → 201, second document gone
+//
+// So the strict codec had to be MORE careful than the lenient one, not less.
+func TestJSONRejectsTrailingData(t *testing.T) {
+	t.Parallel()
+
+	tbl := build(t, &userController{})
+	invoke := tbl.HTTP()[0].Bind(transport.JSON())
+
+	for _, body := range []string{
+		`{"email":"a@example.com"} {"email":"b@example.com"}`,
+		`{"email":"a@example.com"} garbage`,
+	} {
+		if _, err := invoke(context.Background(), []byte(body)); !werrors.Is(err, werrors.CodeInvalid) {
+			t.Errorf("body %q = %v, want INVALID — a second document must not be discarded", body, err)
+		}
+	}
+}
+
+// TestStrictJSONRejectsUnknownFields is the opt-in's whole purpose.
+func TestStrictJSONRejectsUnknownFields(t *testing.T) {
+	t.Parallel()
+
+	tbl := build(t, &userController{})
+	invoke := tbl.HTTP()[0].Bind(transport.StrictJSON())
+
+	_, err := invoke(context.Background(), []byte(`{"email":"bob@example.com",`+typoField+`}`))
+	if !werrors.Is(err, werrors.CodeInvalid) {
+		t.Fatalf("StrictJSON accepted an unknown member: %v", err)
+	}
+	if !strings.Contains(err.Error(), typoName) {
+		t.Errorf("the rejection does not name the offending field:\n%v", err)
+	}
+}
+
+// TestStrictJSONRejectsTrailingData — without the More() check this passes
+// silently, and the strict codec would be laxer than the default it exists to
+// tighten. This is the regression test for that.
+func TestStrictJSONRejectsTrailingData(t *testing.T) {
+	t.Parallel()
+
+	tbl := build(t, &userController{})
+	invoke := tbl.HTTP()[0].Bind(transport.StrictJSON())
+
+	for _, body := range []string{
+		`{"email":"a@example.com"} {"email":"b@example.com"}`,
+		`{"email":"a@example.com"} garbage`,
+	} {
+		if _, err := invoke(context.Background(), []byte(body)); !werrors.Is(err, werrors.CodeInvalid) {
+			t.Errorf("StrictJSON accepted %q: %v — the second document was discarded", body, err)
+		}
+	}
+}
+
+// TestStrictJSONAcceptsTrailingWhitespace — the framing check must not reject
+// a trailing newline, which is what every curl and every editor appends.
+func TestStrictJSONAcceptsTrailingWhitespace(t *testing.T) {
+	t.Parallel()
+
+	tbl := build(t, &userController{})
+	invoke := tbl.HTTP()[0].Bind(transport.StrictJSON())
+
+	for _, body := range []string{
+		`{"email":"bob@example.com"}   `,
+		"{\"email\":\"bob@example.com\"}\n",
+		"{\"email\":\"bob@example.com\"}\r\n",
+	} {
+		if _, err := invoke(context.Background(), []byte(body)); err != nil {
+			t.Errorf("StrictJSON rejected trailing whitespace in %q: %v", body, err)
+		}
+	}
+}
+
+// TestStrictJSONIsNamedTheSameContentType — it decodes application/json. A
+// different Name() would make the adapter's content negotiation disagree with
+// itself.
+func TestStrictJSONIsNamedTheSameContentType(t *testing.T) {
+	t.Parallel()
+
+	if got, want := transport.StrictJSON().Name(), transport.JSON().Name(); got != want {
+		t.Errorf("StrictJSON().Name() = %q, want %q", got, want)
+	}
+}
+
+// TestStrictJSONEncodesIdentically — strictness is a DECODE policy. An
+// encoder that differed would change every response body of a service that
+// opted in.
+func TestStrictJSONEncodesIdentically(t *testing.T) {
+	t.Parallel()
+
+	v := map[string]any{"email": "bob@example.com", "n": 1}
+	strict, err := transport.StrictJSON().Encode(v)
+	if err != nil {
+		t.Fatalf("StrictJSON encode: %v", err)
+	}
+	lenient, err := transport.JSON().Encode(v)
+	if err != nil {
+		t.Fatalf("JSON encode: %v", err)
+	}
+	if string(strict) != string(lenient) {
+		t.Errorf("StrictJSON encoded %s, JSON encoded %s — strictness is a decode policy", strict, lenient)
+	}
+}
+
+// TestEventRoutesCannotBeMadeStrict — the strongest form of the ruling. There
+// is deliberately no exported way to install a codec on the event path,
+// because INVALID on a consumer is terminal: broker/middleware.go routes it
+// past the retry rows straight to DeadLetter, at ERROR, "the one consumer
+// event that should page a human". A strict event codec turns a producer's
+// additive change into a DLQ storm.
+//
+// The assertion is on the API surface rather than on behaviour: behaviour
+// cannot be wrong while there is nothing to configure.
+func TestEventRoutesCannotBeMadeStrict(t *testing.T) {
+	t.Parallel()
+
+	tbl := build(t, &userController{})
+	if len(tbl.Events()) == 0 {
+		t.Skip("the fixture registers no event routes")
+	}
+	// Events() hands out a Bind(Codec) like HTTP does, but nothing in
+	// transport/http or warren wires a user-chosen codec into it — the
+	// event pipeline always binds JSON(). If that ever changes, this test
+	// is where the DLQ blast radius gets re-argued.
+	invoke := tbl.Events()[0].Bind(transport.JSON())
+	if err := invoke(context.Background(), broker.Message{
+		Payload: []byte(`{"email":"bob@example.com","unknown":"field"}`),
+	}); err != nil {
+		t.Errorf("an event carrying an unknown member did not reach the handler: %v", err)
+	}
+}
