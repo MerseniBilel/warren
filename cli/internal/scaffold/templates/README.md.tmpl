@@ -42,9 +42,18 @@ framework can detect surfaces at boot, never on request 1.
 go test -race ./...
 ```
 
+{{- if eq .DB "postgres" }}
+`internal/modules/user/module_test.go` boots the whole graph and drives the
+handler through `App.Invoke`, then asserts the event reached the broker
+through the outbox relay. It needs a database, so it SKIPS unless
+`{{.EnvPrefix}}_DATABASE_URL` is set — and it truncates the tables it uses
+first, because a test that shares a real database with the last run is a
+test that passes once.
+{{- else }}
 `internal/modules/user/module_test.go` boots the whole graph and drives the
 handler through `App.Invoke`, then asserts the event reached the broker
 through the outbox relay. No Docker, no network, no sleeps.
+{{- end }}
 
 ## What it serves
 
@@ -59,13 +68,30 @@ per-field `details`. None of that is code in this repository — it comes from
 the controller registering one route.
 
 ## What is not here yet
+{{- if eq .DB "postgres" }}
 
-**No gRPC adapter**, and no Postgres wiring: the repository is in-memory. To
-add Postgres, put `postgres.Module(postgres.DSN(cfg.DatabaseURL))` in
-`cmd/{{.Name}}/main.go` and follow the three repository rules in warren.md
-§6.1 — `RequireTx` first, `db(ctx)` for the handle, `persistence.Track` to
-enlist. Everything else works: use cases, the module graph, config, the
-transactional outbox, the consumer chain, health.
+**No gRPC adapter.** Postgres IS wired: `internal/platform/module.go`
+declares `Postgres()` with the outbox and inbox stores, the user repository
+is plain SQL, and `cmd/migrate` applies both schemas.
+
+A feature you add with `warren g` imports **two** platform modules —
+`platform.Module()` for the broker and the unit of work, and
+`platform.Postgres()` for `postgres.DB` and `inbox.Store`. `warren g
+repository --driver postgres` and `warren g consumer` add the second one for
+you. Exports name what a module PROVIDES, which is why `platform.Module()`
+cannot re-export the adapter's ports on your behalf.
+{{- else }}
+
+**No gRPC adapter**, and no Postgres wiring: the repository is in-memory.
+Scaffold with `warren new <name> --db postgres` to get it wired from the
+start — that writes the adapter module, a SQL repository, `cmd/migrate` and
+the first migration. Adding it by hand afterwards means removing the memory
+unit of work and the memory outbox and inbox stores as well, or the boot
+fails with an ambiguous binding.
+
+Everything else works: use cases, the module graph, config, the transactional
+outbox, the consumer chain, health.
+{{- end }}
 
 ## Layout
 

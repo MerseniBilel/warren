@@ -2,11 +2,17 @@ package user_test
 
 import (
 	"context"
+{{- if eq .DB "postgres" }}
+	"os"
+{{- end }}
 	"testing"
 	"time"
 
 	"github.com/MerseniBilel/warren/broker"
 	werrors "github.com/MerseniBilel/warren/errors"
+{{- if eq .DB "postgres" }}
+	"github.com/MerseniBilel/warren/persistence/postgres"
+{{- end }}
 	warrentest "github.com/MerseniBilel/warren/testing"
 
 	"{{.Module}}/internal/modules/user"
@@ -78,6 +84,57 @@ func TestInvalidEmailIsRejected(t *testing.T) {
 	_ = domain.UserID("")
 }
 
+{{- if eq .DB "postgres" }}
+// boot starts the feature. Its imports come with it — user imports platform,
+// which imports config and the postgres adapter — so the test names one
+// module and the harness swaps in the recording broker.
+//
+// Two things this has to do that a memory-driver test does not.
+//
+// It SKIPS without a database. `go test ./...` on a fresh checkout has to
+// pass, and a test that fails because you have not exported a DSN teaches
+// people to ignore red.
+//
+// And it TRUNCATES first. These tests share one real database, so without
+// this the second one to run finds the first one's user already registered
+// and fails on a duplicate — a test that passes exactly once, on an empty
+// database, and never again.
+func boot(t *testing.T) *warrentest.App {
+	t.Helper()
+	if os.Getenv("{{.EnvPrefix}}_DATABASE_URL") == "" {
+		t.Skip("{{.EnvPrefix}}_DATABASE_URL is not set; these tests need a database")
+	}
+	app := warrentest.NewModuleTest(t, user.Module(), warrentest.WithMemoryBroker())
+	reset(t, app)
+	return app
+}
+
+// reset empties what these tests write, so each run starts from the same
+// state. It goes through the application's own postgres.DB rather than
+// opening a second pool — no driver import in your test, and no second set
+// of connection settings to keep in step.
+//
+// DELETE, not TRUNCATE, and that matters. The app is ALREADY RUNNING by the
+// time this executes, and its outbox relay polls warren_outbox on an
+// interval. TRUNCATE needs ACCESS EXCLUSIVE, so it waits for the relay's
+// read to finish and the relay waits behind it — long enough that the first
+// test's event misses its deadline and the suite fails only on the runs
+// where there was data to clear. DELETE takes row locks and never fights it.
+func reset(t *testing.T, app *warrentest.App) {
+	t.Helper()
+	err := app.Warren().Invoke("user", func(db postgres.DB) {
+		ctx := context.Background()
+		for _, table := range []string{"users", "warren_outbox", "warren_inbox"} {
+			if _, execErr := db(ctx).Exec(ctx, "DELETE FROM "+table); execErr != nil {
+				t.Fatalf("clearing %s: %v — has `go run ./cmd/migrate` been run?", table, execErr)
+			}
+		}
+	})
+	if err != nil {
+		t.Fatalf("resolving postgres.DB: %v", err)
+	}
+}
+{{- else }}
 // boot starts the feature. Its imports come with it — user imports
 // platform, which imports config — so the test names one module and the
 // harness swaps in the recording broker.
@@ -85,6 +142,7 @@ func boot(t *testing.T) *warrentest.App {
 	t.Helper()
 	return warrentest.NewModuleTest(t, user.Module(), warrentest.WithMemoryBroker())
 }
+{{- end }}
 
 // waitFor spins on an observable condition — never a sleep.
 func waitFor(t *testing.T, cond func() bool, msg string) {

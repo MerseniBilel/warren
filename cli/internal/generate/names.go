@@ -61,7 +61,33 @@ func checkModuleName(name string) error {
 	if slices.Contains(goPredeclared, lower) {
 		return errShadowsPredeclared(lower)
 	}
+	if slices.Contains(scaffoldPackages, lower) {
+		return errScaffoldName(lower)
+	}
 	return nil
+}
+
+// scaffoldPackages are the names `warren new` already uses under internal/.
+// A feature module taking one of them collides on the import IDENTIFIER in
+// main.go, not on the path — so the generator wrote the module, added the
+// import, silently skipped the registration, and left a project that does
+// not compile with no diagnostic anywhere:
+//
+//	cmd/app/main.go:19:2: platform redeclared in this block
+//	cmd/app/main.go:19:2: "…/internal/platform" imported and not used
+//
+// warren.NewModule("platform") would also be a duplicate module name at
+// boot, which is the second failure hiding behind the first.
+var scaffoldPackages = []string{"platform", "config"}
+
+func errScaffoldName(name string) error {
+	return diagnostic(fmt.Sprintf(
+		"✗ %q is already a package in this project\n\n"+
+			"    internal/%s is what `warren new` scaffolds, and a feature module\n"+
+			"    of the same name collides with it twice: main.go would import two\n"+
+			"    packages called %s, and the boot would see two modules named %q.\n\n"+
+			"  Name the feature for what it does — billing, catalog, notifications.",
+		name, name, name, name))
 }
 
 // checkTypeName validates the name of a generated aggregate, command or

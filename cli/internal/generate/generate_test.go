@@ -625,3 +625,195 @@ func TestAnUnrecognisedVerbKeepsTheLiteralPath(t *testing.T) {
 		t.Error("an unrecognised verb did not keep its literal path")
 	}
 }
+
+// --- field test #5 ----------------------------------------------------------
+
+// TestConsumerDerivesTheAggregateAcrossAParticle — field test #5, defect 4.
+// `warren g consumer notices CopyCheckedOut` generated
+//
+//	CopyCheckedID string `json:"copy_checked_id"`
+//
+// against an event whose payload is {"copy_id":...}. Every real message
+// dead-lettered: "the message carried no copy_checked_id".
+//
+// aggregateOf dropped ONE camel word, which is right for InvoiceCreated and
+// wrong for every two-word past participle — CheckedOut, SignedUp, ShippedOut,
+// RolledBack, PaidOff. The particle belongs to the verb, not to the aggregate.
+func TestConsumerDerivesTheAggregateAcrossAParticle(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct{ event, wantField, wantJSON string }{
+		{"CopyCheckedOut", "CopyID", "copy_id"},
+		{"UserSignedUp", "UserID", "user_id"},
+		{"PaymentRolledBack", "PaymentID", "payment_id"},
+		{"InvoiceCreated", "InvoiceID", "invoice_id"},
+		{"InvoicePDFGenerated", "InvoicePDFID", "invoice_pdf_id"},
+	} {
+		t.Run(tc.event, func(t *testing.T) {
+			t.Parallel()
+			dir := app(t)
+			if _, err := generate.Consumer(generate.Options{Dir: dir, Module: "user", Name: tc.event}); err != nil {
+				t.Fatalf("Consumer: %v", err)
+			}
+			src := read(t, dir, "internal/modules/user/application/on_"+snakeOf(tc.event)+".go")
+			if !strings.Contains(src, tc.wantField+" string") {
+				t.Errorf("%s: no field %q:\n%s", tc.event, tc.wantField, src)
+			}
+			if !strings.Contains(src, `json:"`+tc.wantJSON+`"`) {
+				t.Errorf("%s: json key is not %q:\n%s", tc.event, tc.wantJSON, src)
+			}
+		})
+	}
+}
+
+// TestPostgresRepositoryImportsTheAdapterModule — field test #5, defect 3.
+// `warren g repository --driver postgres` writes a constructor taking
+// postgres.DB and provides it, but only ever added platform.Module() to
+// Imports — never platform.Postgres(), which is the module that exports
+// postgres.DB. So every feature added to a --db postgres project built fine
+// and then failed the boot:
+//
+//	✗ cannot resolve dependency
+//	    postgres.DB └─ required by domain.BookRepository
+//
+// It happened on every module the tester created.
+func TestPostgresRepositoryImportsTheAdapterModule(t *testing.T) {
+	t.Parallel()
+
+	dir := pgApp(t)
+	if _, err := generate.Module(generate.Options{Dir: dir, Name: "catalog"}); err != nil {
+		t.Fatalf("g module: %v", err)
+	}
+	if _, err := generate.Entity(generate.Options{Dir: dir, Module: "catalog", Name: "Book"}); err != nil {
+		t.Fatalf("g entity: %v", err)
+	}
+	if _, err := generate.Repository(generate.Options{
+		Dir: dir, Module: "catalog", Name: "Book", Driver: "postgres",
+	}); err != nil {
+		t.Fatalf("g repository: %v", err)
+	}
+	src := read(t, dir, "internal/modules/catalog/module.go")
+	if !strings.Contains(src, "platform.Postgres()") {
+		t.Errorf("the module does not import the adapter that exports postgres.DB:\n%s", src)
+	}
+}
+
+// TestConsumerImportsTheAdapterModule — same defect, inbox.Store instead of
+// postgres.DB.
+func TestConsumerImportsTheAdapterModule(t *testing.T) {
+	t.Parallel()
+
+	dir := pgApp(t)
+	if _, err := generate.Module(generate.Options{Dir: dir, Name: "notices"}); err != nil {
+		t.Fatalf("g module: %v", err)
+	}
+	if _, err := generate.Consumer(generate.Options{Dir: dir, Module: "notices", Name: "BookCreated"}); err != nil {
+		t.Fatalf("g consumer: %v", err)
+	}
+	if src := read(t, dir, "internal/modules/notices/module.go"); !strings.Contains(src, "platform.Postgres()") {
+		t.Errorf("the consumer's module does not import the adapter that exports inbox.Store:\n%s", src)
+	}
+}
+
+// TestMemoryProjectDoesNotImportPostgres — the addition must be driven by
+// what the PROJECT has, not by the generator guessing.
+func TestMemoryProjectDoesNotImportPostgres(t *testing.T) {
+	t.Parallel()
+
+	dir := app(t)
+	if _, err := generate.Module(generate.Options{Dir: dir, Name: "catalog"}); err != nil {
+		t.Fatalf("g module: %v", err)
+	}
+	if _, err := generate.Consumer(generate.Options{Dir: dir, Module: "catalog", Name: "BookCreated"}); err != nil {
+		t.Fatalf("g consumer: %v", err)
+	}
+	if src := read(t, dir, "internal/modules/catalog/module.go"); strings.Contains(src, "platform.Postgres") {
+		t.Errorf("a memory project imported a postgres module that does not exist:\n%s", src)
+	}
+}
+
+// TestForceDoesNotAddASecondRoute — field test #5, defect 6, a regression
+// from --route. Re-running a --route'd command WITHOUT the flag re-derived
+// the path from the name and appended it, leaving a second, un-asked-for
+// public endpoint:
+//
+//	transport.Post(r, "/copies/{id}/checkout", c.checkoutCopy)
+//	transport.Post(r, "/checkout_copy", c.checkoutCopy)      ← new
+//
+// A route is identified by the HANDLER it serves, not by its path.
+func TestForceDoesNotAddASecondRoute(t *testing.T) {
+	t.Parallel()
+
+	dir := app(t)
+	if _, err := generate.Command(generate.Options{
+		Dir: dir, Module: "user", Name: "CheckoutCopy", Route: "/copies/{id}/checkout",
+	}); err != nil {
+		t.Fatalf("first: %v", err)
+	}
+	if _, err := generate.Command(generate.Options{
+		Dir: dir, Module: "user", Name: "CheckoutCopy", Force: true,
+	}); err != nil {
+		t.Fatalf("second --force: %v", err)
+	}
+	src := read(t, dir, "internal/modules/user/controller.go")
+	if n := strings.Count(src, "c.checkoutCopy)"); n != 1 {
+		t.Errorf("the handler is registered %d times, want 1:\n%s", n, src)
+	}
+	if strings.Contains(src, "/checkout_copy") {
+		t.Errorf("--force added a route nobody asked for:\n%s", src)
+	}
+}
+
+// TestReservedModuleNameIsRefused — field test #5, defect 5. `warren g module
+// platform` wrote a module named "platform", a duplicate of the scaffold's
+// own, added the import to main.go but NOT the registration, and reported no
+// main.go edit at all. The project then did not compile, with no Warren
+// diagnostic anywhere.
+func TestReservedModuleNameIsRefused(t *testing.T) {
+	t.Parallel()
+
+	for _, name := range []string{"platform", "config"} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			dir := app(t)
+			_, err := generate.Module(generate.Options{Dir: dir, Name: name})
+			if err == nil {
+				t.Fatalf("g module %s was accepted; it collides with the scaffold's own package", name)
+			}
+			if !strings.Contains(err.Error(), name) {
+				t.Errorf("the refusal does not name the collision:\n%v", err)
+			}
+		})
+	}
+}
+
+// pgApp scaffolds a --db postgres project to generate into.
+func pgApp(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	if err := scaffold.New(scaffold.Options{
+		Dir: dir, Name: "myapp", ModulePath: "example.com/myapp", Version: "v0.1.0", DB: "postgres",
+	}); err != nil {
+		t.Fatalf("scaffold: %v", err)
+	}
+	return dir
+}
+
+// snakeOf mirrors the generator's own file naming for the test's file lookup.
+func snakeOf(s string) string {
+	var b strings.Builder
+	for i, r := range s {
+		if i > 0 && r >= 'A' && r <= 'Z' {
+			prev := rune(s[i-1])
+			next := rune(0)
+			if i+1 < len(s) {
+				next = rune(s[i+1])
+			}
+			if prev < 'A' || prev > 'Z' || (next >= 'a' && next <= 'z') {
+				b.WriteByte('_')
+			}
+		}
+		b.WriteRune(r)
+	}
+	return strings.ToLower(b.String())
+}

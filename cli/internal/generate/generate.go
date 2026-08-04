@@ -201,6 +201,11 @@ func Repository(opts Options) (string, error) {
 		}}},
 	}
 	if driver == "postgres" {
+		// The generated repository injects postgres.DB, which only the
+		// adapter module exports.
+		if hasPlatformPostgres(opts.Dir) {
+			p.edits = append(p.edits, importAdapter(data, base))
+		}
 		// The table is the user's to own, so it goes in the project's own
 		// migration directory rather than being invented at boot — Warren
 		// never migrates from a lifecycle hook.
@@ -417,12 +422,54 @@ func Consumer(opts Options) (string, error) {
 			{base, []string{data["Lower"] + "Subscription", "new" + opts.Name + "Subscription"}},
 		},
 	}
+	// The generated subscription injects inbox.Store, which in a --db postgres
+	// project only the adapter module exports.
+	if hasPlatformPostgres(opts.Dir) {
+		p.edits = append(p.edits, importAdapter(data, base))
+	}
 	return p.apply()
 }
 
 // provide is the edit that adds a constructor to a module's provider list,
 // importing the layer it lives in. Both halves are one edit because either
 // alone leaves module.go uncompilable.
+// importAdapter adds platform.Postgres() to a module's warren.Imports.
+//
+// Field test #5: `g repository --driver postgres` wrote a constructor taking
+// postgres.DB and provided it, but only platform.Module() was ever imported —
+// and platform.Module() cannot re-export the adapter's ports, because Exports
+// name what a module PROVIDES. So every feature added to a --db postgres
+// project built cleanly and then failed the boot on "cannot resolve
+// dependency: postgres.DB". It happened on every module the tester created.
+//
+// Whether to add it is decided by what the PROJECT HAS, never by the
+// generator guessing: the symbol has to exist for the edit to compile, so
+// hasPlatformPostgres looks for its declaration.
+func importAdapter(data map[string]string, base string) edit {
+	return edit{
+		path: base + "/module.go",
+		what: "import platform.Postgres()",
+		fn: func(src []byte) ([]byte, error) {
+			out, err := astedit.AddImport(src, data["Module"]+"/internal/platform")
+			if err != nil {
+				return nil, err
+			}
+			return astedit.AddArgument(out, "warren.Imports", "platform.Postgres()")
+		},
+	}
+}
+
+// hasPlatformPostgres reports whether the project declares platform.Postgres
+// — i.e. whether it was scaffolded with --db postgres. A project without it
+// must not have the import added: the identifier would not resolve.
+func hasPlatformPostgres(dir string) bool {
+	src, err := os.ReadFile(filepath.Join(dir, "internal/platform/module.go"))
+	if err != nil {
+		return false
+	}
+	return strings.Contains(string(src), "var Postgres ")
+}
+
 func provide(data map[string]string, base, layer, ctor string) edit {
 	qualified := layer + "." + ctor
 	imported := data["Module"] + "/internal/modules/" + data["Feature"] + "/" + layer
@@ -459,7 +506,10 @@ func expose(data map[string]string, base string) edit {
 
 	return edit{
 		path: base + "/controller.go",
-		what: fmt.Sprintf("serve POST /%s from Controller.Register", data["Snake"]),
+		// data["Route"], not data["Snake"]: the report used to name the
+		// derived path while the edit wrote the real one, so --dry-run —
+		// whose ONLY output is this line — could not tell you the route.
+		what: fmt.Sprintf("serve POST %s from Controller.Register", data["Route"]),
 		fn: func(src []byte) ([]byte, error) {
 			for _, path := range []string{
 				"github.com/MerseniBilel/warren/app",
@@ -851,11 +901,32 @@ func render(name string, data map[string]string) ([]byte, error) {
 // invisible one — a key nothing publishes, decoding to "" for ever.
 func aggregateOf(event string) string {
 	words := camelWords(event)
+	// A verb PARTICLE belongs to the verb, not to the aggregate. Dropping one
+	// word turned CopyCheckedOut into "CopyChecked", so the generated
+	// consumer read {"copy_checked_id":...} from an event that publishes
+	// {"copy_id":...} and dead-lettered every real message. It is correct for
+	// InvoiceCreated and wrong for the entire class of two-word past
+	// participles, which includes the canonical checkout domain.
+	for len(words) > 2 && isParticle(words[len(words)-1]) {
+		words = words[:len(words)-1]
+	}
 	if len(words) < 2 {
 		return event
 	}
 	return strings.Join(words[:len(words)-1], "")
 }
+
+// particles are the adverbs English attaches to a verb to make a phrasal
+// one. The list is closed and short on purpose: a heuristic that guessed
+// would mis-split a legitimate aggregate name, and the generated file is a
+// starting point a reader can correct — whereas a wrong JSON key is
+// invisible until every message dead-letters.
+var particles = map[string]bool{
+	"Out": true, "Up": true, "Off": true, "Over": true, "Back": true,
+	"In": true, "Down": true, "Away": true, "Through": true, "Around": true,
+}
+
+func isParticle(word string) bool { return particles[word] }
 
 // camelWords splits a CamelCase identifier into its words, keeping runs of
 // upper-case letters together the way snake does ("InvoicePDFGenerated" is

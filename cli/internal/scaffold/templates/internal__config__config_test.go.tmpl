@@ -12,6 +12,11 @@ import (
 
 func TestDefaults(t *testing.T) {
 	t.Setenv("{{.EnvPrefix}}_NAME", "{{.Name}}")
+{{- if eq .DB "postgres" }}
+	// Required, so it has to be set for the OTHER defaults to be reachable.
+	// The value is never connected to here — Load only reads and validates.
+	t.Setenv("{{.EnvPrefix}}_DATABASE_URL", "postgres://localhost:5432/{{.Name}}?sslmode=disable")
+{{- end }}
 
 	cfg, err := wconfig.Load[config.Config](wconfig.WithEnvPrefix("{{.EnvPrefix}}"))
 	if err != nil {
@@ -23,6 +28,9 @@ func TestDefaults(t *testing.T) {
 }
 
 func TestNameIsRequired(t *testing.T) {
+{{- if eq .DB "postgres" }}
+	t.Setenv("{{.EnvPrefix}}_DATABASE_URL", "postgres://localhost:5432/{{.Name}}?sslmode=disable")
+{{- end }}
 	_, err := wconfig.Load[config.Config](wconfig.WithEnvPrefix("{{.EnvPrefix}}"))
 	if err == nil {
 		t.Fatal("Load succeeded without {{.EnvPrefix}}_NAME")

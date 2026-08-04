@@ -124,6 +124,21 @@ func AddStatement(src []byte, fn, stmt string) ([]byte, error) {
 	if strings.Contains(string(src), stmt) {
 		return src, nil
 	}
+	// A ROUTE is identified by the handler it serves, not by its path. Once
+	// `warren g command --route` existed, re-running the generator without
+	// the flag re-derived a different path for the same handler and appended
+	// it — leaving a second, un-asked-for public endpoint that nobody
+	// noticed:
+	//
+	//	transport.Post(r, "/copies/{id}/checkout", c.checkoutCopy)
+	//	transport.Post(r, "/checkout_copy", c.checkoutCopy)      ← new
+	//
+	// The path is the user's to choose and may well have been edited by
+	// hand; the handler reference is what says this registration already
+	// exists.
+	if ref, ok := handlerRef(stmt); ok && strings.Contains(string(src), ref) {
+		return src, nil
+	}
 
 	closing := fset.Position(decl.Body.Rbrace).Offset
 	indent := indentOf(src, closing) + "\t"
@@ -131,6 +146,25 @@ func AddStatement(src []byte, fn, stmt string) ([]byte, error) {
 		indent = indentOf(src, fset.Position(decl.Body.List[n-1].Pos()).Offset)
 	}
 	return splice(src, lineStart(src, closing), indent+stmt+"\n")
+}
+
+// handlerRef extracts the handler argument a route statement ends with —
+// "c.checkoutCopy)" from `transport.Post(r, "/x", c.checkoutCopy)`. It is
+// the part of the statement that identifies WHICH registration this is.
+func handlerRef(stmt string) (string, bool) {
+	close := strings.LastIndex(stmt, ")")
+	if close < 0 {
+		return "", false
+	}
+	comma := strings.LastIndex(stmt[:close], ",")
+	if comma < 0 {
+		return "", false
+	}
+	ref := strings.TrimSpace(stmt[comma+1 : close])
+	if ref == "" || !strings.HasPrefix(ref, "c.") {
+		return "", false
+	}
+	return ref + ")", true
 }
 
 func findStruct(f *ast.File, name string) (*ast.StructType, error) {
