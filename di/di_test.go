@@ -128,8 +128,13 @@ func TestEncapsulation(t *testing.T) {
 		if err == nil {
 			t.Fatal("Resolve without the bootstrapper's copy-in succeeded")
 		}
-		if !strings.Contains(err.Error(), `is exported by scope "user"`) {
+		if !strings.Contains(err.Error(), `is exported by module "user"`) {
 			t.Errorf("diagnostic does not point at the exported candidate:\n%s", err)
+		}
+		// Pointing at the candidate is half an answer; the reader still has to
+		// know that Imports is the word. Field-test defect B3.
+		if !strings.Contains(err.Error(), `warren.Imports(user.Module())`) {
+			t.Errorf("diagnostic does not say what to type:\n%s", err)
 		}
 	})
 
@@ -472,4 +477,113 @@ func TestExplain(t *testing.T) {
 			t.Errorf("rendering does not say the target is unresolvable:\n%s", r)
 		}
 	})
+}
+
+// TestForwardedBindingIsNeverACandidate covers field-test defect B3. A module
+// that imports an exported type gets a FORWARDER registered in its own scope.
+// A forwarder is not a place a user can add anything: telling a third module
+// to add warren.Exports there names a type that module does not provide, and
+// the suggested fix fails the boot. The origin provider is already in the
+// candidate list, so the forwarder must be dropped entirely.
+func TestForwardedBindingIsNeverACandidate(t *testing.T) {
+	t.Parallel()
+
+	root := di.New()
+	platform := root.Scope("platform")
+	billing := root.Scope("billing")
+	userScope := root.Scope("user")
+
+	if err := platform.Provide(postgres.NewUserRepository, di.Exported(), di.DeclaredAt("internal/platform/module.go", 20)); err != nil {
+		t.Fatalf("providing repository: %v", err)
+	}
+	// billing imports platform: the bootstrapper's forwarder, verbatim.
+	if err := billing.Provide(
+		func() domain.UserRepository { return nil },
+		di.Named(`domain.UserRepository (exported by module "platform")`),
+		di.ForwardedFrom("platform"),
+	); err != nil {
+		t.Fatalf("providing forwarder: %v", err)
+	}
+	// user does not import platform, so the repository is missing there.
+	if err := userScope.Provide(user.NewRegisterUserHandler, di.DeclaredAt("internal/modules/user/module.go", 12)); err != nil {
+		t.Fatalf("providing handler: %v", err)
+	}
+
+	err := root.Validate()
+	if err == nil {
+		t.Fatal("Validate() = nil though user cannot see the repository")
+	}
+	got := err.Error()
+	if strings.Contains(got, `scope "billing"`) {
+		t.Errorf("the forwarder in billing was offered as a candidate:\n%s", got)
+	}
+	// The forwarder's synthesized name is parenthesised — "domain.UserRepository
+	// (exported by module "platform")". The corrected diagnostic's own sentence
+	// uses the same words unparenthesised, so match the shape, not the phrase.
+	if strings.Contains(got, `(exported by module`) {
+		t.Errorf("a forwarder's synthesized name reached the diagnostic:\n%s", got)
+	}
+	if !strings.Contains(got, `warren.Imports(platform.Module())`) {
+		t.Errorf("diagnostic does not offer the real fix, warren.Imports:\n%s", got)
+	}
+	if !strings.Contains(got, "postgres.NewUserRepository") {
+		t.Errorf("diagnostic does not name the origin provider:\n%s", got)
+	}
+	assertNoDigLeak(t, err)
+}
+
+// TestExportedCandidateGoldenDiagnostic locks the second shape of the
+// missing-provider block: the type IS exported, by a module the asking one
+// does not import. warren.md §2.2 shows the not-exported shape; this is its
+// sibling, and the two fixes are different sentences.
+func TestExportedCandidateGoldenDiagnostic(t *testing.T) {
+	t.Parallel()
+
+	root := di.New()
+	platform := root.Scope("platform")
+	userScope := root.Scope("user")
+
+	if err := platform.Provide(postgres.NewUserRepository, di.Exported(), di.DeclaredAt("internal/platform/module.go", 20)); err != nil {
+		t.Fatalf("providing repository: %v", err)
+	}
+	if err := userScope.Provide(user.NewRegisterUserHandler, di.DeclaredAt("internal/modules/user/module.go", 12)); err != nil {
+		t.Fatalf("providing handler: %v", err)
+	}
+	if err := userScope.Provide(user.NewUserController, di.DeclaredAt("internal/modules/user/module.go", 14)); err != nil {
+		t.Fatalf("providing controller: %v", err)
+	}
+
+	err := root.Validate()
+	if err == nil {
+		t.Fatal("Validate() = nil though user does not import platform")
+	}
+	assertGolden(t, "missing_provider_exported", err.Error())
+	assertNoDigLeak(t, err)
+}
+
+// TestCandidateBulletsAreValidGo covers the third half of B3: every bullet
+// that tells the user what to type must be something they can actually type.
+func TestCandidateBulletsAreValidGo(t *testing.T) {
+	t.Parallel()
+
+	root, _, _ := section12Graph(t)
+	err := root.Validate()
+	if err == nil {
+		t.Fatal("Validate() = nil with the repository missing")
+	}
+	for line := range strings.SplitSeq(err.Error(), "\n") {
+		// Every "type this" line ends in a warren.X(...) call; the prose
+		// bullets above them do not.
+		_, expr, ok := strings.Cut(strings.TrimSpace(line), "warren.")
+		if !ok {
+			continue
+		}
+		expr = "warren." + expr
+		if strings.Contains(expr, `"`) {
+			t.Errorf("suggested fix is not valid Go, it carries a quoted scope name: %q", expr)
+		}
+		if strings.Contains(expr, " ") {
+			t.Errorf("suggested fix is not valid Go, it carries a bare space: %q", expr)
+		}
+	}
 }

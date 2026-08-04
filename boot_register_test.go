@@ -584,3 +584,56 @@ func (fixedPricing) Price() int { return 1 }
 type pricedController struct{ p pricing }
 
 func (*pricedController) Register(transport.Registrar) {}
+
+// newCatalogPricing is a package-level constructor so the diagnostic has a
+// real name to print. A literal closure would print as a file:line func, and
+// the point of this test is that SOME real name survives the nil-check
+// wrapper.
+func newCatalogPricing() pricing { return fixedPricing{} }
+
+// TestNilCheckedProviderKeepsItsName covers field-test defect B3's second
+// half. Every nilable-output constructor is wrapped in a reflect.MakeFunc so
+// a nil return fails the boot. A reflect.MakeFunc value's runtime name is the
+// assembly stub reflect.makeFuncStub — so without an explicit name, every
+// candidate line and every ambiguity in a real application named the stub
+// instead of the constructor the user wrote.
+func TestNilCheckedProviderKeepsItsName(t *testing.T) {
+	t.Parallel()
+
+	// platform provides the pricing but does not export it; catalog needs it.
+	platform := warren.NewModule("platform", warren.Providers(newCatalogPricing))
+	catalog := warren.NewModule("catalog",
+		warren.Controllers(func(p pricing) *pricedController { return &pricedController{p: p} }),
+	)
+	err := warren.New(platform, catalog).Start(context.Background())
+	if err == nil {
+		t.Fatal("catalog booted though it cannot see platform's pricing")
+	}
+	got := err.Error()
+	if strings.Contains(got, "makeFuncStub") {
+		t.Errorf("the nil-check wrapper's assembly stub reached the diagnostic:\n%s", got)
+	}
+	if !strings.Contains(got, "newCatalogPricing") {
+		t.Errorf("diagnostic does not name the constructor the user wrote:\n%s", got)
+	}
+}
+
+// TestNilProviderDiagnosticOffersOptional — a provider that returns nil ON
+// PURPOSE is a supported shape, and warren.Optional[T]() is how it is
+// declared. The boot error for an accidental nil is exactly where a reader
+// with a deliberate one will be looking.
+func TestNilProviderDiagnosticOffersOptional(t *testing.T) {
+	t.Parallel()
+
+	m := warren.NewModule("catalog",
+		warren.Providers(func() pricing { return nil }),
+		warren.Controllers(func(p pricing) *pricedController { return &pricedController{p: p} }),
+	)
+	err := warren.New(m).Start(context.Background())
+	if err == nil {
+		t.Fatal("a provider returning nil booted")
+	}
+	if !strings.Contains(err.Error(), "warren.Optional[warren_test.pricing]()") {
+		t.Errorf("the nil diagnostic never mentions the waiver for a deliberate nil:\n%s", err)
+	}
+}

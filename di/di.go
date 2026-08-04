@@ -51,9 +51,10 @@ type Container interface {
 type ProvideOption func(*provideOptions)
 
 type provideOptions struct {
-	exported bool
-	declared string
-	name     string
+	exported      bool
+	declared      string
+	name          string
+	forwardedFrom string
 }
 
 // Exported marks the binding as exported from its module: visible to the
@@ -80,6 +81,20 @@ func DeclaredAt(file string, line int) ProvideOption {
 // reflect.makeFuncStub.
 func Named(name string) ProvideOption {
 	return func(o *provideOptions) { o.name = name }
+}
+
+// ForwardedFrom marks a binding as a re-export of another scope's provider —
+// what the bootstrapper registers in an importing module's scope so the
+// imported type resolves there.
+//
+// Diagnostics need to tell the two apart. A forwarder is not a place a user
+// can add anything: the module it sits in does not provide the type, so
+// telling a third module to add warren.Exports there suggests a fix that
+// fails the boot. The origin provider is registered too, in the exporting
+// scope, so a forwarder is dropped from candidate lists entirely — and the
+// scope it names becomes the module the asking one should import.
+func ForwardedFrom(scope string) ProvideOption {
+	return func(o *provideOptions) { o.forwardedFrom = scope }
 }
 
 // Resolution is the result of Explain: how one target resolves from one

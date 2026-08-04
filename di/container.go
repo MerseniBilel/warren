@@ -23,13 +23,14 @@ type digScope interface {
 // Explain, and every diagnostic run off these records — dig is only asked to
 // construct, never to explain.
 type provider struct {
-	name     string // constructor as it prints: "postgres.NewUserRepository"
-	site     string // constructor's file:line
-	declared string // module declaration file:line, from DeclaredAt
-	exported bool
-	scope    *container
-	inputs   []reflect.Type
-	outputs  []reflect.Type
+	name      string // constructor as it prints: "postgres.NewUserRepository"
+	site      string // constructor's file:line
+	declared  string // module declaration file:line, from DeclaredAt
+	exported  bool
+	forwarded string // origin scope when this is a re-export, else empty
+	scope     *container
+	inputs    []reflect.Type
+	outputs   []reflect.Type
 }
 
 // primaryOutput is the type a provider is named by in a requirement chain.
@@ -86,11 +87,12 @@ func (c *container) Provide(constructor any, opts ...ProvideOption) error {
 		name = funcName(v)
 	}
 	p := &provider{
-		name:     name,
-		site:     funcSite(v),
-		declared: cfg.declared,
-		exported: cfg.exported,
-		scope:    c,
+		name:      name,
+		site:      funcSite(v),
+		declared:  cfg.declared,
+		exported:  cfg.exported,
+		forwarded: cfg.forwardedFrom,
+		scope:     c,
 	}
 	// A variadic constructor is provided with no variadic arguments — which
 	// is exactly how warren's own option-taking constructors (memory.New,
@@ -279,9 +281,14 @@ func (c *container) missing(t reflect.Type, requirer *provider) error {
 		}
 	}
 
+	// A forwarder is a re-export, not a provider a user wrote: its scope holds
+	// no constructor to export and its synthesized name is not valid Go. The
+	// origin is in this same list, registered in the exporting scope, so
+	// dropping forwarders loses nothing and stops the diagnostic suggesting a
+	// fix that fails the boot (field-test defect B3).
 	var candidates []candidate
 	for _, p := range c.root().subtreeProviders() {
-		if p.provides(t) {
+		if p.provides(t) && p.forwarded == "" {
 			candidates = append(candidates, candidate{provider: p.name, scope: p.scope.name, exported: p.exported})
 		}
 	}

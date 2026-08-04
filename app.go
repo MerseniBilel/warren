@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"reflect"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -169,6 +170,7 @@ func (a *App) Start(ctx context.Context) error {
 			for _, ctor := range group {
 				opts := []di.ProvideOption{di.DeclaredAt(splitSite(m.declared))}
 				exported := false
+				named := false
 				outs := outputsOf(ctor)
 				if sub, ok := a.replacementFor(outs); ok {
 					// A substituted provider is replaced wholesale: the
@@ -176,6 +178,7 @@ func (a *App) Start(ctx context.Context) error {
 					// never runs (so its own dependencies need not resolve).
 					ctor = constantProvider(sub.t, sub.value)
 					opts = append(opts, di.Named(sub.name()))
+					named = true
 					if sub.site != "" {
 						opts = append(opts, di.DeclaredAt(splitSite(sub.site)))
 					}
@@ -195,7 +198,17 @@ func (a *App) Start(ctx context.Context) error {
 				// Wrapped so a nil return fails the boot rather than the
 				// first request that touches it. outputsOf ran above, on the
 				// ORIGINAL, so substitution matching is unaffected.
-				if err := scope.Provide(nilChecked(ctor, m.name, m.optional), opts...); err != nil {
+				//
+				// The wrapper is a reflect.MakeFunc value, whose runtime name
+				// is the assembly stub reflect.makeFuncStub. Carry the
+				// original constructor's name across, or every diagnostic
+				// that names a provider names the stub instead (field-test
+				// defect B3). A substitution has already set its own name.
+				wrapped := nilChecked(ctor, m.name, m.optional)
+				if !named && !sameFunc(wrapped, ctor) {
+					opts = append(opts, di.Named(constructorName(ctor)))
+				}
+				if err := scope.Provide(wrapped, opts...); err != nil {
 					return err
 				}
 			}
@@ -228,7 +241,11 @@ func (a *App) Start(ctx context.Context) error {
 			to := scopes[m.name]
 			for _, t := range imp.exports {
 				name := fmt.Sprintf("%s (exported by module %q)", t, imp.name)
-				if err := to.Provide(forwarder(t, from), di.DeclaredAt(splitSite(imp.declared)), di.Named(name)); err != nil {
+				if err := to.Provide(forwarder(t, from),
+					di.DeclaredAt(splitSite(imp.declared)),
+					di.Named(name),
+					di.ForwardedFrom(imp.name),
+				); err != nil {
 					return err
 				}
 			}
@@ -669,6 +686,30 @@ func shortTypeName(outs []reflect.Type) string {
 		return "Controller"
 	}
 	return t.Name()
+}
+
+// sameFunc reports whether two constructor values are the same function —
+// how the bootstrapper asks whether nilChecked wrapped this one or handed it
+// back untouched. Funcs are not comparable, so the code pointers are compared
+// instead.
+func sameFunc(a, b any) bool {
+	return reflect.ValueOf(a).Pointer() == reflect.ValueOf(b).Pointer()
+}
+
+// constructorName renders a constructor the way diagnostics print it:
+// "postgres.NewUserRepository". It is what a wrapped constructor is Named,
+// because the wrapper's own runtime name is reflect.makeFuncStub.
+func constructorName(ctor any) string {
+	v := reflect.ValueOf(ctor)
+	f := runtime.FuncForPC(v.Pointer())
+	if f == nil {
+		return "unknown function"
+	}
+	name := f.Name()
+	if i := strings.LastIndex(name, "/"); i >= 0 {
+		name = name[i+1:]
+	}
+	return name
 }
 
 // splitSite turns "module.go:14" back into DeclaredAt's (file, line) pair.

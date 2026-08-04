@@ -398,6 +398,9 @@ func errNilProvider(module string, t reflect.Type) error {
 			"  Nothing downstream can check that, so the first request reaching it\n"+
 			"  panics and becomes a 500 — long after the boot that could have said so.\n\n"+
 			"  Return a real value, or return an error explaining why you cannot:\n"+
-			"  a constructor may return (T, error) and the boot reports it by name.",
-		module, t))
+			"  a constructor may return (T, error) and the boot reports it by name.\n\n"+
+			"  If the nil is DELIBERATE — an absent collector, a disabled feature —\n"+
+			"  declare it, and every consumer knows to expect it:\n"+
+			"      warren.NewModule(%q, ..., warren.Optional[%s]())",
+		module, t, module, t))
 }

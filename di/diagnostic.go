@@ -49,7 +49,11 @@ func errMissing(target string, chain []string, declared, scope string, candidate
 		b.WriteString("\n  Did you mean:\n")
 		for _, c := range candidates {
 			if c.exported {
-				fmt.Fprintf(&b, "    • %s is exported by scope %q — make this module import it.\n", c.provider, c.scope)
+				// The type is already exported: the missing half is on THIS
+				// side, and Imports is the line to type. Naming Exports here
+				// would send the reader to the module that already has it.
+				fmt.Fprintf(&b, "    • %s is exported by module %q, which %q does not import.\n", c.provider, c.scope, scope)
+				fmt.Fprintf(&b, "      Add to %s's module: warren.Imports(%s.Module())\n", scope, c.scope)
 			} else {
 				fmt.Fprintf(&b, "    • %s is registered in scope %q but not exported.\n", c.provider, c.scope)
 				fmt.Fprintf(&b, "      Add to %s's module: warren.Exports[%s]()\n", c.scope, target)
