@@ -56,6 +56,26 @@ func AddArgument(src []byte, fn, ident string) ([]byte, error) {
 	return spliceNewOption(fset, src, newModule, fn, ident)
 }
 
+// HasCall reports whether src contains a call to fn — "warren.New", say.
+//
+// It is how a caller asks "would AddCallArgument work on this file?" without
+// editing it, and it runs the SAME matcher, so the answer cannot drift from
+// the edit. `warren g module` uses it to tell an application's main package
+// from a main that happens to live under cmd/: a module is registered in a
+// warren.New(...) call, so a main without one is not somewhere a module can
+// go, whoever wrote it.
+//
+// An unparseable file has no call this package can edit, so it is false
+// rather than an error — the caller is choosing between candidates, and one
+// broken file should not fail that choice.
+func HasCall(src []byte, fn string) bool {
+	f, err := parser.ParseFile(token.NewFileSet(), "main.go", src, parser.ParseComments)
+	if err != nil {
+		return false
+	}
+	return findCall(f, fn) != nil
+}
+
 // AddCallArgument adds ident as the last argument of the call to fn — for
 // example warren.New in a main package — and errors when there is no such
 // call. Unlike AddArgument it creates nothing: the call has to exist,

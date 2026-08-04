@@ -707,10 +707,17 @@ func goModulePath(dir string) (string, error) {
 // findMain locates the application's main.go — the file a new module is
 // registered in.
 //
-// A project with more than one binary is an ERROR rather than a guess.
-// Wiring the first one found leaves the others missing a module with
+// A project with more than one APPLICATION binary is an ERROR rather than a
+// guess. Wiring the first one found leaves the others missing a module with
 // nothing to say so, and which binary a feature belongs in is a decision
 // only the author can make.
+//
+// Not every main under cmd/ is an application main, though. `warren g
+// repository --driver postgres` writes cmd/migrate/main.go, and counting it
+// made every subsequent `warren g module` in the project refuse — then
+// suggest `--main cmd/migrate/main.go`, the one answer that cannot work,
+// because the migration runner has no warren.New to register a module in.
+// A main without that call is not a candidate, whoever wrote it.
 func findMain(dir, named string) (string, error) {
 	if named != "" {
 		rel := filepath.ToSlash(named)
@@ -727,18 +734,37 @@ func findMain(dir, named string) (string, error) {
 			"  Run `warren g module` from the root of a project scaffolded by `warren new`,\n" +
 			"  or name the file with --main.")
 	}
-	var found []string
+	var found, others []string
 	for _, e := range entries {
 		if !e.IsDir() {
 			continue
 		}
 		rel := filepath.ToSlash(filepath.Join("cmd", e.Name(), "main.go"))
-		if _, serr := os.Stat(filepath.Join(dir, rel)); serr == nil {
+		src, rerr := os.ReadFile(filepath.Join(dir, rel))
+		if rerr != nil {
+			continue
+		}
+		// The same matcher the edit itself runs, so a file this accepts is a
+		// file AddCallArgument can write to.
+		if astedit.HasCall(src, "warren.New") {
 			found = append(found, rel)
+		} else {
+			others = append(others, rel)
 		}
 	}
 	switch len(found) {
 	case 0:
+		if len(others) > 0 {
+			slices.Sort(others)
+			return "", diagnostic(fmt.Sprintf(
+				"✗ no application main package\n\n      %s\n\n"+
+					"    A module is registered as an argument to warren.New(...), and none\n"+
+					"    of these files has that call — a migration runner or a one-shot\n"+
+					"    tool is not somewhere a module can go.\n\n"+
+					"  Name the application's main with --main, or scaffold one with\n"+
+					"  `warren new`.",
+				strings.Join(others, "\n      ")))
+		}
 		return "", diagnostic("✗ no main.go under cmd/\n\n    Cannot find the application's main package.\n\n" +
 			"  Name it with --main if it lives elsewhere.")
 	case 1:

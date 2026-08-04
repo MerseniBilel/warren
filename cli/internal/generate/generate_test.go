@@ -495,3 +495,75 @@ func TestCommandWiresItsOwnRoute(t *testing.T) {
 		t.Errorf("the plan does not mention the controller edit it made:\n%s", plan)
 	}
 }
+
+// TestMigrateMainDoesNotMakeTheProjectAmbiguous — `warren g repository
+// --driver postgres` writes cmd/migrate/main.go, and from that moment every
+// `warren g module` in the project refused, because two directories under
+// cmd/ held a main.go. The refusal then suggested
+//
+//	warren g module ... --main cmd/migrate/main.go
+//
+// which is the WRONG main: the migration runner registers no modules and has
+// no warren.New to add one to. So the generator refused correct usage and
+// then pointed at the one answer that cannot work.
+//
+// A module is registered in a warren.New(...) call. A main without one is
+// not a candidate, whoever wrote it.
+func TestMigrateMainDoesNotMakeTheProjectAmbiguous(t *testing.T) {
+	t.Parallel()
+
+	dir := app(t)
+	// Exactly what `g repository --driver postgres` leaves behind.
+	if _, err := generate.Entity(generate.Options{Dir: dir, Module: "user", Name: "Invoice"}); err != nil {
+		t.Fatalf("Entity: %v", err)
+	}
+	if _, err := generate.Repository(generate.Options{
+		Dir: dir, Module: "user", Name: "Invoice", Driver: "postgres",
+	}); err != nil {
+		t.Fatalf("Repository: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "cmd/migrate/main.go")); err != nil {
+		t.Fatalf("the postgres repository generator no longer writes cmd/migrate/main.go: %v", err)
+	}
+
+	if _, err := generate.Module(generate.Options{Dir: dir, Name: "billing"}); err != nil {
+		t.Fatalf("g module refused a project that has a migration runner: %v", err)
+	}
+	main := read(t, dir, "cmd/myapp/main.go")
+	if !strings.Contains(main, "billing.Module()") {
+		t.Errorf("the module was not registered in the application's main:\n%s", main)
+	}
+	if strings.Contains(read(t, dir, "cmd/migrate/main.go"), "billing") {
+		t.Error("the module was registered in the migration runner")
+	}
+}
+
+// TestTwoRealMainsAreStillAmbiguous — the refusal is right when the choice is
+// genuinely the author's, and then every option it lists must be one that
+// works.
+func TestTwoRealMainsAreStillAmbiguous(t *testing.T) {
+	t.Parallel()
+
+	dir := app(t)
+	second := filepath.Join(dir, "cmd", "worker")
+	if err := os.MkdirAll(second, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	// A second REAL application main: it registers modules.
+	src := "package main\n\nimport \"github.com/MerseniBilel/warren\"\n\nfunc main() {\n\t_ = warren.New().Run()\n}\n"
+	if err := os.WriteFile(filepath.Join(second, "main.go"), []byte(src), 0o644); err != nil {
+		t.Fatalf("writing second main: %v", err)
+	}
+
+	_, err := generate.Module(generate.Options{Dir: dir, Name: "billing"})
+	if err == nil {
+		t.Fatal("two application mains were not reported as ambiguous")
+	}
+	got := err.Error()
+	if !strings.Contains(got, "cmd/myapp/main.go") || !strings.Contains(got, "cmd/worker/main.go") {
+		t.Errorf("the refusal does not list both candidates:\n%s", got)
+	}
+	if strings.Contains(got, "cmd/migrate") {
+		t.Errorf("a non-application main was listed as a candidate:\n%s", got)
+	}
+}
