@@ -250,6 +250,20 @@ func (s *server) stop(ctx context.Context) error {
 	// Shutdown does NOT cancel in-flight request contexts: a handler that
 	// ignores ctx blocks here until ShutdownTimeout expires.
 	if err := s.http.Shutdown(ctx); err != nil {
+		// Name the knob. On its own, "context deadline exceeded" during
+		// OnStop reads as a framework fault; what an operator needs is that
+		// a request outlived the drain window and which window that was.
+		//
+		// It deliberately does NOT count the requests still running: that
+		// would put an atomic on every request to improve one shutdown
+		// message, and this package holds a measured allocation budget.
+		if errors.Is(err, context.DeadlineExceeded) {
+			return fmt.Errorf(
+				"warren/transport/http: draining: a request was still running after ShutdownTimeout (%s); "+
+					"a handler that ignores its context cannot be interrupted — raise whttp.ShutdownTimeout, "+
+					"or make the handler observe ctx.Done(): %w",
+				s.cfg.shutdownTimeout, err)
+		}
 		return fmt.Errorf("warren/transport/http: draining: %w", err)
 	}
 	slog.Info("http server stopped", "module", ModuleName)

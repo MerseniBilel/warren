@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -964,4 +965,189 @@ func tenantIdentity(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// Run is what every generated main.go calls, and until now nothing tested it.
+// Start and Stop are covered thoroughly; the signal path that JOINS them was
+// not, so a service could have a perfect drain that SIGTERM never reached.
+//
+// These two are deliberately NOT parallel: they signal the test process
+// itself, which every goroutine in the binary shares.
+func TestRunDrainsOnSIGTERM(t *testing.T) {
+	c := &blockingController{entered: make(chan struct{}), release: make(chan struct{})}
+	m := warren.NewModule("slow", warren.Controllers(func() *blockingController { return c }))
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	base := "http://" + ln.Addr().String()
+	// A drain WINDOW, not zero: during it the listener still accepts, which
+	// is what makes the 503 observable. With DrainDelay(0) the socket closes
+	// the instant readiness does, and polling /readyz gets a connection
+	// error instead of the status — which is a test artefact, not a drop.
+	a := warren.New(m, whttp.Server(whttp.Listener(ln), whttp.DrainDelay(3*time.Second)))
+
+	ran := make(chan error, 1)
+	go func() { ran <- a.Run() }()
+
+	// Only signal once Run has installed its handler — before that, SIGTERM
+	// has default disposition and would kill the test binary.
+	waitFor(t, "the server to be ready", func() bool {
+		res, err := http.Get(base + "/readyz")
+		if err != nil {
+			return false
+		}
+		defer func() { _ = res.Body.Close() }()
+		return res.StatusCode == 200
+	})
+
+	done := make(chan int, 1)
+	go func() {
+		res, err := http.Get(base + "/slow/u-1")
+		if err != nil {
+			done <- -1
+			return
+		}
+		defer func() { _ = res.Body.Close() }()
+		done <- res.StatusCode
+	}()
+	<-c.entered
+
+	if err := syscall.Kill(syscall.Getpid(), syscall.SIGTERM); err != nil {
+		t.Fatalf("kill: %v", err)
+	}
+
+	// The drain has begun: readiness closes before the listener does.
+	waitFor(t, "readiness to close", func() bool {
+		res, err := http.Get(base + "/readyz")
+		if err != nil {
+			return false
+		}
+		defer func() { _ = res.Body.Close() }()
+		return res.StatusCode == 503
+	})
+
+	close(c.release)
+
+	if got := <-done; got != 200 {
+		t.Errorf("the in-flight request got %d, want 200 — SIGTERM dropped it", got)
+	}
+	select {
+	case err := <-ran:
+		if err != nil {
+			t.Errorf("Run: %v", err)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("Run never returned after SIGTERM")
+	}
+}
+
+// TestSecondSignalCancelsTheDrain covers the force-exit short-circuit Run
+// documents: an operator who signals twice has decided not to wait.
+//
+// It also covers the re-arm Run performs before releasing its first
+// registration. Without that, a signal landing in the gap gets DEFAULT
+// disposition — killing the process outright, mid-drain, which is the
+// opposite of what pressing Ctrl-C twice should mean.
+func TestSecondSignalCancelsTheDrain(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	base := "http://" + ln.Addr().String()
+	// A drain long enough that returning early can only be the short-circuit.
+	a := warren.New(whttp.Server(whttp.Listener(ln), whttp.DrainDelay(60*time.Second)))
+
+	ran := make(chan error, 1)
+	go func() { ran <- a.Run() }()
+
+	waitFor(t, "the server to be ready", func() bool {
+		res, err := http.Get(base + "/readyz")
+		if err != nil {
+			return false
+		}
+		defer func() { _ = res.Body.Close() }()
+		return res.StatusCode == 200
+	})
+
+	if err := syscall.Kill(syscall.Getpid(), syscall.SIGTERM); err != nil {
+		t.Fatalf("kill: %v", err)
+	}
+	waitFor(t, "the drain to start", func() bool {
+		res, err := http.Get(base + "/readyz")
+		if err != nil {
+			return false
+		}
+		defer func() { _ = res.Body.Close() }()
+		return res.StatusCode == 503
+	})
+
+	started := time.Now()
+	if err := syscall.Kill(syscall.Getpid(), syscall.SIGTERM); err != nil {
+		t.Fatalf("second kill: %v", err)
+	}
+
+	select {
+	case <-ran:
+		// Whatever Run returns, it must not have waited out the 60s drain.
+		if elapsed := time.Since(started); elapsed > 20*time.Second {
+			t.Errorf("the second signal took %v to end the drain; it must short-circuit", elapsed)
+		}
+	case <-time.After(40 * time.Second):
+		t.Fatal("the second signal did not cancel the drain — Run is still draining")
+	}
+}
+
+// TestAStuckHandlerCannotPreventShutdown covers what ShutdownTimeout is for.
+//
+// A handler that never returns must not hold the process open: the drain
+// gives in-flight requests their chance, and then the server stops anyway.
+// Without that bound a single wedged request outlives the grace period and
+// the orchestrator SIGKILLs the pod — losing every OTHER in-flight request
+// too, which is the opposite of a graceful drain.
+func TestAStuckHandlerCannotPreventShutdown(t *testing.T) {
+	t.Parallel()
+
+	c := &blockingController{entered: make(chan struct{}), release: make(chan struct{})}
+	// Never released: this handler is wedged for the rest of the test.
+	m := warren.NewModule("slow", warren.Controllers(func() *blockingController { return c }))
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	base := "http://" + ln.Addr().String()
+	a := warren.New(m, whttp.Server(
+		whttp.Listener(ln),
+		whttp.DrainDelay(0),
+		whttp.ShutdownTimeout(time.Second),
+	))
+	if err := a.Start(context.Background()); err != nil {
+		t.Fatalf("boot: %v", err)
+	}
+
+	go func() {
+		res, err := http.Get(base + "/slow/u-1")
+		if err == nil {
+			_ = res.Body.Close()
+		}
+	}()
+	<-c.entered
+
+	stopped := make(chan error, 1)
+	started := time.Now()
+	go func() { stopped <- a.Stop(context.Background()) }()
+
+	select {
+	case err := <-stopped:
+		// It may report the timeout or not; what matters is that it RETURNED.
+		t.Logf("Stop returned after %v: %v", time.Since(started), err)
+		if err == nil || !strings.Contains(err.Error(), "ShutdownTimeout") {
+			t.Errorf("the error does not name the knob an operator would reach for: %v", err)
+		}
+	case <-time.After(20 * time.Second):
+		t.Fatal("a single wedged handler held shutdown open past ShutdownTimeout; " +
+			"the orchestrator would SIGKILL the process and drop every other in-flight request")
+	}
 }
