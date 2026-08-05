@@ -24,9 +24,22 @@ easiest possible subject, where "the subscription is live" is a map insert
 and ordering is whatever order the sender used.
 
 `broker/kafka/integration_test.go` now runs the suite behind the `integration`
-tag, against a real broker. **Until someone runs it green and records that
-here, the certification claim this deferral rests on is unproven**, and so is
-the community-adapter strategy that depends on the same suite.
+tag, against a real broker. **It ran green on 2026-08-05** — all nine subtests
+against `apache/kafka:3.9.0`, reproducible with `make integration` and
+`WARREN_TEST_KAFKA_BROKERS` set. The certification claim this deferral rests
+on is proven, and so is the community-adapter strategy that depends on the
+same suite.
+
+Proven at a price worth recording, because it is the argument FOR the suite
+rather than against it. The first real run failed on four counts, three of
+them driver defects the unit tests could not have caught: a 30-second
+shutdown (`BlockRebalanceOnPoll` never released on a cancelled poll), a
+cancelled subscription that kept receiving for the rest of a fetched batch,
+and a deregistration that matched handlers by code pointer and so removed the
+wrong sibling under fan-out. An in-process broker expresses none of these —
+it has no group to leave, its batches are one message long, and its
+subscriptions are map entries. A third driver that ships without running this
+suite ships those bugs, whichever three they turn out to be.
 
 A third driver still buys a bullet point and costs a module, an audit, and a
 maintained integration suite — that part of the argument stands on its own.

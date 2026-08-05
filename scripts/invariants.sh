@@ -139,4 +139,52 @@ for lib in stretchr/testify testcontainers-go; do
 	fi
 done
 
+# doc drift — a **Surface** block must list the package's WHOLE exported
+# function surface.
+#
+# CLAUDE.md says warren.md "already fixes the public API", and a contributor
+# reads the block as the contract. On 2026-08-05 the Kafka block listed a
+# StatementTimeout this package has never had (copied from Postgres), omitted
+# AutoCreateTopics, and said "there is no SASL" three exported SASL functions
+# later; di.Named and log.Handler had shipped without ever reaching a block.
+#
+# Only ONE direction is mechanical. A function in the code and not in the
+# block is always drift. The reverse is NOT: §2.4's block names
+# config/yaml's File, a module deliberately not built yet, and a manifest is
+# allowed to describe what is coming. That direction stays a review matter.
+#
+# Narrow by design: only sections that CHOSE to publish a Surface block are
+# held to completeness. Packages documented in prose are not forced into a
+# block by this check — that is an editorial decision, not a mechanical one.
+for pkg in $(awk '
+	function flush() { if (cur != "" && has) print cur }
+	/^### / {
+		flush(); cur=""; has=0
+		if (match($0, /`warren[a-z0-9\/]*`/)) cur = substr($0, RSTART+1, RLENGTH-2)
+		next
+	}
+	/^\*\*Surface\*\*/ { has=1 }
+	END { flush() }
+' warren.md); do
+	dir=".${pkg#warren}"
+	[ -d "$dir" ] || continue
+	declared=$(awk -v want="$pkg" '
+		/^### / {
+			insec = (match($0, /`warren[a-z0-9\/]*`/) && substr($0, RSTART+1, RLENGTH-2) == want)
+			seen = 0; inblk = 0; next
+		}
+		insec && /^\*\*Surface\*\*/ { seen = 1; next }
+		seen && !inblk && /^```/ { inblk = 1; next }
+		inblk && /^```/ { inblk = 0; seen = 0; next }
+		inblk { print }
+	' warren.md | grep -oE '^func [A-Z][A-Za-z0-9_]*' | awk '{print $2}' | sort -u)
+	real=$(go doc -all "$dir" 2>/dev/null | grep -oE '^func [A-Z][A-Za-z0-9_]*' | awk '{print $2}' | sort -u)
+	undocumented=$(comm -13 <(echo "$declared") <(echo "$real"))
+	if [ -n "$undocumented" ]; then
+		echo "doc drift: $pkg exports functions its warren.md Surface block omits:"
+		echo "$undocumented" | sed 's/^/  /'
+		fail=1
+	fi
+done
+
 exit $fail

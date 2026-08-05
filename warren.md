@@ -386,9 +386,11 @@ type Container interface {
 
 func New() Container // the root container
 
-// ProvideOption configures one Provide call. Two options exist:
+// ProvideOption configures one Provide call. Four options exist:
 func Exported() ProvideOption                    // visible to importing modules; read by the bootstrapper and the diagnostics
 func DeclaredAt(file string, line int) ProvideOption // the module declaration site — the "declared in module.go:14" line
+func ForwardedFrom(scope string) ProvideOption   // a re-export, not a place a user can add anything: dropped from candidate lists
+func Named(name string) ProvideOption            // the name diagnostics print; required for synthesized constructors, whose runtime name is an assembly stub
 
 // Resolution is Explain's result: Target, Found, Provider, Scope, Site, and
 // Inputs ([]Resolution, recursive). It renders itself as an indented tree.
@@ -619,6 +621,11 @@ func CorrelationID(ctx context.Context) string     // "" when none is carried
 // separate modules, so the seam must be exported:
 func WithLogger(ctx context.Context, l *slog.Logger) context.Context
 func WithCorrelationID(ctx context.Context, id string) context.Context
+
+// The handler side: wraps an slog.Handler so every record carries the
+// correlation ID, resolved in Handle — a request that logs nothing pays
+// nothing. ContextAttrs derives further attributes from the context.
+func Handler(h slog.Handler, extra ...ContextAttrs) slog.Handler
 ```
 
 The correlation ID is minted at the edge: an adapter reuses the one arriving on
@@ -673,6 +680,7 @@ func (e *Error) Error() string           // "CODE: message", ": cause" appended 
 func (e *Error) Unwrap() error           // the wrapped cause, so stdlib errors.Is/As see through
 func (e *Error) WithDetail(k string, v any) *Error
 func Is(err error, code Code) bool
+func CodeOf(err error) Code // the OUTERMOST code; INTERNAL for an error carrying none, "" for nil
 ```
 
 The type's home is `warren/errors`, so its qualified name is `errors.Error` —
@@ -1418,6 +1426,11 @@ func ShutdownTimeout(time.Duration) Option                   // 15s, inside life
 
 func TLS(*tls.Config) Option
 func TLSFiles(certFile, keyFile string) Option
+
+// for EDGE MIDDLEWARE that refuses before any route runs — an authenticator
+// rejecting a forged token renders the same envelope the framework does,
+// instead of every user re-deriving it out of a golden file.
+func WriteError(w http.ResponseWriter, r *http.Request, err error)
 func H2C() Option                                            // no golang.org/x/net since Go 1.24
 
 const CorrelationHeader = "X-Correlation-Id"
@@ -1628,7 +1641,9 @@ func AutoCreateTopics() Option                // OFF by default; see below
 
 // authentication
 func SASL(Mechanism) Option
-func Plain(user, pass string) Mechanism
+func Plain(user, pass string) Mechanism      // refused without TLS
+func SCRAM256(user, pass string) Mechanism
+func SCRAM512(user, pass string) Mechanism
 
 // the escape hatches, for what these options do not cover
 func Configure(...kgo.Opt) Option
@@ -1652,7 +1667,8 @@ same guarantee.
 
 ```go
 // main.go — swapping to another driver changes only this block.
-// broker/memory ships and passes the same brokertest suite, so the claim
+// broker/memory and broker/kafka both pass the same brokertest suite — the
+// second against a real cluster, behind the integration tag — so the claim
 // is demonstrated rather than asserted.
 kafka.Broker(
     kafka.Brokers(cfg.Kafka.Brokers...),
