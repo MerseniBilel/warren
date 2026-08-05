@@ -104,10 +104,6 @@ func newBroker() brokerPorts {
 	return brokerPorts{pub: b, sub: b}
 }
 
-// newRelay drains the outbox to the broker. It registers its own lifecycle
-// hook and its own health check — the documented pattern for anything
-// created at boot, since warren.OnStart takes a closure fixed at
-// declaration time.
 // elector decides which replica drains the outbox. Standalone always leads,
 // which is correct for ONE instance and for the modular monolith.
 //
@@ -127,6 +123,10 @@ func newBroker() brokerPorts {
 // at boot naming both — which is the framework telling you step 2 is missing.
 func elector() outbox.Elector { return outbox.Standalone() }
 
+// newRelay drains the outbox to the broker. It registers its own lifecycle
+// hook and its own health check — the documented pattern for anything
+// created at boot, since warren.OnStart takes a closure fixed at
+// declaration time.
 func newRelay(
 	store outbox.Store,
 	pub broker.Publisher,

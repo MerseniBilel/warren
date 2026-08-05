@@ -339,6 +339,12 @@ func retrying[Req, Res any](policy RetryPolicy, shouldRetry func(error) bool) Mi
 // an Internal has declared the failure final and this agrees. Retries are
 // only safe on an idempotent handler; see Retrying.
 //
+// IT DOES NOT INHERIT CodeUnavailable. The codes you name are the whole set,
+// so migrating Retrying(p) to RetryingOn(p, errors.CodeConflict) STOPS
+// retrying a dependency that was briefly away. Pass both when you want both:
+//
+//	app.RetryingOn(p, errors.CodeConflict, errors.CodeUnavailable)
+//
 // At least one code is required. An empty set would retry nothing, silently,
 // which is the failure mode a variadic helper like this usually has.
 func RetryingOn[Req, Res any](policy RetryPolicy, codes ...errors.Code) Middleware[Req, Res] {

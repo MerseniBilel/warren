@@ -976,7 +976,9 @@ invoking it allocates nothing (benchmarked).
 | Middleware | Effect |
 |---|---|
 | `app.Transactional(uow)` | Wraps `Handle` in a transaction; commits state + outbox atomically. Its `uow` is `app.UnitOfWork` — one method, declared in `app` so it imports no sibling contract; `persistence.UnitOfWork` satisfies it |
-| `app.Retrying(policy)` | Retries on `CodeUnavailable` |
+| `app.Retrying(policy)` | Retries on `CodeUnavailable` — a dependency that was briefly away |
+| `app.RetryingOn(policy, codes...)` | Retries on the codes you name, and ONLY those — it does not inherit `CodeUnavailable`. `RetryingOn(p, errors.CodeConflict)` is what optimistic concurrency needs: a stale write under contention is the NORMAL outcome, not a failure, and without it 200 buyers against 50 seats undersell. The handler must RE-READ its aggregate each attempt, because this re-invokes the HANDLER, not the transaction |
+| `app.Timeout(d)` | Bounds the handler. Inside `Retrying` it bounds each attempt; outside, the whole sequence |
 | `app.Traced()` | Span per handler, named `<module>.<handler>` |
 | `app.Metered()` | Duration histogram, error counter by code |
 | `app.Authorized(policy)` | Policy check before invocation |
@@ -2072,7 +2074,9 @@ in v0.2.
 primitives it was to own split cleanly in two, and only one half is Warren's.
 
 **Retry and timeout are core-ring, and they ship.** `app.RetryPolicy` is the
-port; `app.Retrying(policy)` retries `CodeUnavailable` and nothing else;
+port; `app.Retrying(policy)` retries `CodeUnavailable` and nothing else, and
+`app.RetryingOn(policy, codes...)` retries exactly the codes you name —
+`errors.CodeConflict` is the one optimistic concurrency needs;
 `app.Timeout(d)` bounds the handler's context; `broker.ExponentialBackoff(n)`
 is a concrete policy in the core module with zero dependencies, and
 `broker.Retry` / `broker.WithRetry` reuse the same port on the consumer chain.

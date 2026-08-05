@@ -487,6 +487,9 @@ correct behaviour but worth knowing.
 | Authorization on one route | `transport.Guard(app.RequireScope("users:read"))` — runs **before** decode, so a denied caller's malformed body is a 401/403, not a 400 |
 | Reading the caller | `id, ok := app.IdentityFromContext(ctx)` — seeded by your own edge middleware with `app.WithIdentity`. The ok-bool is the point: `IdentityFromContext(ctx).Subject` does not compile |
 | Cross-cutting logic on every protocol | `app.Chain` / core middleware — wraps the handler, so it applies to HTTP, gRPC and consumers identically |
+| Retrying a lost connection | `app.Retrying(broker.ExponentialBackoff(3))` — retries `UNAVAILABLE` only |
+| **Contention on one aggregate** | `app.RetryingOn(p, errors.CodeConflict)`. A stale write is `CONFLICT`, which `Retrying` does NOT retry — so concurrent buyers of the same thing undersell. Your handler must RE-READ the aggregate each attempt; this re-invokes the handler, not the transaction. Note it retries only the codes you name, so pass `CodeUnavailable` too if you want both |
+| Bounding a slow dependency | `app.Timeout(3*time.Second)` — inside `Retrying` bounds each attempt, outside bounds the sequence |
 | File upload, download, SSE, WebSocket | `transport.Raw(r, transport.ProtocolHTTP, "POST /uploads", h)` from your controller — note the pattern carries the method here |
 | `pprof`, static assets, a webhook receiver | `whttp.Handle("GET /debug/pprof/", h)` — for handlers needing no module dependency |
 | A test that boots the app | `warren/testing` — `NewModuleTest`, `Replace`, `Invoke` |
@@ -581,12 +584,12 @@ func (sameTenant) Authorize(ctx context.Context) error {
 		// DENY. The tempting reading is "nothing to compare, not applicable,
 		// allow", and that is a silent cross-tenant bypass: a policy that
 		// cannot check must not pass.
-		return errors.PermissionDenied("this tenant")
+		return errors.PermissionDenied("act in this tenant")
 	}
 	want, _ := app.Claim[string](id, "tid")
 	got, _ := p.Path("tenant")
 	if want != got {
-		return errors.PermissionDenied("this tenant")
+		return errors.PermissionDenied("act in this tenant")
 	}
 	return nil
 }

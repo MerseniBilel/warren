@@ -224,7 +224,16 @@ func Repository(opts Options) (string, error) {
 		// be written as 00001_<plural>.sql, so a second one collided: two
 		// files at one version apply in ALPHABETICAL order, which is wrong
 		// for any foreign key between them.
-		migrationFile := fmt.Sprintf("db/migrations/%05d_%s.sql", nextMigration(opts.Dir), data["Plural"])
+		// Reuse the aggregate's EXISTING migration if it has one, rather than
+		// numbering a new file beside it. Re-running with --force otherwise
+		// wrote 00003_items.sql next to 00002_items.sql — two files creating
+		// one table with different column sets, which --force is documented
+		// as overwriting rather than duplicating. The plan's own conflict
+		// check then decides: refuse without --force, overwrite with it.
+		migrationFile := existingMigration(opts.Dir, data["Plural"])
+		if migrationFile == "" {
+			migrationFile = fmt.Sprintf("db/migrations/%05d_%s.sql", nextMigration(opts.Dir), data["Plural"])
+		}
 		p.files[migrationFile] = migration
 
 		// The migrate binary lives in the PROJECT, not in the warren CLI.
@@ -240,6 +249,11 @@ func Repository(opts Options) (string, error) {
 		p.files["cmd/migrate/main.go"] = migrateMain
 		// One migrate command per PROJECT, not per aggregate.
 		p.keepExisting = map[string]bool{"cmd/migrate/main.go": true}
+		// The project's OWN variable, not a generic one. A scaffolded
+		// cmd/migrate reads <APP>_DATABASE_URL, so printing DATABASE_URL
+		// sent the reader to `DUPE_DATABASE_URL is not set` — advice that
+		// fails on the first line you paste.
+		dsnVar := envPrefix(opts.Dir) + "_DATABASE_URL"
 		p.next = fmt.Sprintf(`  Still to do — the repository needs a pool and a table.
 
   1. Declare the Postgres module ONCE, in internal/platform, and export what
@@ -248,7 +262,7 @@ func Repository(opts Options) (string, error) {
          // internal/platform/postgres.go
          var Postgres = sync.OnceValue(func() warren.Module {
              return postgres.Module(
-                 postgres.DSN(os.Getenv("DATABASE_URL")),
+                 postgres.DSN(os.Getenv("%s")),
                  postgres.WithOutbox(),
              )
          })
@@ -266,7 +280,7 @@ func Repository(opts Options) (string, error) {
   2. Apply the schema as a DEPLOY STEP — Warren never migrates at boot.
      cmd/migrate was generated for you:
 
-         DATABASE_URL=... go run ./cmd/migrate
+         %s=... go run ./cmd/migrate
 
      Name your migration files for your own aggregates: yours and Warren's
      record into one warren_schema_migrations table, keyed by bare filename,
@@ -274,7 +288,7 @@ func Repository(opts Options) (string, error) {
 
   3. Check %s — it has the aggregate's id and created_at, and nothing else.
      Add your columns and the Save/FindByID statements that read them.
-`, data["Feature"], migrationFile)
+`, dsnVar, data["Feature"], dsnVar, migrationFile)
 	}
 	return p.apply()
 }
@@ -294,6 +308,23 @@ var repositoryTemplates = map[string]string{
 // It reads the directory rather than counting this run's files because the
 // user's own hand-written migrations live there too, and a generated file
 // that reused their number would apply in alphabetical order against them.
+// existingMigration finds this aggregate's migration if one was already
+// written, by the <number>_<plural>.sql name the generator itself produces.
+// Empty when there is none.
+func existingMigration(dir, plural string) string {
+	entries, err := os.ReadDir(filepath.Join(dir, "db", "migrations"))
+	if err != nil {
+		return ""
+	}
+	suffix := "_" + plural + ".sql"
+	for _, e := range entries {
+		if !e.IsDir() && strings.HasSuffix(e.Name(), suffix) {
+			return "db/migrations/" + e.Name()
+		}
+	}
+	return ""
+}
+
 func nextMigration(dir string) int {
 	entries, err := os.ReadDir(filepath.Join(dir, "db", "migrations"))
 	if err != nil {

@@ -708,7 +708,22 @@ func checkConstructor(ctor any, module, declared string) error {
 				"  usually a name that does not exist yet, or a trailing comma after a\n"+
 				"  deleted line.", module, declared))
 	}
-	if v := reflect.ValueOf(ctor); v.Kind() != reflect.Func {
+	v := reflect.ValueOf(ctor)
+	// A TYPED nil func — `var newStore func() *Store`, declared and never
+	// assigned — has Kind() == Func and is not == nil as an `any`, so it
+	// passes both of the other checks. It then reaches dig and panics inside
+	// nilChecked's fn.Call with a raw reflect stack carrying dig frames,
+	// which is invariant 2's "no dig error message reaches a user" as well as
+	// the missing diagnostic. It is also the shape a real project produces,
+	// where an untyped nil is mostly a typo.
+	if v.Kind() == reflect.Func && v.IsNil() {
+		return diagnostic(fmt.Sprintf(
+			"✗ nil constructor\n\n    module %q (%s) lists a %T that is nil.\n\n"+
+				"  The name exists but nothing was assigned to it — a package-level\n"+
+				"  constructor variable an init never set, or a build tag that left it\n"+
+				"  empty. Assign it, or remove it from the list.", module, declared, ctor))
+	}
+	if v.Kind() != reflect.Func {
 		return diagnostic(fmt.Sprintf(
 			"✗ not a constructor\n\n    module %q (%s) lists a %T where a constructor belongs.\n\n"+
 				"  warren.Providers, Controllers and Consumers take a function whose\n"+

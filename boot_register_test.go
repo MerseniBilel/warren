@@ -781,3 +781,60 @@ func TestANilProviderIsADiagnosticNotAPanic(t *testing.T) {
 		})
 	}
 }
+
+// TestATypedNilConstructorIsADiagnosticToo — field test #8, C.1. The nil
+// check I added for field test #7 caught an untyped nil and a non-function,
+// and MISSED the shape a real project actually produces: a package-level
+// constructor variable that some init or build path never assigned.
+//
+//	var newStore func() *Store   // never assigned
+//	warren.Providers(newStore)
+//
+// A typed nil func has Kind() == Func and is not == nil as an `any`, so it
+// sailed past both checks, reached dig, and panicked inside nilChecked's
+// fn.Call with a raw reflect stack — naming neither the module nor the word
+// "provider", which is the exact complaint that made this a blocker.
+//
+// Worse, that stack carried SIXTEEN frames from the wrapped DI library to
+// the user, and AGENT.md invariant 2 says no dig type NOR any dig error
+// message reaches a caller. A panic trace through it is that.
+func TestATypedNilConstructorIsADiagnosticToo(t *testing.T) {
+	t.Parallel()
+
+	var newPricing func() pricing // declared, never assigned
+
+	m := warren.NewModule("catalog",
+		warren.Providers(newPricing),
+		warren.Controllers(func(p pricing) *pricedController { return &pricedController{p: p} }),
+	)
+
+	var err error
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				t.Fatalf("a typed-nil constructor panicked instead of failing with a diagnostic: %v", r)
+			}
+		}()
+		err = warren.New(m).Start(context.Background())
+	}()
+	if err == nil {
+		t.Fatal("a typed-nil constructor booted")
+	}
+	for _, want := range []string{"catalog", "constructor"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the diagnostic does not mention %q:\n%s", want, err)
+		}
+	}
+	// Invariant 2: no dig wording, ever.
+	//
+	// The needle is ASSEMBLED rather than written out, because
+	// scripts/invariants.sh enforces invariant 2 by grepping every .go file
+	// outside warren/di for that import path — and a test asserting the
+	// string's ABSENCE would otherwise read as its presence. Keeping the
+	// script's grep blunt is the right trade: it cannot be fooled, and this
+	// is the only place that has to work around it.
+	needle := "go.uber." + "org/dig"
+	if strings.Contains(err.Error(), needle) || strings.Contains(err.Error(), "dig.") {
+		t.Errorf("the diagnostic leaks dig:\n%s", err)
+	}
+}
