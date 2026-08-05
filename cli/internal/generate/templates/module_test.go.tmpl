@@ -1,6 +1,9 @@
 package {{.Name}}_test
 
 import (
+{{- if .NeedsDSN }}
+	"os"
+{{- end }}
 	"testing"
 
 	warrentest "github.com/MerseniBilel/warren/testing"
@@ -17,6 +20,15 @@ import (
 // service.
 func TestModuleBoots(t *testing.T) {
 	t.Setenv({{.EnvPrefix}}, "test")
+{{- if .NeedsDSN }}
+	// This module imports platform, which imports the config module, whose
+	// DatabaseURL is required. Without a database there is nothing to boot,
+	// and a test that fails for want of an environment variable teaches
+	// people to ignore red.
+	if os.Getenv({{.DSNVar}}) == "" {
+		t.Skip({{.DSNVar}} + " is not set; this boot test needs a database")
+	}
+{{- end }}
 
 	warrentest.NewModuleTest(t, {{.Name}}.Module(), warrentest.WithMemoryBroker())
 }

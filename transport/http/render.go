@@ -53,12 +53,35 @@ type errorPayload struct {
 	CorrelationID string         `json:"correlation_id,omitempty"`
 }
 
-// writeError renders err through the table above.
+// WriteError renders err as Warren's error envelope, with the status its
+// warren/errors code maps to in warren.md §2.6.
+//
+// It is exported for EDGE MIDDLEWARE — an authenticator that rejects a forged
+// token never reaches a route, so nothing in the framework would otherwise
+// render its refusal. Every such middleware was hand-copying this envelope
+// out of a golden file, and a field test caught two copies already differing
+// in key order. One exported function is the difference between a shape
+// Warren owns and a shape every user re-derives:
+//
+//	func (m authMiddleware) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+//	    id, err := m.verify(r)
+//	    if err != nil {
+//	        whttp.WriteError(w, r, errors.Unauthenticated("invalid credential"))
+//	        return
+//	    }
+//	    m.next.ServeHTTP(w, r.WithContext(app.WithIdentity(r.Context(), id)))
+//	}
 //
 // INTERNAL never renders the message and never renders the wrapped cause: a
 // fixed "internal error" plus the correlation ID goes to the client, and the
 // real thing goes to the log at ERROR. Anything else leaks DSNs and SQL
-// statements to the internet.
+// statements to the internet — which is exactly the reason a hand-copied
+// envelope is a bad idea, since it is the half people leave out.
+func WriteError(w http.ResponseWriter, r *http.Request, err error) {
+	writeError(w, r, err)
+}
+
+// writeError renders err through the table above.
 func writeError(w http.ResponseWriter, r *http.Request, err error) {
 	ctx := r.Context()
 	var werr *errors.Error

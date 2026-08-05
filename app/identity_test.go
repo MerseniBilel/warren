@@ -3,6 +3,7 @@ package app_test
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"log/slog"
 	"reflect"
 	"strconv"
@@ -304,3 +305,129 @@ type fakeParams struct{}
 
 func (fakeParams) Path(string) (string, bool)  { return "", false }
 func (fakeParams) Query(string) (string, bool) { return "", false }
+
+// --- field test #6 ----------------------------------------------------------
+
+// TestFmtVerbsDoNotLeakClaims — field test #6, defect B3. LogValue protects
+// slog's top-level attr value and NOTHING else: slog does not call LogValuer
+// on a nested value, and fmt never calls it at all. A tester logged an
+// identity fifteen ways and got the claims map back TEN times, including
+// through the line a Go developer writes at 2 a.m.:
+//
+//	fmt.Errorf("denied for %v", id)
+//
+// The worst of them wraps into errors.Internal, which can reach a log AND a
+// response body. One String method closes the entire fmt family.
+func TestFmtVerbsDoNotLeakClaims(t *testing.T) {
+	t.Parallel()
+
+	const secret = "SUPERSECRET-ssn"
+	id := app.Identity{
+		Subject: "alice",
+		Issuer:  "https://issuer.example",
+		Scopes:  []string{"docs:read"},
+		Claims:  map[string]any{"ssn": secret, "refresh_token": "tok-" + secret},
+	}
+
+	for _, tc := range []struct {
+		name string
+		got  string
+	}{
+		{"%v", fmt.Sprintf("%v", id)},
+		{"%s", sprintfS(id)},
+		{"%+v", fmt.Sprintf("%+v", id)},
+		{"pointer %v", fmt.Sprintf("%v", &id)},
+		{"wrapped in an error", fmt.Errorf("denied for %v", id).Error()},
+		{"inside a slice", fmt.Sprintf("%v", []app.Identity{id})},
+		{"inside a map", fmt.Sprintf("%v", map[string]app.Identity{"caller": id})},
+	} {
+		if strings.Contains(tc.got, secret) {
+			t.Errorf("%s leaked a claim value: %s", tc.name, tc.got)
+		}
+		// It must still be USEFUL — a redaction that says nothing gets
+		// replaced by %+v on the struct's fields, which leaks again.
+		if !strings.Contains(tc.got, "alice") {
+			t.Errorf("%s does not identify the caller: %s", tc.name, tc.got)
+		}
+	}
+}
+
+// TestWithIdentityRefusesABlankSubject — field test #6. WithIdentity compared
+// against "" only, so " ", "\t", "\x00" and "" were all carried, and
+// RequireAuthenticated returned nil for every one. A user who trusts the
+// documented refusal files audit rows owned by "\x00".
+func TestWithIdentityRefusesABlankSubject(t *testing.T) {
+	t.Parallel()
+
+	// A byte-order mark and a zero-width space, written as escapes so the
+	// source file itself stays clean.
+	for _, subject := range []string{" ", "\t", "\n", "  \t ", "\x00", "\x00\x00", "\ufeff", "\u200b"} {
+		ctx := context.Background()
+		got := app.WithIdentity(ctx, app.Identity{Subject: subject})
+		if got != ctx {
+			t.Errorf("WithIdentity carried a blank subject %q", subject)
+		}
+		if _, ok := app.IdentityFromContext(got); ok {
+			t.Errorf("a blank subject %q reads back as present", subject)
+		}
+		if err := app.RequireAuthenticated().Authorize(got); err == nil {
+			t.Errorf("RequireAuthenticated allowed a caller whose subject is %q", subject)
+		}
+	}
+}
+
+// TestWithoutIdentityClearsIt — field test #6. There was no way to clear an
+// identity, and seeding a zero Identity over an existing one left the FIRST
+// in place: a second authentication stage that fails and "resets" identity to
+// zero was fail-OPEN. That is the one hole in the absence-never-looks-like-
+// presence story, and it is the direction that matters.
+func TestWithoutIdentityClearsIt(t *testing.T) {
+	t.Parallel()
+
+	ctx := app.WithIdentity(context.Background(), app.Identity{Subject: "alice"})
+	if _, ok := app.IdentityFromContext(ctx); !ok {
+		t.Fatal("setup: alice is not present")
+	}
+
+	cleared := app.WithoutIdentity(ctx)
+	if got, ok := app.IdentityFromContext(cleared); ok {
+		t.Errorf("WithoutIdentity left %q on the context", got.Subject)
+	}
+	if err := app.RequireAuthenticated().Authorize(cleared); err == nil {
+		t.Error("a cleared context still authenticates")
+	}
+	// The original is untouched — contexts are values.
+	if _, ok := app.IdentityFromContext(ctx); !ok {
+		t.Error("WithoutIdentity mutated the parent context")
+	}
+}
+
+// TestAuthorizedRejectsATypedNilPolicy — field test #6. Authorized catches a
+// nil interface but not a non-nil interface holding a nil pointer, so such a
+// policy ALLOWED every request. identity.go's own doc cites this exact trap
+// as why WithTelemetry carries a reflect probe; Authorized did not have one.
+func TestAuthorizedRejectsATypedNilPolicy(t *testing.T) {
+	t.Parallel()
+
+	// A nil POINTER in a non-nil interface. staticcheck will tell you
+	// `policy == nil` is never true here — that is the trap stated as a
+	// compiler-adjacent fact: the plain nil check every guard writes cannot
+	// see this value, and the policy underneath allows everything.
+	var typed *allowAll
+	var policy app.AuthorizationPolicy = typed
+
+	defer func() {
+		if recover() == nil {
+			t.Error("Authorized accepted a typed-nil policy — every request would be allowed")
+		}
+	}()
+	_ = app.Authorized[string, string](policy)
+}
+
+// sprintfS exercises the %s verb through a variable, so staticcheck does not
+// rewrite the very call under test into the String() it is meant to reach.
+func sprintfS(v any) string { return fmt.Sprintf("%s", v) }
+
+type allowAll struct{}
+
+func (*allowAll) Authorize(context.Context) error { return nil }

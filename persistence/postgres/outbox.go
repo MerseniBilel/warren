@@ -68,6 +68,16 @@ func WithOutbox(opts ...OutboxOption) Option {
 	return Option{apply: func(c *config) { c.outbox = &cfg }}
 }
 
+// Durable reports true: these records live in warren_outbox and outlive the
+// process.
+//
+// Saying so is what lets the relay warn when it is set to lead
+// unconditionally over this store — with more than one replica that
+// duplicates every event, and the rows say published either way.
+func (s *store) Durable() bool { return true }
+
+var _ outbox.Durable = (*store)(nil)
+
 func newOutboxStore(p *pool, uow *UnitOfWork, lc lifecycle.Lifecycle, cfg outboxConfig) outbox.Store {
 	s := &store{pool: p, cfg: cfg}
 	uow.OnCommit(outbox.Sink(s, cfg.encoder))

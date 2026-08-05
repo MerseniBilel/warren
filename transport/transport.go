@@ -184,7 +184,17 @@ func Status(code int) RouteOption {
 // decoded, so an unauthorized caller's malformed body is a 403 and not a
 // 400, and unauthenticated input never reaches the decoder. Guards travel as
 // data on the route for exactly that reason.
+// A nil policy — including a non-nil interface holding a nil pointer — is
+// refused HERE, at composition, not on request 1. Without this the boot
+// succeeded, the log said "http server listening", and every request to the
+// guarded route panicked inside the edge and became a 500. README's headline
+// is that every error the framework can detect surfaces at boot, and this one
+// is detectable at the call site: app.Authorized and transport.Raw both
+// already refuse their nil the same way.
 func Guard(p app.AuthorizationPolicy) RouteOption {
+	if app.IsNilPolicy(p) {
+		panic("transport: Guard given a nil policy — a route guarded by nothing would panic on its first request; construct the policy before Register runs")
+	}
 	return RouteOption{apply: func(c *routeConfig) { c.guards = append(c.guards, p) }}
 }
 

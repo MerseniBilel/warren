@@ -1,6 +1,7 @@
 package outbox_test
 
 import (
+	"bytes"
 	"context"
 	stderrors "errors"
 	"log/slog"
@@ -645,4 +646,71 @@ func (s *syncBuffer) String() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.b.String()
+}
+
+// durableStore is an in-memory store that CLAIMS durability — the shape a
+// database-backed store has.
+type durableStore struct{ outbox.Store }
+
+func (durableStore) Durable() bool { return true }
+
+// TestStandaloneOverADurableStoreWarns — field test #6, defect B2.
+// Standalone's doc has always said "the relay logs a warning naming the risk
+// and the fix". It never did: grep for Warn in outbox.go returned only that
+// comment. And the fix it named, postgres.AdvisoryLock, does not exist — the
+// identifier is postgres.WithAdvisoryLock.
+//
+// The tester lost 50% of their events to precisely this, with no error
+// anywhere: two relays over one table, each marking rows published, each
+// delivering to its own in-process broker.
+func TestStandaloneOverADurableStoreWarns(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	ctx, cancel := context.WithCancel(log.WithLogger(context.Background(), logger))
+
+	relay := outbox.NewRelay(durableStore{Store: outbox.NewMemoryStore()}, &capturePublisher{},
+		outbox.PollInterval(10*time.Millisecond))
+
+	done := make(chan struct{})
+	go func() { defer close(done); _ = relay.Run(ctx) }()
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+	<-done
+
+	out := buf.String()
+	if !strings.Contains(out, "leading unconditionally over a durable store") {
+		t.Errorf("no warning was emitted:\n%s", out)
+	}
+	// The fix must name a symbol that EXISTS — the old doc named one that did
+	// not, which is worse than saying nothing.
+	if !strings.Contains(out, "postgres.WithAdvisoryLock()") {
+		t.Errorf("the warning does not name a real fix:\n%s", out)
+	}
+}
+
+// TestStandaloneOverAMemoryStoreIsSilent — the warning must not fire for the
+// modular monolith, which is the configuration Standalone is CORRECT for and
+// the one every scaffolded app starts in. A warning everyone sees and nobody
+// can act on is noise that trains people to ignore warnings.
+func TestStandaloneOverAMemoryStoreIsSilent(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	ctx, cancel := context.WithCancel(log.WithLogger(context.Background(), logger))
+
+	relay := outbox.NewRelay(outbox.NewMemoryStore(), &capturePublisher{},
+		outbox.PollInterval(10*time.Millisecond))
+
+	done := make(chan struct{})
+	go func() { defer close(done); _ = relay.Run(ctx) }()
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+	<-done
+
+	if strings.Contains(buf.String(), "leading unconditionally") {
+		t.Errorf("the in-process store triggered a warning it cannot act on:\n%s", buf.String())
+	}
 }

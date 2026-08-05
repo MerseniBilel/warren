@@ -74,6 +74,13 @@ func Module(opts Options) (string, error) {
 	data := map[string]string{
 		"Module": modPath, "Name": name, "Title": upperFirst(name),
 		"EnvPrefix": strconv.Quote(envPrefix(opts.Dir) + "_NAME"),
+		// A --db postgres project's platform module imports the config
+		// module, whose DatabaseURL is validate:"required" — so a generated
+		// boot test that only sets _NAME turns a green `go test ./...` red
+		// the moment anyone runs `warren g module`. The scaffold's own test
+		// skips; this one must too.
+		"DSNVar":   strconv.Quote(envPrefix(opts.Dir) + "_DATABASE_URL"),
+		"NeedsDSN": map[bool]string{true: "yes", false: ""}[hasPlatformPostgres(opts.Dir)],
 	}
 
 	files := map[string]string{

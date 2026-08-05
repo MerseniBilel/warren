@@ -233,6 +233,7 @@ func TestTransportIndependence(t *testing.T) {
 		"reflect":                               true, // one constant-time typed-nil probe in WithTelemetry
 		"log/slog":                              true, // Identity.LogValue, so a claims map never reaches a log line
 		"slices":                                true, // Identity.HasScope
+		"unicode":                               true, // the blank-subject check in WithIdentity
 		"time":                                  true,
 		"github.com/MerseniBilel/warren/errors": true,
 		"github.com/MerseniBilel/warren/log":    true,

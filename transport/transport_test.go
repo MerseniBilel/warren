@@ -776,3 +776,44 @@ func TestEventRoutesCannotBeMadeStrict(t *testing.T) {
 		t.Errorf("an event carrying an unknown member did not reach the handler: %v", err)
 	}
 }
+
+// TestGuardRefusesANilPolicy — field test #6, defect B1, and the one finding
+// that contradicts a stated invariant. Guard appended the policy with no
+// check, so the boot SUCCEEDED, the log said "http server listening", and
+// every request to the guarded route panicked in the edge and became a 500.
+//
+// README's headline is that every error the framework can detect surfaces at
+// boot, never on request 1. This one is detectable at the call site, and the
+// fix was already written twice in the same codebase — app.Authorized and
+// transport.Raw both refuse their nil the same way.
+func TestGuardRefusesANilPolicy(t *testing.T) {
+	t.Parallel()
+
+	t.Run("a nil interface", func(t *testing.T) {
+		t.Parallel()
+		defer func() {
+			if recover() == nil {
+				t.Error("Guard(nil) was accepted — every request to the route would 500")
+			}
+		}()
+		_ = transport.Guard(nil)
+	})
+
+	t.Run("a non-nil interface holding a nil pointer", func(t *testing.T) {
+		t.Parallel()
+		// A nil POINTER in a non-nil interface: staticcheck reports that
+		// `p == nil` is never true here, which is the trap stated as a fact.
+		var typed *nilPolicy
+		var p app.AuthorizationPolicy = typed
+		defer func() {
+			if recover() == nil {
+				t.Error("Guard accepted a typed-nil policy — the route would allow everyone")
+			}
+		}()
+		_ = transport.Guard(p)
+	})
+}
+
+type nilPolicy struct{}
+
+func (*nilPolicy) Authorize(context.Context) error { return nil }

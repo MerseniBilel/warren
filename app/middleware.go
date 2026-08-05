@@ -158,6 +158,24 @@ func WithTelemetry(ctx context.Context, t Telemetry) context.Context {
 	return context.WithValue(ctx, telemetryKey{}, t)
 }
 
+// IsNilPolicy reports whether a policy is nil, including a non-nil interface
+// holding a nil pointer — which would allow every request it guards.
+//
+// It is exported because transport.Guard must make the same refusal at the
+// same moment, and a second copy of the probe is a second thing to get wrong.
+func IsNilPolicy(p AuthorizationPolicy) bool {
+	if p == nil {
+		return true
+	}
+	v := reflect.ValueOf(p)
+	switch v.Kind() {
+	case reflect.Pointer, reflect.Map, reflect.Func, reflect.Chan, reflect.Slice:
+		return v.IsNil()
+	default:
+		return false
+	}
+}
+
 func isTypedNil(t Telemetry) bool {
 	v := reflect.ValueOf(t)
 	switch v.Kind() {
@@ -304,7 +322,12 @@ func retryable(err error) bool {
 // applies to HTTP, gRPC, and consumers. A nil policy panics at composition
 // time, like Chain's guards.
 func Authorized[Req, Res any](policy AuthorizationPolicy) Middleware[Req, Res] {
-	if policy == nil {
+	// isNilPolicy, not policy == nil: a non-nil interface holding a nil
+	// pointer passes the plain check and then ALLOWS every request, which is
+	// the typed-nil trap Identity's own doc cites as the reason it is a
+	// struct. WithTelemetry has carried a probe for this since it shipped;
+	// this had the check without the probe.
+	if IsNilPolicy(policy) {
 		panic("app: Authorized composed with a nil policy — construct the policy before boot step 5 composes the route table")
 	}
 	return func(next Handler[Req, Res]) Handler[Req, Res] {

@@ -2,8 +2,10 @@ package app
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"slices"
+	"unicode"
 
 	"github.com/MerseniBilel/warren/errors"
 )
@@ -88,7 +90,30 @@ func (id Identity) LogValue() slog.Value {
 	)
 }
 
-var _ slog.LogValuer = Identity{}
+// String renders the identity for fmt WITHOUT its claims.
+//
+// LogValue covers slog's top-level attr value and nothing else: slog does not
+// call LogValuer on a NESTED value, and fmt never calls it at all. So an
+// identity logged through any of these leaked the whole claims map —
+//
+//	fmt.Errorf("denied for %v", id)      // the 2 a.m. line
+//	slog.Any("w", struct{ ID Identity }{id})
+//	fmt.Sprintf("%+v", []Identity{id})
+//
+// — and the first of those can wrap into errors.Internal, which reaches a log
+// AND a response body. One String method closes the entire fmt family,
+// including %v, %s, %+v and every container that formats its elements.
+//
+// It still names the caller, deliberately: a redaction that says nothing gets
+// replaced by someone printing the fields, which leaks again.
+func (id Identity) String() string {
+	return "Identity(" + id.Subject + "@" + id.Issuer + ")"
+}
+
+var (
+	_ slog.LogValuer = Identity{}
+	_ fmt.Stringer   = Identity{}
+)
 
 type identityKey struct{}
 
@@ -109,10 +134,46 @@ type identityKey struct{}
 // installs no identity middleware of its own, which is what keeps
 // transport/http's committed request budget where it is.
 func WithIdentity(ctx context.Context, id Identity) context.Context {
-	if id.Subject == "" {
+	if blank(id.Subject) {
 		return ctx
 	}
 	return context.WithValue(ctx, identityKey{}, id)
+}
+
+// blank reports whether a subject is empty once whitespace and the invisible
+// characters that read as empty are removed.
+//
+// Comparing against "" alone was not enough: " ", "\t", "\x00", a byte-order
+// mark and a zero-width space were all carried, and RequireAuthenticated
+// allowed every one of them. A user who trusts the documented refusal would
+// file audit rows owned by "\x00". It costs one pass over a short string, on
+// the credential path only.
+func blank(subject string) bool {
+	for _, r := range subject {
+		switch r {
+		case '\x00', '\ufeff', '\u200b', '\u200c', '\u200d':
+			continue // invisible: reads as empty to every human and every log
+		}
+		if !unicode.IsSpace(r) {
+			return false
+		}
+	}
+	return true
+}
+
+// WithoutIdentity returns a copy of ctx carrying NO identity, whatever it
+// carried before.
+//
+// Seeding a zero Identity does not do this — WithIdentity refuses a blank
+// subject and returns the context unchanged, so the PREVIOUS identity stays.
+// A second authentication stage that failed and "reset" identity to the zero
+// value was therefore fail-OPEN: the first stage's caller survived. This is
+// the explicit way to say no-one, and it is the direction that matters.
+func WithoutIdentity(ctx context.Context) context.Context {
+	if _, ok := IdentityFromContext(ctx); !ok {
+		return ctx
+	}
+	return context.WithValue(ctx, identityKey{}, Identity{})
 }
 
 // IdentityFromContext returns the caller's identity and whether there is one.
@@ -131,6 +192,13 @@ func WithIdentity(ctx context.Context, id Identity) context.Context {
 // Reading costs 0 allocations, present or absent.
 func IdentityFromContext(ctx context.Context) (Identity, bool) {
 	id, ok := ctx.Value(identityKey{}).(Identity)
+	if !ok || blank(id.Subject) {
+		// The blank case is WithoutIdentity's marker. Checking it here rather
+		// than trusting the seeding path means a value that reached the
+		// context by any route still cannot present as an authenticated
+		// caller with no principal.
+		return Identity{}, false
+	}
 	return id, ok
 }
 

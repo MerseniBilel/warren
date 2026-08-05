@@ -1,6 +1,7 @@
 package config_test
 
 import (
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -28,6 +29,15 @@ func TestDefaults(t *testing.T) {
 }
 
 func TestNameIsRequired(t *testing.T) {
+	// Unset, not merely absent. The README tells you to run
+	// `{{.EnvPrefix}}_NAME={{.Name}} go run ./cmd/{{.Name}}`, so the variable
+	// is exported in exactly the shell this test runs in — and a test that
+	// passes only on a machine where it was never set is a test that fails
+	// for everyone who followed the instructions.
+	t.Setenv("{{.EnvPrefix}}_NAME", "")
+	if err := os.Unsetenv("{{.EnvPrefix}}_NAME"); err != nil {
+		t.Fatalf("unsetting: %v", err)
+	}
 {{- if eq .DB "postgres" }}
 	t.Setenv("{{.EnvPrefix}}_DATABASE_URL", "postgres://localhost:5432/{{.Name}}?sslmode=disable")
 {{- end }}

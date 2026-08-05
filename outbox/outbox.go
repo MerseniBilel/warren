@@ -183,10 +183,37 @@ type Elector interface {
 	Lead(ctx context.Context, fn func(context.Context) error) error
 }
 
+// Durable is implemented by a Store that survives the process — one backed by
+// a database rather than by memory.
+//
+// It exists so the relay can tell apart the two configurations that use the
+// Standalone elector: a modular monolith, where always-leading is right, and
+// several replicas over one table, where it silently duplicates every event.
+// A Store that does not implement this is assumed NOT durable, which is true
+// of the in-process store and makes the warning impossible to trigger
+// spuriously.
+type Durable interface {
+	// Durable reports whether records outlive this process.
+	Durable() bool
+}
+
+// durable reports whether s has declared itself durable.
+func durable(s Store) bool {
+	d, ok := s.(Durable)
+	return ok && d.Durable()
+}
+
 // Standalone is the default Elector: it always leads. Correct for a single
-// instance and for the modular monolith; with several replicas and a durable
-// store, every replica would drain, so the relay logs a warning naming the
-// risk and the fix (postgres.AdvisoryLock).
+// instance and for the modular monolith.
+//
+// With several replicas and a DURABLE store it is wrong, and quietly: every
+// replica drains the same table, each marks records published, and each
+// delivers to its own broker. A field test lost 50% of its events to exactly
+// this, with no error anywhere — the rows said published, and they were.
+//
+// So the relay warns at startup when this elector is paired with a store that
+// reports itself durable, naming the fix. It cannot know how many replicas
+// there are; it can know that the combination is only safe at one.
 func Standalone() Elector { return standalone{} }
 
 type standalone struct{}
@@ -331,6 +358,15 @@ func NewRelay(store Store, pub broker.Publisher, opts ...RelayOption) *Relay {
 // definition, and the disposition rules already decide what happens to the
 // records.
 func (r *Relay) Run(ctx context.Context) error {
+	// The warning Standalone's doc has always promised and never emitted.
+	// Once, at startup, not per drain.
+	if _, standalone := r.elector.(standalone); standalone && durable(r.store) {
+		log.FromContext(ctx).WarnContext(ctx,
+			"outbox relay is leading unconditionally over a durable store",
+			"risk", "with more than one replica every replica drains the same table, so each event is published once PER REPLICA and each marks the row published — silent duplication, no error anywhere",
+			"fix", "postgres.WithAdvisoryLock() on the postgres module, or outbox.LeaderElection(e) with your own elector",
+			"safe_if", "this service runs as exactly one instance")
+	}
 	return r.elector.Lead(ctx, func(ctx context.Context) error {
 		waiter, _ := r.store.(Waiter)
 		timer := time.NewTimer(r.poll)

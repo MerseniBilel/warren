@@ -849,3 +849,42 @@ func TestGuardDeniesBeforeDecodeWithARealPolicy(t *testing.T) {
 		t.Error("the handler ran behind a denying guard")
 	}
 }
+
+// TestWriteErrorIsUsableFromEdgeMiddleware — field test #6's highest-value
+// gap. An authenticator that rejects a forged token never reaches a route, so
+// nothing in the framework rendered its refusal, and every edge middleware
+// hand-copied the envelope out of a golden file. Two copies already differed
+// in key order.
+func TestWriteErrorIsUsableFromEdgeMiddleware(t *testing.T) {
+	t.Parallel()
+
+	reject := func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Header.Get("X-Subject") == "" {
+				whttp.WriteError(w, r, errors.Unauthenticated("invalid or expired credential"))
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+
+	c := &scopedController{}
+	m := warren.NewModule("edgewrite", warren.Controllers(func() *scopedController { return c }))
+	base := serve(t, []warren.Module{m}, whttp.Middleware(reject))
+
+	res, body := doWithHeaders(t, "GET", base+"/scoped/u-1", "", nil)
+	if res.StatusCode != 401 {
+		t.Errorf("status = %d, want 401\n%s", res.StatusCode, body)
+	}
+	// The SAME envelope the framework writes: same keys, same order, same
+	// correlation id — which is the entire point of exporting it.
+	if !strings.Contains(body, `{"error":{"code":"UNAUTHENTICATED","message":"invalid or expired credential"`) {
+		t.Errorf("the edge envelope is not the framework's:\n%s", body)
+	}
+	if !strings.Contains(body, `"correlation_id"`) {
+		t.Errorf("the edge envelope carries no correlation id:\n%s", body)
+	}
+	if res.Header.Get("Content-Type") != "application/json; charset=utf-8" {
+		t.Errorf("content type = %q", res.Header.Get("Content-Type"))
+	}
+}
