@@ -575,14 +575,27 @@ func (sameTenant) Authorize(ctx context.Context) error {
 	if !ok {
 		return errors.Unauthenticated("no caller identity")
 	}
+	p := transport.ParamsFromContext(ctx)
+	if p == nil {
+		// No params on this context at all — an event route, or a unit test.
+		// DENY. The tempting reading is "nothing to compare, not applicable,
+		// allow", and that is a silent cross-tenant bypass: a policy that
+		// cannot check must not pass.
+		return errors.PermissionDenied("this tenant")
+	}
 	want, _ := app.Claim[string](id, "tid")
-	got, _ := transport.ParamsFromContext(ctx).Path("tenant")
+	got, _ := p.Path("tenant")
 	if want != got {
 		return errors.PermissionDenied("this tenant")
 	}
 	return nil
 }
 ```
+
+`ParamsFromContext` returns nil rather than an empty value on purpose: an
+empty one would answer `("", false)` for every name, which reads as "no such
+parameter" and lets a policy conclude it has nothing to check. The nil forces
+the choice to be written down.
 
 **Identity does not cross the broker in v0.1.** A consumer's context carries
 the correlation ID but no caller, so an audit trail built from events must
