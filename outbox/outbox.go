@@ -374,10 +374,16 @@ func (r *Relay) Run(ctx context.Context) error {
 			"outbox relay is leading unconditionally over a durable store",
 			"risk", "with more than one replica every replica drains the same table, so each event is published once PER REPLICA and each marks the row published — silent duplication, no error anywhere",
 			// BOTH halves, spelled out. The option alone only PROVIDES an
-			// Elector; the relay ignores it unless a constructor injects it
-			// and passes LeaderElection. A field test applied the one-line
-			// version of this advice and still duplicated every event.
-			"fix", "TWO steps, and the first alone does nothing: (1) add postgres.WithAdvisoryLock() so the adapter provides an outbox.Elector, and (2) inject that outbox.Elector into the constructor that builds the relay and pass outbox.LeaderElection(e)",
+			// Elector; the relay ignores it unless the elector it is given is
+			// that one. A field test applied the one-line version of this
+			// advice and still duplicated every event.
+			//
+			// Step 2 has two shapes and naming only one sends half the
+			// readers looking for work already done: a scaffolded app's
+			// newRelay ALREADY injects outbox.Elector and passes
+			// LeaderElection, so what is left there is deleting the local
+			// provider that returns Standalone.
+			"fix", "TWO steps, and the first alone does nothing: (1) add postgres.WithAdvisoryLock(), so the adapter provides an outbox.Elector; (2) make that the elector this relay receives — if a local provider returns outbox.Standalone(), delete it and its Providers entry (leaving both is an ambiguous binding at boot, which names them); if nothing injects an Elector yet, add outbox.Elector to the relay's constructor and pass outbox.LeaderElection(e)",
 			"safe_if", "this service runs as exactly one instance")
 	}
 	// A durable store draining into a broker that cannot redeliver loses
