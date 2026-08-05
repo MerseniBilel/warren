@@ -273,7 +273,7 @@ func TestPublishOfNothingIsNotAnError(t *testing.T) {
 func TestSubscribeWithoutAGroupIsRefused(t *testing.T) {
 	t.Parallel()
 
-	c := &client{cfg: defaults(), handlers: map[string][]broker.MessageHandler{}}
+	c := &client{cfg: defaults(), handlers: map[string][]*subscription{}}
 	err := c.Subscribe(context.Background(), "t", func(context.Context, broker.Message) error { return nil })
 	if err == nil {
 		t.Fatal("subscribing with no consumer group was accepted")
@@ -328,4 +328,27 @@ type fakeMechanism struct{}
 func (fakeMechanism) Name() string { return "FAKE" }
 func (fakeMechanism) Authenticate(context.Context, string) (sasl.Session, []byte, error) {
 	return nil, nil, nil
+}
+
+// TestUnknownTopicIsExplained pins the diagnostic, not just the code.
+//
+// The code was always right — a missing topic is permanent, so INVALID parks
+// the outbox record instead of retrying it forever. What a developer saw was
+// the wire protocol's sentence about hosting a topic-partition, which does not
+// tell them that provisioning or AutoCreateTopics is the fix.
+func TestUnknownTopicIsExplained(t *testing.T) {
+	err := classifyProduce(kerr.UnknownTopicOrPartition, "orders")
+	if code := werrors.CodeOf(err); code != werrors.CodeInvalid {
+		t.Errorf("code = %v, want INVALID", code)
+	}
+	for _, want := range []string{`"orders"`, "AutoCreateTopics", "--partitions"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("diagnostic does not mention %s:\n%s", want, err)
+		}
+	}
+	// A different broker error must not be rewritten into this one.
+	other := classifyProduce(kerr.NotEnoughReplicas, "orders")
+	if strings.Contains(other.Error(), "AutoCreateTopics") {
+		t.Errorf("unrelated error got the unknown-topic diagnostic:\n%s", other)
+	}
 }

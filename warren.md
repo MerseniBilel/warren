@@ -1620,21 +1620,33 @@ func PartitionAssignment(Balancer) Option
 func CommitInterval(time.Duration) Option
 func SessionTimeout(time.Duration) Option
 func ConnectTimeout(time.Duration) Option
-func StatementTimeout(time.Duration) Option   // 30s, both sides of the wire; 0 disables
 func ProduceTimeout(time.Duration) Option
 func FetchMaxBytes(int32) Option
 func MaxPollRecords(int) Option
 func HealthTimeout(time.Duration) Option
+func AutoCreateTopics() Option                // OFF by default; see below
+
+// authentication
+func SASL(Mechanism) Option
+func Plain(user, pass string) Mechanism
 
 // the escape hatches, for what these options do not cover
 func Configure(...kgo.Opt) Option
 func Raw(func(context.Context, *kgo.Client) error) Option
+func RawSASL(sasl.Mechanism) Option
 ```
 
-There is no `SASL` and no `Transactional`: an earlier draft of this block
-listed both. SASL goes through `Configure(kgo.SASL(...))`; the outbox is how
-Warren makes publication atomic, so a Kafka producer transaction would be a
-second mechanism for the same guarantee.
+`AutoCreateTopics` is off by default, and that default is the production one:
+an auto-created topic takes the broker's default partition count and
+replication factor, which is one of each on a stock cluster — a throughput
+ceiling and a durability hole chosen implicitly by whichever service published
+first. Publishing to a topic that does not exist is `INVALID`, not
+`UNAVAILABLE`: it is permanent, so the outbox parks the record for a human
+instead of retrying it forever.
+
+There is no `Transactional`: the outbox is how Warren makes publication
+atomic, so a Kafka producer transaction would be a second mechanism for the
+same guarantee.
 
 **Usage**
 

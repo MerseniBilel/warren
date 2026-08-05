@@ -6,7 +6,6 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/twmb/franz-go/pkg/kerr"
 	"github.com/twmb/franz-go/pkg/kgo"
@@ -28,7 +27,7 @@ type client struct {
 	kc   *kgo.Client
 
 	mu       sync.Mutex
-	handlers map[string][]broker.MessageHandler // topic → handlers, fan-out in process
+	handlers map[string][]*subscription // topic → subscriptions, fan-out in process
 	topics   []string
 	started  bool
 
@@ -71,6 +70,9 @@ func newClient(cfg config, lc lifecycle.Lifecycle, reg health.Registry) (*client
 		kgo.RecordRetries(10),
 		kgo.WithLogger(kgoLogger{}),
 	}
+	if cfg.autoCreate {
+		opts = append(opts, kgo.AllowAutoTopicCreation())
+	}
 	if cfg.clientID != "" {
 		opts = append(opts, kgo.ClientID(cfg.clientID))
 	}
@@ -105,7 +107,7 @@ func newClient(cfg config, lc lifecycle.Lifecycle, reg health.Registry) (*client
 	// breaks the guarantees above. Said so in Configure's doc comment.
 	opts = append(opts, cfg.configure...)
 
-	c := &client{cfg: cfg, opts: opts, handlers: map[string][]broker.MessageHandler{}}
+	c := &client{cfg: cfg, opts: opts, handlers: map[string][]*subscription{}}
 
 	if err := reg.Register(health.NewCheck("kafka", c.probe), health.Timeout(cfg.healthTimeout)); err != nil {
 		return nil, err
@@ -201,9 +203,20 @@ func (c *client) Publish(ctx context.Context, topic string, msgs ...broker.Messa
 		records = append(records, toRecord(topic, m))
 	}
 	if err := c.kc.ProduceSync(ctx, records...).FirstErr(); err != nil {
-		return classify(err)
+		return classifyProduce(err, topic)
 	}
 	return nil
+}
+
+// classifyProduce is classify with the topic in hand, so the one failure a
+// developer meets on their first publish — the topic does not exist — can say
+// so in Warren's voice instead of the wire protocol's.
+func classifyProduce(err error, topic string) error {
+	var kerrErr *kerr.Error
+	if stderrors.As(err, &kerrErr) && kerrErr.Code == kerr.UnknownTopicOrPartition.Code {
+		return errors.Invalid("record", errUnknownTopic(topic))
+	}
+	return classify(err)
 }
 
 // classify maps a produce failure onto the seven-code vocabulary.
@@ -253,5 +266,3 @@ func (kgoLogger) Level() kgo.LogLevel { return kgo.LogLevelWarn }
 func (kgoLogger) Log(_ kgo.LogLevel, msg string, keyvals ...any) {
 	slog.Warn(msg, append([]any{"module", ModuleName}, keyvals...)...)
 }
-
-var _ = time.Second

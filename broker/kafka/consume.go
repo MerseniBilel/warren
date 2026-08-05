@@ -3,8 +3,8 @@ package kafka
 import (
 	"context"
 	"log/slog"
-	"reflect"
 	"sync"
+	"sync/atomic"
 
 	"github.com/twmb/franz-go/pkg/kgo"
 
@@ -39,9 +39,12 @@ func (c *client) Subscribe(ctx context.Context, topic string, h broker.MessageHa
 		return errNoConsumerGroup(topic)
 	}
 
+	sub := &subscription{h: h}
+	sub.live.Store(true)
+
 	c.mu.Lock()
 	first := len(c.handlers[topic]) == 0
-	c.handlers[topic] = append(c.handlers[topic], h)
+	c.handlers[topic] = append(c.handlers[topic], sub)
 	if first {
 		c.topics = append(c.topics, topic)
 	}
@@ -60,16 +63,24 @@ func (c *client) Subscribe(ctx context.Context, topic string, h broker.MessageHa
 	// Deregister when this subscription's context ends. The loop is shared,
 	// so it must keep running for the other subscriptions; what has to stop
 	// is delivery to THIS handler.
+	//
+	// The flag is cleared BEFORE the slice edit, and dispatch reads it once
+	// per record. Removing from the slice alone is not enough: dispatch
+	// snapshots the subscription set once per partition and a fetched batch
+	// can be thousands of records long, so a cancel landing mid-batch would
+	// otherwise go unseen until the next poll. Against a real broker that
+	// gap delivered 121 messages after cancel.
 	go func() {
 		<-ctx.Done()
+		sub.live.Store(false)
 		c.mu.Lock()
 		hs := c.handlers[topic]
-		// Handlers are func values and so are not comparable; identity is
-		// the code pointer. Two subscriptions sharing one handler function
-		// is not a shape this driver creates — each pipeline closes over its
-		// own name and inbox.
+		// Identity is the subscription POINTER, not the handler's code
+		// pointer: func values are not comparable, and two subscriptions
+		// sharing one handler function — which fan-out makes ordinary —
+		// compare equal by code pointer and deregister each other.
 		for i, other := range hs {
-			if reflect.ValueOf(other).Pointer() == reflect.ValueOf(h).Pointer() {
+			if other == sub {
 				c.handlers[topic] = append(hs[:i:i], hs[i+1:]...)
 				break
 			}
@@ -77,6 +88,15 @@ func (c *client) Subscribe(ctx context.Context, topic string, h broker.MessageHa
 		c.mu.Unlock()
 	}()
 	return nil
+}
+
+// subscription is one Subscribe call: a handler plus whether it is still live.
+//
+// The flag exists because deregistration has to take effect in the MIDDLE of
+// a dispatched batch, not merely by the next poll.
+type subscription struct {
+	h    broker.MessageHandler
+	live atomic.Bool
 }
 
 // startLoop starts the single poll loop, once.
@@ -113,6 +133,20 @@ func (c *client) stopConsuming(ctx context.Context) error {
 // test can drive exactly one.
 func (c *client) poll(ctx context.Context) {
 	fetches := c.kc.PollRecords(ctx, c.cfg.maxPollRecords)
+
+	// BlockRebalanceOnPoll means the client will not rebalance — and cannot
+	// finish leaving the group — until this is called. Deferring it covers
+	// the early return below, which used to skip it: the LAST poll of a
+	// cancelled loop left the rebalance blocked, and Stop then waited
+	// THIRTY SECONDS for a coordinator it had not released. Kubernetes'
+	// default grace period is thirty seconds, so a rolling deploy killed
+	// every consumer mid-commit.
+	//
+	// Deferring does not weaken the guarantee it replaces: a deferred call
+	// still runs after wg.Wait() below, so a partition is no more revocable
+	// mid-flight than before.
+	defer c.kc.AllowRebalance()
+
 	if fetches.IsClientClosed() || ctx.Err() != nil {
 		return
 	}
@@ -135,9 +169,6 @@ func (c *client) poll(ctx context.Context) {
 		}(fp)
 	})
 	wg.Wait()
-
-	// Only now: a partition is never revoked mid-flight.
-	c.kc.AllowRebalance()
 }
 
 // dispatch runs one partition's records through the chain and decides what to
@@ -152,9 +183,9 @@ func (c *client) poll(ctx context.Context) {
 // before the driver ever sees the error.
 func (c *client) dispatch(ctx context.Context, fp kgo.FetchTopicPartition) {
 	c.mu.Lock()
-	handlers := append([]broker.MessageHandler(nil), c.handlers[fp.Topic]...)
+	subs := append([]*subscription(nil), c.handlers[fp.Topic]...)
 	c.mu.Unlock()
-	if len(handlers) == 0 {
+	if len(subs) == 0 {
 		return
 	}
 
@@ -162,7 +193,14 @@ func (c *client) dispatch(ctx context.Context, fp kgo.FetchTopicPartition) {
 	for _, rec := range fp.Records {
 		msg := fromRecord(rec)
 		ok := true
-		for _, h := range handlers {
+		for _, s := range subs {
+			// Cancelled between records: stop delivering to THIS handler
+			// immediately, and do not let its absence fail the record for
+			// the others. A cancelled subscription is not a failed one.
+			if !s.live.Load() {
+				continue
+			}
+			h := s.h
 			// Every handler must dispose of the record before its offset can
 			// advance: with fan-out the offset is shared, so one failure
 			// redelivers to all of them. The chain's per-subscription dedupe

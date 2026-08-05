@@ -51,6 +51,7 @@ type config struct {
 	fetchMaxBytes  int32
 	maxPollRecords int
 	healthTimeout  time.Duration
+	autoCreate     bool
 	configure      []kgo.Opt
 	raw            []func(context.Context, *kgo.Client) error
 }
@@ -193,10 +194,36 @@ func HealthTimeout(d time.Duration) Option {
 	return Option{apply: func(c *config) { c.healthTimeout = d }}
 }
 
+// AutoCreateTopics lets a publish to an unknown topic create it.
+//
+// OFF by default, and that default is the production one. An auto-created
+// topic gets the BROKER's defaults for partition count and replication
+// factor — commonly one partition and one replica, which caps your
+// throughput at one consumer and loses the topic with the node. Neither is
+// a choice you want made implicitly by whichever service published first.
+// Provision topics with the rest of your infrastructure instead.
+//
+// It is genuinely useful for a local broker and for tests, where the topic
+// names are generated and provisioning them is noise:
+//
+//	kafka.Broker(
+//	    kafka.Brokers("localhost:9092"),
+//	    kafka.AutoCreateTopics(),
+//	)
+//
+// The broker must also permit it (auto.create.topics.enable, on by default
+// in a stock cluster and off in most managed ones). This option only sets
+// the client's half: franz-go will not ask for creation without it, so a
+// publish to a missing topic fails even where the broker would have allowed
+// it — which is the failure this option exists to explain.
+func AutoCreateTopics() Option {
+	return Option{apply: func(c *config) { c.autoCreate = true }}
+}
+
 // Configure appends franz-go options to the ones this package builds, BEFORE
 // the client is created — the only moment a hook, a custom partitioner or a
-// dial function can still be set. It is the first of this package's two named
-// escape hatches (AGENT.md invariant 3), and it exists because instrumentation
+// dial function can still be set. It is one of this package's three named
+// escape hatches (AGENT.md invariant 3), with Raw and RawSASL, and it exists because instrumentation
 // cannot be wired any other way: the hook seam is a franz-go interface, and
 // warren/observability may not import this module (invariant 4).
 //
@@ -214,7 +241,7 @@ func Configure(opts ...kgo.Opt) Option {
 // fetch succeeded and before any dependent hook starts. An error fails the
 // boot.
 //
-// It is the second named escape hatch: create a topic, inspect broker
+// It is a named escape hatch (AGENT.md invariant 3): create a topic, inspect broker
 // metadata, reach a franz-go API this package does not model. It CANNOT
 // install a hook — hooks are read when the client is constructed, which has
 // already happened. Use Configure for that.

@@ -95,3 +95,28 @@ func errNotStarted() error {
 			"  constructor wires; it does not acquire. Move the call into an\n" +
 			"  OnStart hook of your own, which runs after this one.")
 }
+
+// errUnknownTopic explains a publish to a topic the cluster does not have.
+//
+// franz-go reports it as "UNKNOWN_TOPIC_OR_PARTITION: This server does not
+// host this topic-partition", which reads like a routing fault rather than
+// what it is. The two fixes are genuinely different — one is infrastructure,
+// the other is a client option — so both are named.
+func errUnknownTopic(topic string) error {
+	return diagnostic(fmt.Sprintf(
+		"✗ kafka has no topic %q\n\n"+
+			"    The publish reached the cluster; the cluster has no such topic\n"+
+			"    and was not asked to create one.\n\n"+
+			"  In production, provision it alongside the rest of your\n"+
+			"  infrastructure — partition count and replication factor are\n"+
+			"  capacity decisions, not something a first publish should pick:\n\n"+
+			"      kafka-topics.sh --create --topic %s \\\n"+
+			"          --partitions 6 --replication-factor 3\n\n"+
+			"  For a local broker or a test, let the client ask for creation:\n\n"+
+			"      kafka.Broker(\n"+
+			"          kafka.Brokers(...),\n"+
+			"          kafka.AutoCreateTopics(),\n"+
+			"      )\n\n"+
+			"  That needs auto.create.topics.enable on the broker too — on in a\n"+
+			"  stock cluster, off in most managed ones.", topic, topic))
+}

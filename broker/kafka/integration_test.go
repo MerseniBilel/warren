@@ -64,7 +64,7 @@ func newKafka(t *testing.T) (broker.Publisher, broker.Subscriber) {
 		pub broker.Publisher
 		sub broker.Subscriber
 	)
-	km := kafka.Broker(kafka.Brokers(addr), kafka.ConsumerGroup(group))
+	km := kafka.Broker(kafka.Brokers(addr), kafka.ConsumerGroup(group), kafka.AutoCreateTopics())
 	probe := warren.NewModule("probe",
 		warren.Imports(km),
 		warren.Providers(func(p broker.Publisher, s broker.Subscriber) *captured {
@@ -79,7 +79,36 @@ func newKafka(t *testing.T) (broker.Publisher, broker.Subscriber) {
 		t.Fatalf("boot: %v", err)
 	}
 	t.Cleanup(func() { _ = a.Stop(context.Background()) })
-	return pub, sub
+	// Kafka topics OUTLIVE a subtest; an in-process broker's do not. Every
+	// subtest asks for topic "orders", so without this each one consumes the
+	// PREVIOUS subtests' records: envelope round-trip read "evt-0" from the
+	// at-least-once test and reported the envelope as corrupt. A fresh
+	// consumer group does not save you — it makes it certain, because a group
+	// with no committed offset resets to the START of the topic.
+	//
+	// Renaming topics is the whole of the isolation. Nothing else about the
+	// driver is wrapped, so what the suite exercises is still the real one.
+	p := "-" + strconv.Itoa(groupSeq)
+	return prefixPub{pub, p}, prefixSub{sub, p}
+}
+
+// prefixPub and prefixSub give a subtest its own topic namespace.
+type prefixPub struct {
+	pub    broker.Publisher
+	suffix string
+}
+
+func (p prefixPub) Publish(ctx context.Context, topic string, msgs ...broker.Message) error {
+	return p.pub.Publish(ctx, topic+p.suffix, msgs...)
+}
+
+type prefixSub struct {
+	sub    broker.Subscriber
+	suffix string
+}
+
+func (p prefixSub) Subscribe(ctx context.Context, topic string, h broker.MessageHandler) error {
+	return p.sub.Subscribe(ctx, topic+p.suffix, h)
 }
 
 type captured struct{}
