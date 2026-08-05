@@ -34,6 +34,14 @@ type client struct {
 	loopOnce sync.Once
 	stopLoop context.CancelFunc
 	loopDone chan struct{}
+
+	// held is the partitions this member currently owns, maintained by the
+	// group callbacks. It exists to answer one question — "am I consuming
+	// anything at all?" — which no other signal answers: an empty fetch
+	// means no DATA, not no ASSIGNMENT.
+	heldMu     sync.Mutex
+	held       map[string][]int32
+	idleWarned bool
 }
 
 var (
@@ -108,6 +116,17 @@ func newClient(cfg config, lc lifecycle.Lifecycle, reg health.Registry) (*client
 	opts = append(opts, cfg.configure...)
 
 	c := &client{cfg: cfg, opts: opts, handlers: map[string][]*subscription{}}
+	if cfg.group != "" {
+		// Appended after the client exists, because the callbacks are its
+		// methods. They only record assignment and schedule a check —
+		// franz-go forbids Close or LeaveGroup from inside them, and neither
+		// happens here.
+		c.opts = append(c.opts,
+			kgo.OnPartitionsAssigned(c.onAssigned),
+			kgo.OnPartitionsRevoked(c.onRevoked),
+			kgo.OnPartitionsLost(c.onRevoked),
+		)
+	}
 
 	if err := reg.Register(health.NewCheck("kafka", c.probe), health.Timeout(cfg.healthTimeout)); err != nil {
 		return nil, err

@@ -3,8 +3,10 @@ package kafka
 import (
 	"context"
 	"log/slog"
+	"slices"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/twmb/franz-go/pkg/kgo"
 
@@ -111,6 +113,8 @@ func (c *client) startLoop() {
 				c.poll(ctx)
 			}
 		}()
+		// Bound by the same ctx, so it ends with the loop it belongs to.
+		go c.watchIdle(ctx)
 	})
 }
 
@@ -224,5 +228,112 @@ func (c *client) dispatch(ctx context.Context, fp kgo.FetchTopicPartition) {
 		c.kc.SetOffsets(map[string]map[int32]kgo.EpochOffset{
 			fp.Topic: {fp.Partition: {Epoch: failed.LeaderEpoch, Offset: failed.Offset}},
 		})
+	}
+}
+
+// idleWarnAfter is how long a member may hold no partitions before the
+// warning fires. A cooperative rebalance settles in seconds; this is long
+// enough that a routine one never trips it, and short enough that a
+// misconfigured deployment is told before anyone goes looking. It is a
+// variable so a test need not wait.
+var idleWarnAfter = 30 * time.Second
+
+// onAssigned and onRevoked maintain the set of partitions this member holds.
+//
+// franz-go calls them serially with each other, so the map needs no ordering
+// beyond its own mutex.
+func (c *client) onAssigned(_ context.Context, _ *kgo.Client, m map[string][]int32) {
+	c.heldMu.Lock()
+	if c.held == nil {
+		c.held = map[string][]int32{}
+	}
+	for t, ps := range m {
+		c.held[t] = append(c.held[t], ps...)
+	}
+	c.heldMu.Unlock()
+}
+
+func (c *client) onRevoked(_ context.Context, _ *kgo.Client, m map[string][]int32) {
+	c.heldMu.Lock()
+	for t, ps := range m {
+		kept := c.held[t][:0]
+		for _, have := range c.held[t] {
+			if !slices.Contains(ps, have) {
+				kept = append(kept, have)
+			}
+		}
+		if len(kept) == 0 {
+			delete(c.held, t)
+		} else {
+			c.held[t] = kept
+		}
+	}
+	c.heldMu.Unlock()
+}
+
+// watchIdle warns when this member is subscribed but holds no partitions.
+//
+// IT IS A TICKER, NOT A CALLBACK, and that is the whole design. franz-go
+// calls OnPartitionsAssigned with what was ADDED, so a member assigned
+// NOTHING is never called at all — the exact case this warns about would
+// never fire. An earlier version hung the check off the callbacks and its
+// test passed anyway, by catching a member whose partition was briefly
+// revoked mid-rebalance; the real two-replica app stayed silent.
+//
+// It cannot live in the poll loop either: PollRecords blocks until a record
+// arrives, and a member holding nothing never gets one.
+//
+// The streak has to EXCEED idleWarnAfter, so a cooperative rebalance — where
+// a member does briefly hold nothing — passes through without a word.
+func (c *client) watchIdle(ctx context.Context) {
+	tick := time.NewTicker(idleWarnAfter / 3)
+	defer tick.Stop()
+	var emptySince time.Time
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+		}
+
+		c.mu.Lock()
+		topics := append([]string(nil), c.topics...)
+		c.mu.Unlock()
+		if len(topics) == 0 {
+			continue
+		}
+
+		c.heldMu.Lock()
+		total := 0
+		for _, ps := range c.held {
+			total += len(ps)
+		}
+		if total > 0 {
+			c.idleWarned = false
+			c.heldMu.Unlock()
+			emptySince = time.Time{}
+			continue
+		}
+		warned := c.idleWarned
+		c.heldMu.Unlock()
+
+		if emptySince.IsZero() {
+			emptySince = time.Now()
+			continue
+		}
+		if warned || time.Since(emptySince) < idleWarnAfter {
+			continue
+		}
+		c.heldMu.Lock()
+		c.idleWarned = true
+		c.heldMu.Unlock()
+
+		slog.Warn("kafka consumer holds no partitions and is processing nothing",
+			"module", ModuleName,
+			"group", c.cfg.group,
+			"topics", topics,
+			"cause", "a consumer group divides each topic's partitions between its members, so members beyond the partition count are assigned nothing and idle — an AUTO-CREATED topic gets the broker's default, which is usually ONE partition, so the second replica of a service that auto-created its topics always idles",
+			"fix", "give the topic at least as many partitions as the replicas you run: kafka-topics.sh --alter --topic <topic> --partitions <n>. Partitions can be added and never removed, and adding them changes which partition a key lands on — so per-key ordering holds only from that point on",
+			"safe_if", "this replica is deliberate standby capacity")
 	}
 }

@@ -1651,6 +1651,20 @@ func Raw(func(context.Context, *kgo.Client) error) Option
 func RawSASL(sasl.Mechanism) Option
 ```
 
+**A member that holds no partitions says so.** A consumer group divides each
+topic's partitions between its members, so a second replica on a
+one-partition topic is assigned nothing and processes nothing — for ever,
+with no error, while serving HTTP and passing every health check. Measured:
+two replicas, 30 events, one consumed 30 and the other consumed 0. The driver
+now warns after thirty seconds of holding nothing, naming the group and the
+topics, and stays quiet through the brief empty assignment a cooperative
+rebalance produces.
+
+It is a TICKER rather than a rebalance callback, and that is forced:
+franz-go's `OnPartitionsAssigned` reports what was ADDED, so a member assigned
+nothing is never called at all. It cannot sit in the poll loop either, because
+`PollRecords` blocks until a record arrives and an idle member never gets one.
+
 `AutoCreateTopics` is off by default, and that default is the production one:
 an auto-created topic takes the broker's default partition count and
 replication factor, which is one of each on a stock cluster — a throughput
