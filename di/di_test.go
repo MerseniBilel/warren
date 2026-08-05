@@ -708,3 +708,74 @@ func assertPasteable(t *testing.T, out string) {
 		}
 	}
 }
+
+// implementer is a concrete type satisfying domain.UserRepository — what a
+// user ends up with when they forget to declare the constructor's return
+// type as the PORT.
+type implementer struct{}
+
+func (implementer) FindByID(string) (string, error) { return "", nil }
+
+// TestAConcreteProviderOfTheRequiredInterfaceIsSuggested — field test #8's
+// last diagnostic gap. Declaring a constructor's return type as the concrete
+// type rather than the port is the commonest wiring mistake there is, and
+// warren.Exports's own doc already names it — but the resolve diagnostic said
+// nothing at all:
+//
+//	✗ cannot resolve dependency
+//	    domain.UserRepository
+//	  No provider found in scope "billing" or its imports.
+//
+// while a provider satisfying that interface sat in the SAME scope. The
+// near-miss hinting that fires for the cross-module case did not fire here,
+// which is where it is needed most: the fix is one word on one line the user
+// is already looking at.
+func TestAConcreteProviderOfTheRequiredInterfaceIsSuggested(t *testing.T) {
+	t.Parallel()
+
+	root := di.New()
+	billing := root.Scope("billing")
+	if err := billing.Provide(func() *implementer { return &implementer{} }); err != nil {
+		t.Fatalf("providing: %v", err)
+	}
+	if err := billing.Provide(user.NewRegisterUserHandler); err != nil {
+		t.Fatalf("providing handler: %v", err)
+	}
+
+	err := root.Validate()
+	if err == nil {
+		t.Fatal("Validate() = nil though nothing provides the port")
+	}
+	got := err.Error()
+	if !strings.Contains(got, "*di_test.implementer") {
+		t.Errorf("the diagnostic does not name the type that already satisfies the port:\n%s", got)
+	}
+	if !strings.Contains(got, "domain.UserRepository") {
+		t.Errorf("the diagnostic does not name the port:\n%s", got)
+	}
+	assertNoDigLeak(t, err)
+}
+
+// TestAnUnrelatedConcreteTypeIsNotSuggested — the hint must only fire for a
+// type that actually implements the port. A near-miss list that includes
+// everything is noise.
+func TestAnUnrelatedConcreteTypeIsNotSuggested(t *testing.T) {
+	t.Parallel()
+
+	root := di.New()
+	billing := root.Scope("billing")
+	if err := billing.Provide(func() *tDep { return &tDep{} }); err != nil {
+		t.Fatalf("providing: %v", err)
+	}
+	if err := billing.Provide(user.NewRegisterUserHandler); err != nil {
+		t.Fatalf("providing handler: %v", err)
+	}
+
+	err := root.Validate()
+	if err == nil {
+		t.Fatal("Validate() = nil")
+	}
+	if strings.Contains(err.Error(), "tDep") {
+		t.Errorf("an unrelated type was offered as satisfying the port:\n%s", err)
+	}
+}

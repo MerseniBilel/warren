@@ -292,7 +292,28 @@ func (c *container) missing(t reflect.Type, requirer *provider) error {
 			candidates = append(candidates, candidate{provider: p.name, scope: p.scope.name, exported: p.exported})
 		}
 	}
-	return errMissing(typeName(t), chain, declared, scope, candidates)
+	// Nothing provides the type EXACTLY. Before giving up, look for a
+	// provider whose output IMPLEMENTS it — that is the commonest wiring
+	// mistake there is: a constructor whose return type is the concrete type
+	// rather than the port. warren.Exports's own diagnostic already names
+	// this mistake; this is the same help at the moment resolution fails.
+	var implementers []candidate
+	if len(candidates) == 0 && t.Kind() == reflect.Interface {
+		for _, p := range c.root().subtreeProviders() {
+			if p.forwarded != "" {
+				continue
+			}
+			for _, out := range p.outputs {
+				if out.Implements(t) {
+					implementers = append(implementers, candidate{
+						provider: p.name, scope: p.scope.name, concrete: typeName(out),
+					})
+					break
+				}
+			}
+		}
+	}
+	return errMissing(typeName(t), chain, declared, scope, candidates, implementers)
 }
 
 // consumerOf returns a provider that consumes one of p's outputs AND can

@@ -16,6 +16,7 @@ type candidate struct {
 	provider string
 	scope    string
 	exported bool
+	concrete string // the output type, when it merely IMPLEMENTS the target
 }
 
 // diagnostic is the error type every rendered block is returned as. The
@@ -33,7 +34,7 @@ func (d *diagnostic) Unwrap() error { return d.cause }
 // errMissing renders the golden missing-provider diagnostic: the requirement
 // chain from the unresolved type up to the module declaration, the scope
 // verdict, and what to type to fix it.
-func errMissing(target string, chain []string, declared, scope string, candidates []candidate) error {
+func errMissing(target string, chain []string, declared, scope string, candidates, implementers []candidate) error {
 	var b strings.Builder
 	b.WriteString("✗ cannot resolve dependency\n\n")
 	b.WriteString("    " + target + "\n")
@@ -92,7 +93,35 @@ func errMissing(target string, chain []string, declared, scope string, candidate
 			fmt.Fprintf(&b, "    • Or provide it locally:  warren.Providers(%s)\n", ref)
 		}
 	}
+	// Nothing provides the target, but something SATISFIES it. Say so — the
+	// fix is one word on one line the reader is already looking at.
+	if len(candidates) == 0 && len(implementers) > 0 {
+		b.WriteString("\n  Did you mean:\n")
+		for _, c := range implementers {
+			fmt.Fprintf(&b, "    • %s returns %s,\n      which IMPLEMENTS %s.\n",
+				c.provider, c.concrete, target)
+			b.WriteString("      The container resolves by the DECLARED type, not by what\n" +
+				"      satisfies it. Declare the constructor's return type as the port:\n")
+			// Only when the name is one a reader can actually type. A closure
+			// renders as "pkg.Func.func1", and printing that inside a func
+			// signature is the same unpasteable-fix bug as the Imports line.
+			if name := shortName(c.provider); isIdentifier(name) {
+				fmt.Fprintf(&b, "          func %s(...) %s\n", name, target)
+			} else {
+				fmt.Fprintf(&b, "          func ...(...) %s\n", target)
+			}
+		}
+	}
 	return &diagnostic{text: strings.TrimRight(b.String(), "\n")}
+}
+
+// shortName drops the package qualifier from a provider name, so the
+// suggested signature reads as the function the user will edit.
+func shortName(provider string) string {
+	if _, after, ok := strings.Cut(provider, "."); ok {
+		return after
+	}
+	return provider
 }
 
 // isIdentifier reports whether s can appear in Go source where an identifier
