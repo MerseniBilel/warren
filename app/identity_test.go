@@ -605,3 +605,90 @@ func TestTimeoutDoesNotInterruptAHandlerThatIgnoresContext(t *testing.T) {
 		t.Errorf("Handle = %q; Timeout must not interrupt a handler that ignores its context", v)
 	}
 }
+
+// TestRetryingOnConflictFixesTheUndersell — field test #7, item 4. Warren's
+// optimistic concurrency makes CONFLICT the NORMAL outcome of contention on
+// one aggregate, and app.Retrying retries CodeUnavailable only. So 200 buyers
+// against 50 seats sold far fewer than 50 until the tester hand-wrote a
+// retry-on-conflict middleware — safe, but wrong, and they noted every team
+// will rediscover it.
+//
+// RetryingOn is the same middleware with the retryable set given explicitly.
+func TestRetryingOnConflictFixesTheUndersell(t *testing.T) {
+	t.Parallel()
+
+	// A seat counter that only lets one writer through per "version".
+	var mu sync.Mutex
+	version, sold := 0, 0
+	buy := app.HandlerFunc[int, int](func(_ context.Context, seen int) (int, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		if seen != version {
+			return 0, werrors.Conflict("the seat map moved")
+		}
+		version++
+		sold++
+		return sold, nil
+	})
+
+	// Plain Retrying gives up on the first CONFLICT.
+	plain := app.Chain(buy, app.Retrying[int, int](broker.ExponentialBackoff(5)))
+	if _, err := plain.Handle(context.Background(), -1); !werrors.Is(err, werrors.CodeConflict) {
+		t.Fatalf("Retrying = %v, want the CONFLICT returned unretried", err)
+	}
+	if sold != 0 {
+		t.Fatalf("a stale write succeeded: sold = %d", sold)
+	}
+
+	// RetryingOn(CONFLICT) re-runs it. The handler reads the CURRENT version
+	// on each attempt, as a real one re-reads the aggregate.
+	attempts := 0
+	reread := app.HandlerFunc[int, int](func(ctx context.Context, _ int) (int, error) {
+		attempts++
+		mu.Lock()
+		seen := version
+		mu.Unlock()
+		return buy.Handle(ctx, seen)
+	})
+	retrying := app.Chain(reread,
+		app.RetryingOn[int, int](broker.ExponentialBackoff(5), werrors.CodeConflict))
+	if _, err := retrying.Handle(context.Background(), 0); err != nil {
+		t.Errorf("RetryingOn(CONFLICT) did not recover: %v", err)
+	}
+	if sold != 1 {
+		t.Errorf("sold = %d, want 1", sold)
+	}
+}
+
+// TestRetryingOnIsExplicitAboutItsCodes — the codes are the whole point, so
+// an empty set must not silently mean "retry everything" or "retry nothing".
+func TestRetryingOnIsExplicitAboutItsCodes(t *testing.T) {
+	t.Parallel()
+
+	defer func() {
+		if recover() == nil {
+			t.Error("RetryingOn with no codes was accepted; it would retry nothing, silently")
+		}
+	}()
+	_ = app.RetryingOn[string, string](broker.ExponentialBackoff(3))
+}
+
+// TestRetryingOnStillReadsTheOutermostCode — the recategorisation rule is the
+// subtle half of Retrying and must not be lost. A handler that wraps a
+// CONFLICT inside an INTERNAL has declared the failure final.
+func TestRetryingOnStillReadsTheOutermostCode(t *testing.T) {
+	t.Parallel()
+
+	attempts := 0
+	h := app.HandlerFunc[string, string](func(context.Context, string) (string, error) {
+		attempts++
+		return "", werrors.Internal(werrors.Conflict("inner"))
+	})
+	chained := app.Chain(h, app.RetryingOn[string, string](broker.ExponentialBackoff(3), werrors.CodeConflict))
+	if _, err := chained.Handle(context.Background(), "x"); !werrors.Is(err, werrors.CodeInternal) {
+		t.Errorf("err = %v, want INTERNAL", err)
+	}
+	if attempts != 1 {
+		t.Errorf("handler ran %d times; a recategorising wrap must stop the retry", attempts)
+	}
+}

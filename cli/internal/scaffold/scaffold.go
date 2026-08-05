@@ -121,9 +121,22 @@ func New(opts Options) error {
 		// warning: the module is untagged, so `go mod tidy` fails on it and
 		// the scaffold does not build at all — which is the whole reason the
 		// flag exists.
-		mods := []string{"", "/transport/http"}
-		if db == "postgres" {
-			mods = append(mods, "/persistence/postgres")
+		// EVERY submodule, not only the ones this scaffold requires today.
+		//
+		// A replace for a module the go.mod does not require is inert — but
+		// the moment a user runs `go get github.com/MerseniBilel/warren/...`
+		// for one that is missing, it resolves from GITHUB instead of the
+		// local checkout, silently, and they are running two different
+		// versions of the framework at once. A field test hit exactly that
+		// with validate/playground. All of this goes away when v0.1.0 is
+		// tagged and the flag stops being necessary.
+		mods := []string{
+			"",
+			"/transport/http",
+			"/persistence/postgres",
+			"/observability",
+			"/broker/kafka",
+			"/validate/playground",
 		}
 		var b strings.Builder
 		for _, m := range mods {

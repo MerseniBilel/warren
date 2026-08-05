@@ -270,7 +270,9 @@ func (p scopePolicy) Authorize(ctx context.Context) error {
 			// three methods up, LogValue redacts scope names on the grounds
 			// that one can carry a tenant or a resource id. The log line has
 			// what an operator needs; the wire does not.
-			return errors.PermissionDenied("this action")
+			// A VERB phrase: PermissionDenied renders "not allowed to " +
+			// action, so a noun here reads as "not allowed to this action".
+			return errors.PermissionDenied("perform this action")
 		}
 	}
 	return nil

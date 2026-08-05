@@ -224,7 +224,8 @@ func Repository(opts Options) (string, error) {
 		// be written as 00001_<plural>.sql, so a second one collided: two
 		// files at one version apply in ALPHABETICAL order, which is wrong
 		// for any foreign key between them.
-		p.files[fmt.Sprintf("db/migrations/%05d_%s.sql", nextMigration(opts.Dir), data["Plural"])] = migration
+		migrationFile := fmt.Sprintf("db/migrations/%05d_%s.sql", nextMigration(opts.Dir), data["Plural"])
+		p.files[migrationFile] = migration
 
 		// The migrate binary lives in the PROJECT, not in the warren CLI.
 		// The CLI takes no dependency on the framework — it is build-time
@@ -271,10 +272,9 @@ func Repository(opts Options) (string, error) {
      record into one warren_schema_migrations table, keyed by bare filename,
      so 00001_warren_outbox.sql would be marked applied without running.
 
-  3. Check db/migrations/00001_%s.sql — it has the aggregate's id and
-     created_at, and nothing else. Add your columns and the Save/FindByID
-     statements that read them.
-`, data["Feature"], data["Plural"])
+  3. Check %s — it has the aggregate's id and created_at, and nothing else.
+     Add your columns and the Save/FindByID statements that read them.
+`, data["Feature"], migrationFile)
 	}
 	return p.apply()
 }

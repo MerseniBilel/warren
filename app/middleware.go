@@ -4,6 +4,7 @@ import (
 	"context"
 	stderrors "errors"
 	"reflect"
+	"slices"
 	"time"
 
 	"github.com/MerseniBilel/warren/errors"
@@ -277,6 +278,15 @@ func Stamp(name string, t Telemetry) func(context.Context) context.Context {
 // middleware observes cancellation between attempts and during waits. A nil
 // policy panics at composition time, like Chain's guards.
 func Retrying[Req, Res any](policy RetryPolicy) Middleware[Req, Res] {
+	return retrying[Req, Res](policy, retryable)
+}
+
+// retrying is the loop both Retrying and RetryingOn use. They differ only in
+// which errors they consider retryable, and sharing the loop is what keeps
+// the parts that are easy to get wrong — the last error on exhaustion,
+// cancellation observed during a wait, and a zero delay still checking the
+// context — identical between them.
+func retrying[Req, Res any](policy RetryPolicy, shouldRetry func(error) bool) Middleware[Req, Res] {
 	if policy == nil {
 		panic("app: Retrying composed with a nil policy — construct the policy before boot step 5 composes the route table")
 	}
@@ -284,7 +294,7 @@ func Retrying[Req, Res any](policy RetryPolicy) Middleware[Req, Res] {
 		return HandlerFunc[Req, Res](func(ctx context.Context, req Req) (Res, error) {
 			for attempt := 1; ; attempt++ {
 				res, err := next.Handle(ctx, req)
-				if err == nil || !retryable(err) {
+				if err == nil || !shouldRetry(err) {
 					return res, err
 				}
 				delay, retry := policy.Next(attempt)
@@ -305,6 +315,43 @@ func Retrying[Req, Res any](policy RetryPolicy) Middleware[Req, Res] {
 			}
 		})
 	}
+}
+
+// RetryingOn is Retrying with the retryable codes given explicitly.
+//
+// Retrying retries CodeUnavailable and nothing else, which is right for a
+// dependency that was briefly away. It is NOT right for optimistic
+// concurrency: a stale write is CodeConflict, and under contention on one
+// aggregate that is the NORMAL outcome, not a failure. A field test measured
+// the consequence — 200 buyers against 50 seats sold far fewer than 50 —
+// and had to hand-write this middleware to get the right answer. Safe, but
+// wrong, and every team would rediscover it.
+//
+//	app.Chain(h, app.RetryingOn(broker.ExponentialBackoff(5), errors.CodeConflict))
+//
+// The handler must RE-READ its aggregate on each attempt. Retrying re-invokes
+// the handler, not the transaction, so a handler that closed over a stale
+// version will conflict for ever — which is why this is a separate name
+// rather than a widened default.
+//
+// Everything else is Retrying's behaviour, including the rule that matters
+// most: the OUTERMOST code decides, so a handler that wraps a Conflict inside
+// an Internal has declared the failure final and this agrees. Retries are
+// only safe on an idempotent handler; see Retrying.
+//
+// At least one code is required. An empty set would retry nothing, silently,
+// which is the failure mode a variadic helper like this usually has.
+func RetryingOn[Req, Res any](policy RetryPolicy, codes ...errors.Code) Middleware[Req, Res] {
+	if len(codes) == 0 {
+		panic("app: RetryingOn requires at least one code — with none it would retry nothing, which is app.Chain without it")
+	}
+	return retrying[Req, Res](policy, func(err error) bool {
+		var e *errors.Error
+		if !stderrors.As(err, &e) {
+			return false
+		}
+		return slices.Contains(codes, e.Code())
+	})
 }
 
 // retryable reports whether the OUTERMOST Warren code is CodeUnavailable —
