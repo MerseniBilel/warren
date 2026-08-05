@@ -12,6 +12,7 @@
 package errors
 
 import (
+	stderrors "errors"
 	"fmt"
 	"maps"
 	"strings"
@@ -201,6 +202,39 @@ func (e *Error) WithDetail(k string, v any) *Error {
 	}
 	e.details[k] = v
 	return e
+}
+
+// CodeOf returns the code an adapter would map err by: the OUTERMOST Warren
+// code in the chain, CodeInternal for an error carrying none, and the empty
+// code for nil.
+//
+// It answers a different question from Is, and the difference is the one
+// already documented there. Wrapping is RECATEGORISATION — an error wrapped
+// as Invalid is invalid, whatever it wrapped — so a status mapping reads the
+// outermost code, while Is asks whether a meaning appears anywhere in the
+// chain. CodeOf is the mapping's question.
+//
+// A foreign error is CodeInternal, matching §2.6's rule that a code the table
+// does not list is treated as the safe default for the unknown. nil is the
+// EMPTY code and deliberately not CodeInternal: a nil error is not a failure,
+// and answering INTERNAL would make `if CodeOf(err) == CodeInternal` fire on
+// success.
+//
+// It exists because reading a code back otherwise meant a linear scan over
+// the vocabulary in user code — and because two private copies of it already
+// lived in the framework, in transport/http and in broker.
+func CodeOf(err error) Code {
+	if err == nil {
+		return ""
+	}
+	var e *Error
+	if stderrors.As(err, &e) {
+		// Code() is nil-safe and returns the empty code, so a typed-nil
+		// *Error answers the same as nil rather than being miscategorised as
+		// a genuine INTERNAL failure.
+		return e.Code()
+	}
+	return CodeInternal
 }
 
 // Is reports whether err, or any error it wraps, carries code — the whole

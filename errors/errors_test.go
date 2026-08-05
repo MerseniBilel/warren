@@ -293,3 +293,66 @@ func TestInvalidDoesNotFabricateAMultiFieldDetailKey(t *testing.T) {
 		t.Errorf("details[email] = %v, want the reason", got)
 	}
 }
+
+// TestCodeOf — field test #6 asked for this, having written it themselves:
+// there was werrors.Is(err, code) and no way to READ the code back, so getting
+// one meant a linear scan over the vocabulary in user code. Two private
+// copies already existed in the framework (transport/http's asWarrenError and
+// broker's codeOf), which is the other half of the argument for exporting it.
+func TestCodeOf(t *testing.T) {
+	t.Parallel()
+
+	t.Run("reads the code", func(t *testing.T) {
+		t.Parallel()
+		if got := werrors.CodeOf(werrors.Conflict("taken")); got != werrors.CodeConflict {
+			t.Errorf("CodeOf = %q, want CONFLICT", got)
+		}
+	})
+
+	t.Run("reads the OUTERMOST code, because wrapping is recategorisation", func(t *testing.T) {
+		t.Parallel()
+		// The asymmetry with Is is deliberate and already documented there:
+		// an adapter maps the outermost code, Is asks whether a meaning
+		// appears anywhere. CodeOf is the adapter's question.
+		inner := werrors.NotFound("user", "u-1")
+		outer := werrors.Invalid("body", inner)
+		if got := werrors.CodeOf(outer); got != werrors.CodeInvalid {
+			t.Errorf("CodeOf = %q, want INVALID — the outermost", got)
+		}
+		if !werrors.Is(outer, werrors.CodeNotFound) {
+			t.Error("Is stopped finding the inner code; the two must stay different questions")
+		}
+	})
+
+	t.Run("finds a Warren error wrapped by fmt.Errorf", func(t *testing.T) {
+		t.Parallel()
+		wrapped := fmt.Errorf("while saving: %w", werrors.Conflict("taken"))
+		if got := werrors.CodeOf(wrapped); got != werrors.CodeConflict {
+			t.Errorf("CodeOf = %q, want CONFLICT through %%w", got)
+		}
+	})
+
+	t.Run("a foreign error is INTERNAL, the safe default for the unknown", func(t *testing.T) {
+		t.Parallel()
+		if got := werrors.CodeOf(stderrors.New("boom")); got != werrors.CodeInternal {
+			t.Errorf("CodeOf = %q, want INTERNAL", got)
+		}
+	})
+
+	t.Run("nil has no code", func(t *testing.T) {
+		t.Parallel()
+		// Not INTERNAL: a nil error is not a failure, and answering INTERNAL
+		// would make `if CodeOf(err) == CodeInternal` fire on success.
+		if got := werrors.CodeOf(nil); got != "" {
+			t.Errorf("CodeOf(nil) = %q, want the empty code", got)
+		}
+	})
+
+	t.Run("a typed-nil *Error never panics", func(t *testing.T) {
+		t.Parallel()
+		var e *werrors.Error
+		if got := werrors.CodeOf(e); got != "" {
+			t.Errorf("CodeOf(typed nil) = %q, want the empty code", got)
+		}
+	})
+}

@@ -580,12 +580,10 @@ func (e *attemptedError) Unwrap() error { return e.err }
 
 // codeOf reads the outermost warren/errors code; anything else — a plain
 // error included — is INTERNAL, the safe default for the unknown.
-func codeOf(err error) errors.Code {
-	if e, ok := stderrors.AsType[*errors.Error](err); ok {
-		return e.Code()
-	}
-	return errors.CodeInternal
-}
+// codeOf is errors.CodeOf, kept as a one-line alias so the call sites below
+// stay short. The behaviour is the exported one: outermost code, INTERNAL for
+// anything foreign.
+func codeOf(err error) errors.Code { return errors.CodeOf(err) }
 
 func attemptsOf(err error) int {
 	if a, ok := stderrors.AsType[*attemptedError](err); ok {

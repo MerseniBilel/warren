@@ -495,6 +495,103 @@ correct behaviour but worth knowing.
 
 ---
 
+## Who is calling — identity and guards
+
+**Warren does not authenticate. You do, in fifteen lines at the edge, and
+Warren carries the result.** There is no JWT or OIDC verifier in v0.1 — that
+is `warren/auth` in v0.2 — and nothing you write here changes when it lands.
+
+Your middleware parses whatever credential you use and seeds the identity:
+
+```go
+func bearer(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		claims, err := verify(r.Header.Get("Authorization")) // your token library
+		if err != nil {
+			// The framework's own error envelope — same shape, same
+			// correlation id, and it redacts INTERNAL for you.
+			whttp.WriteError(w, r, errors.Unauthenticated("invalid credential"))
+			return
+		}
+		id := app.Identity{
+			Subject: claims.Subject,
+			Issuer:  claims.Issuer,
+			Scopes:  strings.Fields(claims.Scope),
+			Claims:  claims.Rest, // map[string]any, whatever else the token said
+		}
+		next.ServeHTTP(w, r.WithContext(app.WithIdentity(r.Context(), id)))
+	})
+}
+
+whttp.Server(whttp.Middleware(bearer))
+```
+
+Note what it does NOT do: it does not reject an unauthenticated request. No
+credential means **no identity**, and the route's own guard decides whether
+that is allowed — so a public route stays public without a second list to
+keep in step.
+
+Guard the routes that need it, in `Register`:
+
+```go
+transport.Post(r, "/documents", c.create, transport.Guard(app.RequireScope("docs:write")))
+transport.Get(r, "/documents/{id}", c.get, transport.Guard(app.RequireAuthenticated()))
+```
+
+`Guard` runs **before decode**, so an unauthorized caller's malformed body is
+a 401 or 403, never a 400 — and `RequireScope` never merges the two: no
+identity is 401, a known caller lacking the scope is 403.
+
+Read the caller in a handler:
+
+```go
+id, ok := app.IdentityFromContext(ctx)
+if !ok {
+	return zero, errors.Unauthenticated("no caller identity")
+}
+doc.Owner = id.Subject
+tenant, _ := app.Claim[string](id, "tid")   // JSON numbers are float64
+```
+
+The `ok` is not optional politeness — `app.IdentityFromContext(ctx).Subject`
+does not compile, deliberately, so an absent caller cannot become a row owned
+by `""`.
+
+In tests, one line:
+
+```go
+res, err := warrentest.Invoke[application.CreateDoc, application.DocView](
+	warrentest.AsCaller(ctx, "u-1", "docs:write"), app, cmd)
+```
+
+**A custom policy is an ordinary type** — this is a tenant check, and it can
+read path parameters because guards see them on every route shape:
+
+```go
+type sameTenant struct{}
+
+func (sameTenant) Authorize(ctx context.Context) error {
+	id, ok := app.IdentityFromContext(ctx)
+	if !ok {
+		return errors.Unauthenticated("no caller identity")
+	}
+	want, _ := app.Claim[string](id, "tid")
+	got, _ := transport.ParamsFromContext(ctx).Path("tenant")
+	if want != got {
+		return errors.PermissionDenied("this tenant")
+	}
+	return nil
+}
+```
+
+**Identity does not cross the broker in v0.1.** A consumer's context carries
+the correlation ID but no caller, so an audit trail built from events must
+carry the actor in the event payload itself. Composing `app.Authorized` into
+a consumer chain denies every message and dead-letters it — fail-closed, and
+deliberate, but not what you wanted.
+
+---
+
 ## Where a message goes when it cannot be handled
 
 A consumer's error decides its own fate, by its `warren/errors` code —

@@ -85,9 +85,9 @@ func WriteError(w http.ResponseWriter, r *http.Request, err error) {
 func writeError(w http.ResponseWriter, r *http.Request, err error) {
 	ctx := r.Context()
 	var werr *errors.Error
-	code := errors.CodeInternal
+	code := errors.CodeOf(err)
 	if e, ok := asWarrenError(err); ok {
-		werr, code = e, e.Code()
+		werr = e
 	}
 
 	body := errorPayload{Code: string(code), CorrelationID: log.CorrelationID(ctx)}

@@ -402,3 +402,27 @@ func TestPublishedWithoutTheRecorderFails(t *testing.T) {
 		t.Errorf("Published returned silently without a recorder; message was %q", fake.msg)
 	}
 }
+
+// TestAsCallerDrivesAGuardedHandler — the helper has to produce an identity
+// the framework's own policies accept, not merely a context value.
+func TestAsCallerDrivesAGuardedHandler(t *testing.T) {
+	t.Parallel()
+
+	ctx := warrentest.AsCaller(context.Background(), "u-1", "docs:write")
+
+	if err := app.RequireAuthenticated().Authorize(ctx); err != nil {
+		t.Errorf("AsCaller did not authenticate: %v", err)
+	}
+	if err := app.RequireScope("docs:write").Authorize(ctx); err != nil {
+		t.Errorf("AsCaller did not carry the scope: %v", err)
+	}
+	if err := app.RequireScope("docs:admin").Authorize(ctx); err == nil {
+		t.Error("AsCaller carried a scope it was not given")
+	}
+
+	// And a blank subject is still absence — the helper must not be a way
+	// around WithIdentity's refusal.
+	if _, ok := app.IdentityFromContext(warrentest.AsCaller(context.Background(), " ")); ok {
+		t.Error("AsCaller carried a blank subject")
+	}
+}

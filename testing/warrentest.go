@@ -336,3 +336,21 @@ func updateGolden() bool {
 	f := flag.Lookup("update")
 	return f != nil && f.Value.String() == "true"
 }
+
+// AsCaller returns a context carrying an identity with subject and scopes —
+// the one line a test writes to drive a guarded handler.
+//
+// Every use case behind transport.Guard needs an identity to reach it, so
+// without this every test in every service opens with the same
+// context/app.Identity incantation. A field test wrote it by hand in a dozen
+// places before pointing out that warren/testing contained no mention of
+// app.Identity at all.
+//
+//	res, err := warrentest.Invoke[application.ShareDoc, application.DocView](
+//	    warrentest.AsCaller(ctx, "u-1", "docs:write"), app, cmd)
+//
+// For a caller with claims — a tenant, say — build the Identity yourself and
+// use app.WithIdentity; this covers the common case, not every case.
+func AsCaller(ctx context.Context, subject string, scopes ...string) context.Context {
+	return app.WithIdentity(ctx, app.Identity{Subject: subject, Scopes: scopes})
+}
