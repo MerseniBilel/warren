@@ -101,12 +101,26 @@ func (c *collector) count() int {
 	return len(c.got)
 }
 
+// awaitTimeout bounds every wait for messages.
+//
+// It is generous because this suite certifies REAL brokers, not only the
+// in-process one. A Kafka consumer joining a brand-new group waits out the
+// coordinator's initial rebalance delay — three seconds by default — before
+// it is assigned anything, and the first fetch of a just-created topic costs
+// a metadata round trip on top. At five seconds the envelope subtest passed
+// alone at 5.10s and failed one run in three inside the full suite: a
+// deadline measuring the broker's cold start, not the driver's correctness.
+//
+// A driver that is actually broken fails this in the same way it always did,
+// just later.
+const awaitTimeout = 20 * time.Second
+
 // awaitCount spins until the collector has n messages, yielding the
 // scheduler — an observable-state wait, never a sleep. It fails the test
 // rather than hanging forever.
 func awaitCount(t *testing.T, c *collector, n int) {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(awaitTimeout)
 	for c.count() < n {
 		if time.Now().After(deadline) {
 			t.Fatalf("timed out waiting for %d messages; got %d", n, c.count())

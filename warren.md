@@ -1651,6 +1651,18 @@ func Raw(func(context.Context, *kgo.Client) error) Option
 func RawSASL(sasl.Mechanism) Option
 ```
 
+**A message without a key is left unkeyed on the wire**, and that is a
+distinction Go makes easy to lose: `[]byte("")` is not nil. franz-go hashes
+records with non-nil keys and distributes the rest, so handing it a
+zero-length key pinned every keyless message a service published to ONE
+partition — measured 300 of 300 on partition 3 of 6. A message WITH a key
+always chooses the same partition, which is what per-key ordering rests on.
+
+Neither property could be tested until 2026-08-05, because the contract suite
+ran on auto-created topics and an auto-created topic has ONE partition: keys
+cannot spread wrongly there and ordering is whatever order the producer used.
+The suite now creates its topics with six.
+
 **A member that holds no partitions says so.** A consumer group divides each
 topic's partitions between its members, so a second replica on a
 one-partition topic is assigned nothing and processes nothing — for ever,
