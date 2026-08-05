@@ -28,6 +28,8 @@ import (
 	"github.com/MerseniBilel/warren/outbox"
 	"github.com/MerseniBilel/warren/persistence"
 	"github.com/MerseniBilel/warren/persistence/postgres"
+	"runtime"
+	"slices"
 )
 
 // --- harness ---------------------------------------------------------------
@@ -800,4 +802,201 @@ func TestACallersDeadlineWins(t *testing.T) {
 	if elapsed := time.Since(start); elapsed > 10*time.Second {
 		t.Errorf("the caller's 500ms deadline was overridden by the hour-long default: took %v", elapsed)
 	}
+}
+
+// TestRetentionActuallySweeps covers a guarantee nothing was checking: both
+// stores document a retention window, and a window that is documented and
+// never enforced is worse than no option — the table grows unbounded while
+// the configuration says otherwise.
+//
+// It asserts what a sweep must NOT delete as carefully as what it must. An
+// inbox sweep that took live keys would let a redelivery run a handler twice,
+// and an outbox sweep that took parked rows would destroy the evidence a
+// human is meant to inspect.
+func TestRetentionActuallySweeps(t *testing.T) {
+	url := isolated(t)
+	ctx := context.Background()
+
+	// A retention of one minute gives the sweeper its floor interval, so the
+	// first sweep runs at boot and the test never waits on a ticker.
+	pgModule := postgres.Module(
+		postgres.DSN(url),
+		postgres.WithOutbox(postgres.Retention(time.Minute)),
+		postgres.WithInbox(postgres.InboxRetention(time.Minute)),
+	)
+	var (
+		db    postgres.DB
+		uow   *postgres.UnitOfWork
+		store outbox.Store
+	)
+	probe := warren.NewModule("probe",
+		warren.Imports(pgModule),
+		warren.Providers(func(d postgres.DB, u *postgres.UnitOfWork, s outbox.Store) *captured {
+			db, uow, store = d, u, s
+			return &captured{}
+		}),
+		warren.Eager[*captured](),
+	)
+	a := warren.New(pgModule, probe)
+	if err := a.Start(ctx); err != nil {
+		t.Fatalf("boot: %v", err)
+	}
+	defer func() { _ = a.Stop(ctx) }()
+
+	exec := func(sql string, args ...any) {
+		t.Helper()
+		if _, err := db(ctx).Exec(ctx, sql, args...); err != nil {
+			t.Fatalf("%s: %v", sql, err)
+		}
+	}
+
+	// Four outbox rows: one published long ago (sweepable), one published
+	// just now, one never published, one parked with its cause.
+	// Appends go through the unit of work: an outbox write outside a
+	// transaction is refused, which is the pattern's whole point.
+	if err := uow.Do(ctx, func(ctx context.Context) error {
+		return store.Append(ctx,
+			outbox.Record{Topic: "t", Message: broker.Message{ID: "old-published", Payload: []byte("{}")}},
+			outbox.Record{Topic: "t", Message: broker.Message{ID: "new-published", Payload: []byte("{}")}},
+			outbox.Record{Topic: "t", Message: broker.Message{ID: "never-published", Payload: []byte("{}")}},
+			outbox.Record{Topic: "t", Message: broker.Message{ID: "parked", Payload: []byte("{}")}},
+		)
+	}); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+	if err := store.MarkPublished(ctx, "old-published", "new-published"); err != nil {
+		t.Fatalf("MarkPublished: %v", err)
+	}
+	if err := store.MarkFailed(ctx, "parked", stderrors.New("too large")); err != nil {
+		t.Fatalf("MarkFailed: %v", err)
+	}
+	exec(`UPDATE warren_outbox SET published_at = now() - interval '2 hours' WHERE message_id = $1`, "old-published")
+
+	// Two inbox keys: one already expired, one live.
+	exec(`INSERT INTO warren_inbox (id, expires_at) VALUES ($1, now() - interval '1 hour')`, "expired-key")
+	exec(`INSERT INTO warren_inbox (id, expires_at) VALUES ($1, now() + interval '1 hour')`, "live-key")
+
+	// Restart: the sweeper runs once at OnStart, so a fresh boot sweeps
+	// without waiting out a ticker.
+	if err := a.Stop(ctx); err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+	b := warren.New(pgModule, probe)
+	if err := b.Start(ctx); err != nil {
+		t.Fatalf("reboot: %v", err)
+	}
+	defer func() { _ = b.Stop(ctx) }()
+
+	deadline := time.Now().Add(20 * time.Second)
+	for {
+		var outboxLeft, inboxLeft int
+		if err := db(ctx).QueryRow(ctx, `SELECT count(*) FROM warren_outbox`).Scan(&outboxLeft); err != nil {
+			t.Fatalf("count outbox: %v", err)
+		}
+		if err := db(ctx).QueryRow(ctx, `SELECT count(*) FROM warren_inbox`).Scan(&inboxLeft); err != nil {
+			t.Fatalf("count inbox: %v", err)
+		}
+		if outboxLeft == 3 && inboxLeft == 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("sweep did not converge: outbox has %d rows (want 3), inbox has %d (want 1)",
+				outboxLeft, inboxLeft)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	// Now the identities, not just the counts: a sweep that deleted the
+	// wrong three rows would satisfy the counts above.
+	var ids []string
+	rows, err := db(ctx).Query(ctx, `SELECT message_id FROM warren_outbox ORDER BY message_id`)
+	if err != nil {
+		t.Fatalf("select outbox: %v", err)
+	}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		ids = append(ids, id)
+	}
+	rows.Close()
+	want := []string{"never-published", "new-published", "parked"}
+	slices.Sort(want)
+	if !slices.Equal(ids, want) {
+		t.Errorf("outbox kept %v, want %v — only rows published outside the window may go", ids, want)
+	}
+
+	var key string
+	if err := db(ctx).QueryRow(ctx, `SELECT id FROM warren_inbox`).Scan(&key); err != nil {
+		t.Fatalf("select inbox: %v", err)
+	}
+	if key != "live-key" {
+		t.Errorf("inbox kept %q, want %q — sweeping a live key lets a redelivery run twice", key, "live-key")
+	}
+}
+
+// TestSweeperStopsWithTheApp pins the other half of a background loop: that
+// it ends.
+//
+// The sweeper is a goroutine started in OnStart, and this repository has
+// shipped a background loop that outlived its owner before — an idle relay
+// that started a new waiter every poll interval and ended none, which held a
+// pooled connection each time and killed the service MaxConns ticks after
+// boot. A loop with a stop function nobody calls looks identical in review.
+func TestSweeperStopsWithTheApp(t *testing.T) {
+	url := isolated(t)
+	ctx := context.Background()
+
+	boot := func() {
+		pgModule := postgres.Module(
+			postgres.DSN(url),
+			postgres.WithOutbox(postgres.Retention(time.Minute)),
+			postgres.WithInbox(postgres.InboxRetention(time.Minute)),
+		)
+		probe := warren.NewModule("probe",
+			warren.Imports(pgModule),
+			warren.Providers(func(d postgres.DB) *captured { return &captured{} }),
+			warren.Eager[*captured](),
+		)
+		a := warren.New(pgModule, probe)
+		if err := a.Start(ctx); err != nil {
+			t.Fatalf("boot: %v", err)
+		}
+		if err := a.Stop(ctx); err != nil {
+			t.Fatalf("stop: %v", err)
+		}
+	}
+
+	// One cycle first, so pgx's own long-lived goroutines are already
+	// counted in the baseline and only growth shows.
+	boot()
+	base := settledGoroutines()
+
+	const cycles = 4
+	for range cycles {
+		boot()
+	}
+	after := settledGoroutines()
+
+	// Each cycle starts TWO sweepers, so a leak grows by at least 2 per
+	// cycle. The tolerance absorbs pool churn without absorbing that.
+	if after > base+cycles {
+		t.Errorf("goroutines went %d -> %d over %d boot/stop cycles; the sweepers are outliving their app",
+			base, after, cycles)
+	}
+}
+
+// settledGoroutines lets things wind down, then counts.
+func settledGoroutines() int {
+	prev := -1
+	for range 40 {
+		time.Sleep(50 * time.Millisecond)
+		n := runtime.NumGoroutine()
+		if n == prev {
+			return n
+		}
+		prev = n
+	}
+	return runtime.NumGoroutine()
 }
