@@ -58,8 +58,9 @@ type subscribeConfig struct {
 }
 
 // WithRetry sets the subscription's retry policy — the same app.RetryPolicy
-// port the core Retrying middleware uses, so resilience-module policies are
-// interchangeable with ExponentialBackoff at every site. The default is
+// port the core Retrying middleware uses, so a policy written once is
+// interchangeable with ExponentialBackoff at every site, inbound or
+// consumer-side. One port, two rings, no library. The default is
 // ExponentialBackoff(3).
 func WithRetry(p app.RetryPolicy) SubscribeOption {
 	return SubscribeOption{apply: func(c *subscribeConfig) { c.retry = p }}

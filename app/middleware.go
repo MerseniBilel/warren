@@ -13,9 +13,12 @@ import (
 // wait first. The kernel never sees a backoff library.
 //
 // A concrete one already ships in the core module: broker.ExponentialBackoff.
-// warren/resilience is v0.2 and narrowed to the circuit breaker and rate
-// limiter when it lands — retry is done, and a second vocabulary for it would
-// only compete with this port.
+// It is the ONLY vocabulary — there is no resilience module and there will
+// not be one (warren.md §7.3). A circuit breaker guards an OUTBOUND
+// dependency and belongs in the adapter that makes the call, behind the port
+// your domain declares; returning errors.Unavailable from there is the whole
+// integration, because this middleware then retries it and every transport
+// maps it.
 type RetryPolicy interface {
 	// Next reports whether a retry should follow the given completed attempt
 	// (1-based) and how long to wait before it. Returning retry == false

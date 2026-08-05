@@ -3,6 +3,7 @@ package app_test
 import (
 	"bytes"
 	"context"
+	stderrors "errors"
 	"fmt"
 	"log/slog"
 	"reflect"
@@ -10,8 +11,10 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/MerseniBilel/warren/app"
+	"github.com/MerseniBilel/warren/broker"
 	werrors "github.com/MerseniBilel/warren/errors"
 	"github.com/MerseniBilel/warren/log"
 	"github.com/MerseniBilel/warren/transport"
@@ -475,5 +478,130 @@ func TestClaimOnJSONNumbers(t *testing.T) {
 	}
 	if v, ok := app.Claim[[]any](id, "roles"); !ok || len(v) != 2 {
 		t.Errorf("Claim[[]any] = %v, %v", v, ok)
+	}
+}
+
+// --- resilience ruling, 2026-08-05 -----------------------------------------
+
+// TestTimeoutBoundsEachAttemptWhenInsideRetrying and its sibling below are
+// the pin that makes the dropped spec's open question 4 — "does Timeout bound
+// the attempt or the sequence?" — permanently answered rather than merely
+// written down. The answer is Chain's argument order, and the two orderings
+// produce materially different systems.
+func TestTimeoutBoundsEachAttemptWhenInsideRetrying(t *testing.T) {
+	t.Parallel()
+
+	var deadlines []time.Time
+	h := app.HandlerFunc[string, string](func(ctx context.Context, _ string) (string, error) {
+		d, ok := ctx.Deadline()
+		if !ok {
+			t.Error("no deadline reached the handler")
+		}
+		deadlines = append(deadlines, d)
+		return "", werrors.Unavailable("downstream", stderrors.New("nope"))
+	})
+
+	// Timeout INSIDE Retrying: composed last, so it wraps the handler and
+	// each attempt gets its own budget.
+	chained := app.Chain(h,
+		app.Retrying[string, string](broker.ExponentialBackoff(3)),
+		app.Timeout[string, string](time.Hour),
+	)
+	_, _ = chained.Handle(context.Background(), "x")
+
+	if len(deadlines) < 2 {
+		t.Fatalf("handler ran %d times, want the retries", len(deadlines))
+	}
+	// A fresh budget per attempt means the deadlines MOVE.
+	if deadlines[0].Equal(deadlines[len(deadlines)-1]) {
+		t.Error("every attempt shared one deadline; Timeout inside Retrying must bound each attempt")
+	}
+}
+
+func TestTimeoutBoundsTheSequenceWhenOutsideRetrying(t *testing.T) {
+	t.Parallel()
+
+	var deadlines []time.Time
+	h := app.HandlerFunc[string, string](func(ctx context.Context, _ string) (string, error) {
+		d, _ := ctx.Deadline()
+		deadlines = append(deadlines, d)
+		return "", werrors.Unavailable("downstream", stderrors.New("nope"))
+	})
+
+	// Timeout OUTSIDE Retrying: composed first, so one budget covers them all.
+	chained := app.Chain(h,
+		app.Timeout[string, string](time.Hour),
+		app.Retrying[string, string](broker.ExponentialBackoff(3)),
+	)
+	_, _ = chained.Handle(context.Background(), "x")
+
+	if len(deadlines) < 2 {
+		t.Fatalf("handler ran %d times, want the retries", len(deadlines))
+	}
+	if !deadlines[0].Equal(deadlines[len(deadlines)-1]) {
+		t.Error("attempts got different deadlines; Timeout outside Retrying must bound the whole sequence")
+	}
+}
+
+// TestTimeoutRespectsAShorterCallerDeadline — the caller knows more. A
+// request context already bounded at 100ms must not be extended to an hour.
+func TestTimeoutRespectsAShorterCallerDeadline(t *testing.T) {
+	t.Parallel()
+
+	caller, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	var got time.Time
+	h := app.HandlerFunc[string, string](func(ctx context.Context, _ string) (string, error) {
+		got, _ = ctx.Deadline()
+		return "ok", nil
+	})
+	if _, err := app.Timeout[string, string](time.Hour)(h).Handle(caller, "x"); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if time.Until(got) > time.Minute {
+		t.Errorf("the caller's 50ms deadline was extended to %v", time.Until(got))
+	}
+}
+
+// TestTimeoutIsAPassThroughOnSuccess — it must not change what a handler
+// returns, and it must not allocate its way onto the request path.
+func TestTimeoutIsAPassThroughOnSuccess(t *testing.T) {
+	t.Parallel()
+
+	h := app.HandlerFunc[string, string](func(context.Context, string) (string, error) {
+		return "value", nil
+	})
+	got, err := app.Timeout[string, string](time.Hour)(h).Handle(context.Background(), "x")
+	if err != nil || got != "value" {
+		t.Errorf("Handle = %q, %v, want the handler's own result", got, err)
+	}
+}
+
+// TestTimeoutDoesNotInterruptAHandlerThatIgnoresContext pins the honesty the
+// doc claims: a deadline is a signal, not a kill. A handler that never looks
+// at ctx runs to completion, exactly as transport/http's ShutdownTimeout
+// already documents for the drain. No sleep — a channel handshake.
+func TestTimeoutDoesNotInterruptAHandlerThatIgnoresContext(t *testing.T) {
+	t.Parallel()
+
+	release := make(chan struct{})
+	finished := make(chan struct{})
+	h := app.HandlerFunc[string, string](func(context.Context, string) (string, error) {
+		<-release // ignores ctx entirely
+		close(finished)
+		return "done", nil
+	})
+
+	done := make(chan string, 1)
+	go func() {
+		v, _ := app.Timeout[string, string](time.Nanosecond)(h).Handle(context.Background(), "x")
+		done <- v
+	}()
+
+	close(release)
+	<-finished
+	if v := <-done; v != "done" {
+		t.Errorf("Handle = %q; Timeout must not interrupt a handler that ignores its context", v)
 	}
 }

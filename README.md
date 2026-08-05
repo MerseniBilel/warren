@@ -11,7 +11,7 @@
 > **`persistence/postgres`**, whose unit of work commits aggregate state and
 > the outbox rows for that aggregate's events in one transaction. What is
 > **not** in v0.1: `openapi`, `auth` (the JWT/OIDC **verifier** — the identity
-> type and the policies ship in `app`), `transport/grpc`, `jobs`, `resilience`,
+> type and the policies ship in `app`), `transport/grpc`, `jobs`,
 > `broker/rabbitmq`, `broker/nats`, and the Mongo/Redis/MySQL drivers — each
 > deferred to v0.2 **with the reason recorded in its own spec**, not left as
 > an open question. The short version: `openapi`'s architecture is now ruled
@@ -19,7 +19,7 @@
 > v0.1, so `go get` gets it in v0.2 with no migration —
 > `auth` needs two dependency audits that have not been run, `jobs` would
 > amend the boot and shutdown orders, `resilience`
-> is mostly shipped already, and a third broker driver answers nothing that
+> was DROPPED — retry and timeout are core, and a breaker guards an outbound call Warren does not make — and a third broker driver answers nothing that
 > `broker/memory` plus the shared contract suite does not.
 > The repository is being rebuilt spec-first: every
 > package gets an approved `SPEC.md` before its first line of Go, retired once
@@ -203,7 +203,8 @@ contract now.
 - [x] `warren/testing` (`warrentest`) — boot a module with fakes, Invoke by
       type, AssertPublished, Golden *(implemented; stdlib + core only)*
 - [x] `app.Identity` — the identity seam, policies and the 401/403 split (v0.1)
-- [ ] `auth` (verifier), `resilience`, `jobs`, `openapi`
+- [x] `app.Timeout` + the resilience ruling: module DROPPED, not deferred (v0.1)
+- [ ] `auth` (verifier), `jobs`, `openapi`
 
 ### Phase 6 — the CLI *(the discovery engine: scaffolding real apps is how
 ### weaknesses get found)*

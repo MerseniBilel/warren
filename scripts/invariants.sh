@@ -83,6 +83,28 @@ if [ -n "$replaces" ]; then
 	fail=1
 fi
 
+# §7.3 — the resilience module was DROPPED on 2026-08-05, and the reason is
+# structural: a breaker guards an OUTBOUND dependency and Warren ships no
+# outbound client. These belong in the USER's infrastructure adapter, never in
+# a Warren module. This check is what stops the module being re-derived.
+# DIRECT requires only: an indirect one is somebody else's transitive choice
+# (OpenTelemetry pulls cenkalti/backoff/v5, for instance), and this invariant
+# is about deliberate adoption, not about the whole graph. Both go.mod forms
+# are matched — the single-line `require X v1` and the indented block entry.
+dropped='github\.com/sony/gobreaker|github\.com/cenkalti/backoff|github\.com/failsafe-go/failsafe-go|golang\.org/x/time'
+resilience=$(for f in $(find . -name go.mod -not -path './.git/*'); do
+	if grep -E "(^require |^[[:space:]]+)($dropped)" "$f" | grep -qv '// indirect'; then
+		echo "$f"
+	fi
+done)
+if [ -n "$resilience" ]; then
+	echo "§7.3: a dropped-resilience dependency was adopted in:"
+	echo "$resilience"
+	echo "  Retry and timeout are core: app.Retrying, app.Timeout, broker.ExponentialBackoff."
+	echo "  A breaker or limiter belongs in your infrastructure adapter, not in Warren."
+	fail=1
+fi
+
 # AGENT.md § Naming — no type named XWithY.
 withtypes=$(grep -rnE --include='*.go' 'type [A-Za-z0-9]+With[A-Z][A-Za-z0-9]* ' . || true)
 if [ -n "$withtypes" ]; then

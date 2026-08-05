@@ -209,7 +209,6 @@ warren/openapi/                         MODULE  —                       rank 1
 warren/auth/                            MODULE  golang-jwt + go-oidc    verification only; app.Identity ships in v0.1
 warren/transport/grpc/                  MODULE  google.golang.org/grpc  needs `warren g proto`
 warren/jobs/                            MODULE  robfig/cron             amends the boot/shutdown orders
-warren/resilience/                      MODULE  gobreaker + x/time/rate narrowed: breaker + limiter only
 warren/persistence/mongo/               MODULE  mongo-driver            design round on the UnitOfWork port
 warren/persistence/redis/               MODULE  redis/go-redis          entangled with jobs' elector
 warren/broker/rabbitmq/                 MODULE  rabbitmq/amqp091-go     memory already proves the swap
@@ -990,9 +989,12 @@ live in `app` itself.** They exist for these middleware, and a one-interface
 package would be ring bureaucracy. Four of the five are implemented:
 
 ```go
-type RetryPolicy interface {           // warren/resilience implements it
+type RetryPolicy interface {           // broker.ExponentialBackoff implements it
     Next(attempt int) (delay time.Duration, retry bool)
 }
+func Timeout[Req, Res any](d time.Duration) Middleware[Req, Res]
+// Inside Retrying it bounds each ATTEMPT; outside, the whole SEQUENCE.
+// It signals, it does not interrupt: a handler ignoring its context runs on.
 type AuthorizationPolicy interface {   // warren/auth implements it
     Authorize(ctx context.Context) error // nil allows; deny with a §2.6 code
 }
@@ -1991,17 +1993,70 @@ chain denies every message and dead-letters it without retry. That is
 fail-closed and correct; it is also not what you wanted. Guard your consumers
 in v0.2.
 
-### 7.3 `warren/resilience`
+### 7.3 `warren/resilience` — DROPPED (2026-08-05)
 
-**Wraps** `sony/gobreaker`, `cenkalti/backoff/v4`, `x/time/rate` behind one `Policy` interface. Nobody should configure gobreaker in a handler.
+**There is no resilience module and there will not be one.** The four
+primitives it was to own split cleanly in two, and only one half is Warren's.
+
+**Retry and timeout are core-ring, and they ship.** `app.RetryPolicy` is the
+port; `app.Retrying(policy)` retries `CodeUnavailable` and nothing else;
+`app.Timeout(d)` bounds the handler's context; `broker.ExponentialBackoff(n)`
+is a concrete policy in the core module with zero dependencies, and
+`broker.Retry` / `broker.WithRetry` reuse the same port on the consumer chain.
+One vocabulary, two rings, no library.
+
+**Composition order is `app.Chain`'s argument order and nothing else:**
 
 ```go
-resilience.Policy(
-    resilience.Timeout(3*time.Second),
-    resilience.Retry(3, resilience.Exponential(100*time.Millisecond)),
-    resilience.CircuitBreaker(resilience.FailureRatio(0.5)),
-)
+app.Chain(h, app.Retrying(p), app.Timeout(3*time.Second))  // bounds each ATTEMPT
+app.Chain(h, app.Timeout(3*time.Second), app.Retrying(p))  // bounds the SEQUENCE
 ```
+
+Those produce materially different systems, which is exactly why a
+`Policy(Timeout(...), Retry(...))` combinator was the wrong shape: it would
+hide, inside a DSL, a choice `Chain` already makes visible on one line.
+
+**Circuit breaking and rate limiting are not core-ring, and Warren does not
+own them.** A breaker guards an OUTBOUND dependency — a payment API, another
+service. `app.Retrying` wraps an INBOUND `Handler[Req, Res]`. Those are not
+the same shape, and **Warren ships no outbound client** for a breaker to
+attach to. The breaker belongs in the adapter that makes the call, in
+`infrastructure/`, behind the port the domain declares — which is where
+`warren lint arch` already sends it, and which scopes one breaker per
+dependency for free.
+
+```go
+// internal/modules/billing/infrastructure/stripe.go
+cb := gobreaker.NewCircuitBreaker[struct{}](gobreaker.Settings{Name: "stripe"})
+// ...
+if _, err := cb.Execute(func() (struct{}, error) { return struct{}{}, g.charge(ctx, …) }); err != nil {
+    return werrors.Unavailable("stripe", err)   // §2.6 does the rest
+}
+```
+
+That last line is the whole integration: `errors.Unavailable` makes
+`app.Retrying` retry it, HTTP answer 503, gRPC answer `Unavailable`, and a
+consumer nack with backoff and dead-letter when the budget is spent. The seam
+was built in v0.1; it needed no module.
+
+An inbound rate limit is edge middleware, and `http.Middleware` takes
+`func(http.Handler) http.Handler`, so `golang.org/x/time/rate` drops in
+unmodified and writes its own 429. It writes the status directly, and that is
+deliberate: §2.6 has no 429 row, and a core middleware would have forced one
+into the table the whole transport story rests on. An outbound rate limit is
+`lim.Wait(ctx)` in the adapter. A per-consumer cap is
+`broker.WithConcurrency(n)`, which ships — and note it is a CONCURRENCY cap,
+not a rate cap, which for a consumer is the knob that actually protects the
+connection pool.
+
+**Precedent, verified 2026-08-05.** connect-go v1.20.0 ships health,
+reflection, otel, cors, authn and validation as separate modules and no
+breaker or limiter at all. Encore v1.57.13 ships neither. go-kit has both,
+dormant since 2024, and its `circuitbreaker.Gobreaker(cb *gobreaker.CircuitBreaker)`
+puts the driver type in a public signature — invariant 3. Kratos v3 is the one
+framework that owns an implementation: it exports `circuitbreaker.Client()`
+with **no `Server()`**, and it works only because kratos owns the outbound
+client. Warren does not.
 
 ### 7.4 `warren/jobs`
 
@@ -2144,7 +2199,7 @@ All generators support `--dry-run` and `--force`.
 | Redis | `redis/go-redis/v9` | Wrap | cache + lock |
 | Telemetry | OpenTelemetry Go | Wrap | **Audited 2026-08-02**: v1.44.0 (2026-05-27), Apache-2.0, 6 500 stars, pushed 2026-08-02, not archived. **24 third-party modules in the build graph**, including grpc, protobuf and genproto — an order of magnitude above anything else here (core 1, transport/http 0, postgres 6), which is why it is opt-in in its own module and `scripts/invariants.sh` refuses `go.opentelemetry.io` in any other go.mod. OTLP over gRPC only: the HTTP exporter reaches grpc through its own config package and is not lighter. Wiring only — no OTel type in any Warren signature |
 | Auth | `golang-jwt/jwt/v5`, `coreos/go-oidc` | Wrap | **v0.2, audits outstanding.** The identity type is NOT here: `app.Identity` ships in v0.1 core, stdlib only, zero third-party (§3.2) |
-| Resilience | `sony/gobreaker`, `cenkalti/backoff/v4` | Wrap | one `Policy` interface |
+| Resilience | **none — module DROPPED 2026-08-05** | Build | Retry and timeout are core-ring and ship in `app`/`broker`, stdlib only. The breaker and limiter guard OUTBOUND calls and live in the user's `infrastructure/` adapter. **Audited 2026-08-05, none adopted:** `sony/gobreaker/v2` v2.4.0 (2026-01-01), MIT, not archived, 3674★, zero runtime deps, generic, **two lines to use** — fewer than any wrapper. `golang.org/x/time/rate` v0.15.0 (2026-02-11), BSD-3, **no require block at all** — `http.Middleware`'s stdlib shape takes it unmodified. **`cenkalti/backoff/v4` REJECTED**: three majors stale (default branch is v7; v4.3.0 dates to 2024-01-02) *and* redundant — `broker.ExponentialBackoff` is 20 lines of core with full jitter and an overflow guard. **`failsafe-go` REJECTED** (v0.9.6, 2026-02-09): richest policy set and the only both-directions API, but one module requiring `google.golang.org/grpc` + `protobuf`, so those enter the graph whether or not you import them — disqualifying against §1.7. **`go-kratos/aegis` REJECTED** (v0.2.0, **2023-05-08**, 7 direct requires): kratos v3 dropped it too |
 | Cron | `robfig/cron/v3` | Wrap | lifecycle-aware |
 | Testing | none — stdlib + core | Build | `testify` and `testcontainers-go` were both budgeted and neither adopted: assertions are `if got != want`, and Docker fixtures wait for `warren/testing/containers`, its own module. |
 | CLI | `cobra` | Vendor | build-time only |
