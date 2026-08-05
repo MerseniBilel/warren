@@ -73,6 +73,7 @@ var Module = sync.OnceValue(func() warren.Module {
 			publisher,
 			subscriber,
 			appUnitOfWork,
+			elector,
 			newRelay,
 		),
 		// Exports name what this module PROVIDES. A module cannot re-export
@@ -107,9 +108,29 @@ func newBroker() brokerPorts {
 // hook and its own health check — the documented pattern for anything
 // created at boot, since warren.OnStart takes a closure fixed at
 // declaration time.
+// elector decides which replica drains the outbox. Standalone always leads,
+// which is correct for ONE instance and for the modular monolith.
+//
+// For several replicas over this database it is WRONG, and quietly: every
+// replica drains the same table, each marks rows published, and each delivers
+// to its own broker. The relay warns at boot when it sees this, because the
+// rows say published either way.
+//
+// Both halves are needed to fix it, and doing only the first changes nothing:
+//
+//  1. add postgres.WithAdvisoryLock() to Postgres() above, so the adapter
+//     provides an outbox.Elector backed by a Postgres advisory lock, AND
+//  2. delete this function and its entry in Providers, so that adapter's
+//     elector is the one newRelay injects.
+//
+// Leave this in place with the option added and you get an ambiguous binding
+// at boot naming both — which is the framework telling you step 2 is missing.
+func elector() outbox.Elector { return outbox.Standalone() }
+
 func newRelay(
 	store outbox.Store,
 	pub broker.Publisher,
+	el outbox.Elector,
 	cfg appconfig.Config,
 	lc lifecycle.Lifecycle,
 	hr health.Registry,
@@ -117,6 +138,7 @@ func newRelay(
 	// It takes the PORT, not platform's own broker value: a test that
 	// substitutes a recording publisher must see what the relay publishes.
 	relay := outbox.NewRelay(store, pub,
+		outbox.LeaderElection(el),
 		outbox.PollInterval(cfg.Outbox.PollInterval),
 		outbox.BatchSize(cfg.Outbox.BatchSize),
 	)

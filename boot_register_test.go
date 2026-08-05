@@ -731,3 +731,53 @@ func TestABackgroundLoopNeedsNoOrderingAmendment(t *testing.T) {
 			"If this changed, warren/jobs's ordering premise is live again and §7.4 needs revisiting.", got, want)
 	}
 }
+
+// TestANilProviderIsADiagnosticNotAPanic — field test #7, defect B2, and a
+// regression I introduced. sameFunc calls reflect.Value.Pointer on a nil
+// `any`, so a stray nil in a Providers list produced:
+//
+//	panic: reflect: call of reflect.Value.Pointer on zero Value
+//	    warren.sameFunc(...) app.go:696
+//
+// Nothing named the module, the provider list, or the word "provider". It was
+// the ONE boot mistake in the whole matrix that produced a framework stack
+// trace instead of a Warren diagnostic — in the package whose diagnostics are
+// the product.
+func TestANilProviderIsADiagnosticNotAPanic(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name string
+		mod  warren.Module
+	}{
+		{"nil in Providers", warren.NewModule("catalog",
+			warren.Providers(newCatalogPricing, nil))},
+		{"nil in Controllers", warren.NewModule("catalog",
+			warren.Controllers(nil))},
+		{"a non-function", warren.NewModule("catalog",
+			warren.Providers("not a constructor"))},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var err error
+			func() {
+				defer func() {
+					if r := recover(); r != nil {
+						t.Fatalf("boot panicked instead of failing with a diagnostic: %v", r)
+					}
+				}()
+				err = warren.New(tc.mod).Start(context.Background())
+			}()
+			if err == nil {
+				t.Fatal("a nil constructor booted")
+			}
+			// It must name the module and say what is wrong, like every other
+			// boot failure.
+			for _, want := range []string{"catalog", "constructor"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("the diagnostic does not mention %q:\n%s", want, err)
+				}
+			}
+		})
+	}
+}

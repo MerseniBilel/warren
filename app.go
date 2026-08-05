@@ -168,6 +168,15 @@ func (a *App) Start(ctx context.Context) error {
 		provided := map[reflect.Type]bool{}
 		for _, group := range [][]any{m.providers, m.controllers, m.consumers} {
 			for _, ctor := range group {
+				// Checked BEFORE anything reflects on it. A nil in a
+				// Providers list used to reach sameFunc, which calls
+				// reflect.Value.Pointer on a zero Value and panics with a
+				// framework stack trace naming neither the module nor the
+				// word "provider" — the one boot mistake that did not
+				// produce a Warren diagnostic.
+				if err := checkConstructor(ctor, m.name, m.declared); err != nil {
+					return err
+				}
 				opts := []di.ProvideOption{di.DeclaredAt(splitSite(m.declared))}
 				exported := false
 				named := false
@@ -686,6 +695,27 @@ func shortTypeName(outs []reflect.Type) string {
 		return "Controller"
 	}
 	return t.Name()
+}
+
+// checkConstructor refuses a value that is not a usable constructor, naming
+// the module it came from — which is the part the reader needs and the part
+// the reflect panic did not have.
+func checkConstructor(ctor any, module, declared string) error {
+	if ctor == nil {
+		return diagnostic(fmt.Sprintf(
+			"✗ nil constructor\n\n    module %q (%s) lists a nil in one of its constructor lists.\n\n"+
+				"  warren.Providers, Controllers and Consumers take FUNCTIONS. A nil is\n"+
+				"  usually a name that does not exist yet, or a trailing comma after a\n"+
+				"  deleted line.", module, declared))
+	}
+	if v := reflect.ValueOf(ctor); v.Kind() != reflect.Func {
+		return diagnostic(fmt.Sprintf(
+			"✗ not a constructor\n\n    module %q (%s) lists a %T where a constructor belongs.\n\n"+
+				"  warren.Providers, Controllers and Consumers take a function whose\n"+
+				"  returns are the types it provides, optionally with a trailing error.",
+			module, declared, ctor))
+	}
+	return nil
 }
 
 // sameFunc reports whether two constructor values are the same function —

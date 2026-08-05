@@ -197,6 +197,15 @@ type Durable interface {
 	Durable() bool
 }
 
+// publisherRedelivers reports whether the publisher's driver brings a nacked
+// message back. A publisher that does not implement broker.Redeliverer is
+// assumed to, which is true of every durable broker — so the warning below
+// cannot fire spuriously on Kafka.
+func publisherRedelivers(p broker.Publisher) bool {
+	r, ok := p.(broker.Redeliverer)
+	return !ok || r.Redelivers()
+}
+
 // durable reports whether s has declared itself durable.
 func durable(s Store) bool {
 	d, ok := s.(Durable)
@@ -364,8 +373,32 @@ func (r *Relay) Run(ctx context.Context) error {
 		log.FromContext(ctx).WarnContext(ctx,
 			"outbox relay is leading unconditionally over a durable store",
 			"risk", "with more than one replica every replica drains the same table, so each event is published once PER REPLICA and each marks the row published — silent duplication, no error anywhere",
-			"fix", "postgres.WithAdvisoryLock() on the postgres module, or outbox.LeaderElection(e) with your own elector",
+			// BOTH halves, spelled out. The option alone only PROVIDES an
+			// Elector; the relay ignores it unless a constructor injects it
+			// and passes LeaderElection. A field test applied the one-line
+			// version of this advice and still duplicated every event.
+			"fix", "TWO steps, and the first alone does nothing: (1) add postgres.WithAdvisoryLock() so the adapter provides an outbox.Elector, and (2) inject that outbox.Elector into the constructor that builds the relay and pass outbox.LeaderElection(e)",
 			"safe_if", "this service runs as exactly one instance")
+	}
+	// A durable store draining into a broker that cannot redeliver loses
+	// everything the broker still holds when the process stops.
+	//
+	// The relay marks a row published when Publish RETURNS, and an in-process
+	// broker's Publish only enqueues in memory. So on shutdown the queue is
+	// discarded, the row still says published, and there is no retry path — a
+	// restart recovers nothing. Measured in a field test: 350 events
+	// committed, 350 rows marked published, ZERO delivered.
+	//
+	// This is the configuration `warren new --db postgres` produces by
+	// default, and it is strictly worse than the multi-replica case the relay
+	// already warned about, so staying silent about it was the wrong way
+	// round. Both capabilities needed to see it already ship.
+	if durable(r.store) && !publisherRedelivers(r.pub) {
+		log.FromContext(ctx).WarnContext(ctx,
+			"durable outbox is publishing to a broker that cannot redeliver",
+			"risk", "a record is marked published when Publish returns, and this broker holds its queue in memory — anything undelivered when the process stops is lost, the row still says published, and a restart recovers nothing",
+			"fix", "use a durable broker for anything that must survive a restart; broker/memory is for one process and for tests",
+			"safe_if", "this service is a modular monolith where the consumer is in the same process and a lost event on shutdown is acceptable")
 	}
 	return r.elector.Lead(ctx, func(ctx context.Context) error {
 		waiter, _ := r.store.(Waiter)

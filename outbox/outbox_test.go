@@ -714,3 +714,70 @@ func TestStandaloneOverAMemoryStoreIsSilent(t *testing.T) {
 		t.Errorf("the in-process store triggered a warning it cannot act on:\n%s", buf.String())
 	}
 }
+
+// TestDurableStoreWithANonRedeliveringBrokerWarns — field test #7, defect B3,
+// and the configuration `warren new --db postgres` hands you by default.
+//
+// The relay marks a row published when Publish returns. The in-process
+// broker's Publish only enqueues in RAM, so on shutdown the queue is
+// discarded, the row still says published, and there is NO retry path —
+// a restart recovers nothing. Measured: 350 events committed, 350 rows marked
+// published, ZERO delivered.
+//
+// The framework already warns about the LESS damaging multi-replica case, so
+// staying silent about this one was the wrong way round. Both capabilities
+// needed to see it already ship: outbox.Durable on the store, and
+// broker.Redeliverer on the publisher.
+func TestDurableStoreWithANonRedeliveringBrokerWarns(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	ctx, cancel := context.WithCancel(log.WithLogger(context.Background(), logger))
+
+	relay := outbox.NewRelay(durableStore{Store: outbox.NewMemoryStore()}, nonRedeliveringPublisher{},
+		outbox.LeaderElection(outbox.Standalone()),
+		outbox.PollInterval(10*time.Millisecond))
+
+	done := make(chan struct{})
+	go func() { defer close(done); _ = relay.Run(ctx) }()
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+	<-done
+
+	out := buf.String()
+	if !strings.Contains(out, "durable outbox is publishing to a broker that cannot redeliver") {
+		t.Errorf("no warning for the lossy pairing:\n%s", out)
+	}
+}
+
+// TestDurableStoreWithADurableBrokerIsSilent — the warning must not fire for
+// Kafka, which is the whole point of pairing a durable outbox with a durable
+// broker.
+func TestDurableStoreWithADurableBrokerIsSilent(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	ctx, cancel := context.WithCancel(log.WithLogger(context.Background(), logger))
+
+	// capturePublisher implements no Redeliverer, so it is assumed durable.
+	relay := outbox.NewRelay(durableStore{Store: outbox.NewMemoryStore()}, &capturePublisher{},
+		outbox.LeaderElection(outbox.Standalone()),
+		outbox.PollInterval(10*time.Millisecond))
+
+	done := make(chan struct{})
+	go func() { defer close(done); _ = relay.Run(ctx) }()
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+	<-done
+
+	if strings.Contains(buf.String(), "cannot redeliver") {
+		t.Errorf("the warning fired for a durable broker:\n%s", buf.String())
+	}
+}
+
+type nonRedeliveringPublisher struct{}
+
+func (nonRedeliveringPublisher) Publish(context.Context, string, ...broker.Message) error { return nil }
+func (nonRedeliveringPublisher) Redelivers() bool                                         { return false }
