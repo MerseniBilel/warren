@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MerseniBilel/warren/app"
 	"github.com/MerseniBilel/warren/broker"
 	werrors "github.com/MerseniBilel/warren/errors"
 	"github.com/MerseniBilel/warren/inbox"
@@ -925,5 +926,46 @@ func TestWrappersDoNotHideNonRedelivery(t *testing.T) {
 	}
 	if n := dlq.count("orders.dlq"); n != 1 {
 		t.Errorf("dead-lettered %d messages through a Correlating wrapper, want 1", n)
+	}
+}
+
+// TestAGuardedConsumerDeadLettersEveryMessage pins the warning warren.md §7.2
+// gives, which was prose with nothing enforcing it.
+//
+// Event routes carry no identity in v0.1 — there is no header convention and
+// no propagating decorator — so a policy composed into a consumer chain
+// denies EVERY message. §2.6 sends UNAUTHENTICATED to the dead-letter queue
+// without retrying, because a message will not get a better token by waiting.
+//
+// That is fail-closed and therefore correct. It is also a 3 a.m. incident if
+// someone reaches for app.Authorized in a consumer expecting it to work, so
+// the behaviour is asserted rather than described: the handler must never
+// run, the message must be preserved, and it must NOT be nacked back to the
+// broker for a retry that cannot help.
+func TestAGuardedConsumerDeadLettersEveryMessage(t *testing.T) {
+	t.Parallel()
+
+	dlq := &nonRedelivering{}
+	handled := 0
+	guarded := func(ctx context.Context, _ broker.Message) error {
+		if err := app.RequireAuthenticated().Authorize(ctx); err != nil {
+			return err
+		}
+		handled++
+		return nil
+	}
+
+	pipeline, _ := broker.Pipeline("audit.sub", "doc.created", guarded,
+		inbox.NewMemoryStore(), dlq)
+
+	err := pipeline(context.Background(), broker.Message{ID: "m1", Type: "doc.created"})
+	if err != nil {
+		t.Errorf("a dead-lettered message was also nacked: %v — it would be redelivered for ever", err)
+	}
+	if handled != 0 {
+		t.Errorf("the guarded handler ran %d times with no identity on the context", handled)
+	}
+	if n := dlq.count("doc.created.dlq"); n != 1 {
+		t.Errorf("dead-lettered %d messages, want 1 — §7.2 promises the message is preserved", n)
 	}
 }
