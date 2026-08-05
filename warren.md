@@ -1719,9 +1719,24 @@ fault); `INVALID` parks immediately (retrying a deterministic rejection would
 stall the queue forever); anything else retries under `Backoff` and then
 parks. Parking is loud — it breaks ordering for that key permanently.
 
-**Leader election** is a port. `outbox.LeaderElection(postgres.AdvisoryLock("outbox"))`
-in production; `Standalone()` by default, which is correct for one instance
-and for the modular monolith.
+**Leader election** is a port, and the wiring is two halves that must both be
+present. `postgres.WithAdvisoryLock()` makes the postgres module PROVIDE an
+`outbox.Elector`; the relay's constructor then injects it and passes
+`outbox.LeaderElection(e)`:
+
+```go
+postgres.Module(postgres.DSN(url), postgres.WithOutbox(), postgres.WithAdvisoryLock())
+
+func newRelay(store outbox.Store, pub broker.Publisher, elector outbox.Elector, …) *outbox.Relay {
+    return outbox.NewRelay(store, pub, outbox.LeaderElection(elector))
+}
+```
+
+Adding the option and forgetting the injection changes nothing, silently.
+`Standalone()` is the default, and it is correct for one instance and for the
+modular monolith — with several replicas over a DURABLE store every replica
+drains the same table, each marking rows published, so the relay warns at
+startup naming this fix (§5, `outbox.Durable`).
 
 **Kafka transactions do not make this exactly-once.** The outbox ack is in
 Postgres and the publish is in Kafka — two systems. At-least-once plus inbox

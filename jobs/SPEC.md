@@ -19,7 +19,7 @@ omit jobs entirely.
 All eight open questions are structural, and two are load-bearing. What a job
 handler even IS: `app.Handler[Req, Res]` is request-shaped, and a tick has
 neither a request nor a response. And whether `jobs.LeaderOnly()` shares the
-elector `outbox` already has — `postgres.AdvisoryLock` ships — which, if it
+elector `outbox` already has — `postgres.WithAdvisoryLock` ships — which, if it
 does, has to move somewhere both adapters reach without importing each other
 (invariant 4).
 
