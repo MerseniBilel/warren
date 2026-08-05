@@ -9,12 +9,19 @@ import (
 	"context"
 	"log/slog"
 	"os"
+{{- if eq .Broker "kafka" }}
+	"strings"
+{{- end }}
 	"sync"
 
 	"github.com/MerseniBilel/warren"
 	"github.com/MerseniBilel/warren/app"
 	"github.com/MerseniBilel/warren/broker"
+{{- if eq .Broker "kafka" }}
+	"github.com/MerseniBilel/warren/broker/kafka"
+{{- else }}
 	"github.com/MerseniBilel/warren/broker/memory"
+{{- end }}
 	wconfig "github.com/MerseniBilel/warren/config"
 	"github.com/MerseniBilel/warren/health"
 	"github.com/MerseniBilel/warren/lifecycle"
@@ -57,6 +64,57 @@ var Postgres = sync.OnceValue(func() warren.Module {
 	)
 })
 
+{{- if eq .Broker "kafka" }}
+
+// Broker is the messaging adapter, and it is a MODULE rather than a
+// constructor — which is why it is declared here and imported, not provided.
+//
+// Anything that consumes events imports this module DIRECTLY, beside
+// platform: a module may export only what its own providers return, so
+// platform cannot import this and pass broker.Publisher on to its own
+// importers. Warren refuses that at boot and names this shape.
+//
+// The seed list is read from the environment for the same reason the DSN is:
+// kafka.Broker builds its providers, so its options are needed while the
+// module graph is being DECLARED, before the config module's value exists.
+var Broker = sync.OnceValue(func() warren.Module {
+	return kafka.Broker(
+		kafka.Brokers(seeds()...),
+		// One group per SERVICE, not per instance: that is what makes
+		// partitions divide between replicas instead of every replica
+		// reading everything.
+		kafka.ConsumerGroup("{{.Name}}"),
+		// DEVELOPMENT DEFAULT — remove this before production.
+		//
+		// Without it the first event this app publishes is REJECTED, because
+		// the topic does not exist yet: the outbox parks the row, logs
+		// "outbox drain failed", and the event is never delivered. That is
+		// the correct production behaviour — an auto-created topic takes the
+		// broker's default partition count and replication factor, usually
+		// one of each, which is a throughput ceiling and a durability hole
+		// nobody chose — and it is a poor first run.
+		//
+		// Provision your topics with the rest of your infrastructure, then
+		// delete this line.
+		kafka.AutoCreateTopics(),
+	)
+})
+
+// seeds reads the seed broker list.
+//
+// An UNSET variable yields no addresses rather than one empty one:
+// strings.Split("", ",") is []string{""}, which would send the driver
+// dialling "" and reporting a connection failure. With none, kafka.Broker's
+// own diagnostic fires instead and names the variable.
+func seeds() []string {
+	v := strings.TrimSpace(os.Getenv("{{.EnvPrefix}}_KAFKA_BROKERS"))
+	if v == "" {
+		return nil
+	}
+	return strings.Split(v, ",")
+}
+{{- end }}
+
 // Module is declared once: modules are deduplicated by identity, so a plain
 // factory called by two importers would be two modules sharing a name — a
 // boot error. sync.OnceValue reads like a function and yields one identity.
@@ -67,11 +125,13 @@ var Postgres = sync.OnceValue(func() warren.Module {
 // them is an ambiguous binding that fails the boot.
 var Module = sync.OnceValue(func() warren.Module {
 	return warren.NewModule("platform",
-		warren.Imports(ConfigModule(), Postgres()),
+		warren.Imports(ConfigModule(), Postgres(){{if eq .Broker "kafka"}}, Broker(){{end}}),
 		warren.Providers(
+{{- if ne .Broker "kafka" }}
 			newBroker,
 			publisher,
 			subscriber,
+{{- end }}
 			appUnitOfWork,
 			elector,
 			newRelay,
@@ -82,14 +142,18 @@ var Module = sync.OnceValue(func() warren.Module {
 		// inbox.Store are NOT listed here even though platform imports them.
 		// A feature that needs one imports Postgres() itself, alongside this
 		// module; the user module below shows the shape.
+{{- if ne .Broker "kafka" }}
 		warren.Exports[broker.Publisher](),
 		warren.Exports[broker.Subscriber](),
+{{- end }}
 		warren.Exports[app.UnitOfWork](),
 		// Nothing consumes the relay, so without Eager it would never be
 		// built — and the outbox would never drain.
 		warren.Eager[*outbox.Relay](),
 	)
 })
+
+{{- if ne .Broker "kafka" }}
 
 // broker returns one in-process broker as both ports. Two constructors would
 // build two brokers, and the publisher's messages would never reach the
@@ -103,6 +167,7 @@ func newBroker() brokerPorts {
 	b := memory.New()
 	return brokerPorts{pub: b, sub: b}
 }
+{{- end }}
 
 // elector decides which replica drains the outbox. Standalone always leads,
 // which is correct for ONE instance and for the modular monolith.
@@ -173,6 +238,8 @@ func newRelay(
 	return relay, nil
 }
 
+{{- if ne .Broker "kafka" }}
+
 // The ports the feature modules actually inject.
 //
 // The publisher is Correlating: a direct publish then carries the correlation
@@ -183,6 +250,7 @@ func newRelay(
 // that is already there alone.
 func publisher(p brokerPorts) broker.Publisher   { return broker.Correlating(p.pub) }
 func subscriber(p brokerPorts) broker.Subscriber { return p.sub }
+{{- end }}
 
 // appUnitOfWork is the seam app.Transactional takes: the two interfaces
 // differ only in Do's transaction options, which app deliberately does not

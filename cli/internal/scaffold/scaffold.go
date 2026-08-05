@@ -65,7 +65,11 @@ var released = map[string][]string{
 	// is plain SQL, and cmd/migrate plus db/migrations come with it.
 	"transport": {"http"},
 	"db":        {"memory", "postgres"},
-	"broker":    {"memory"},
+	// kafka wires the real driver: platform declares kafka.Broker() as its
+	// own sync.OnceValue module and imports it, the in-process broker is NOT
+	// emitted beside it, and any feature module that consumes events imports
+	// that module directly — a module cannot re-export what it imports.
+	"broker": {"memory", "kafka"},
 }
 
 // New writes the scaffold.
@@ -89,6 +93,10 @@ func New(opts Options) error {
 	if db == "" {
 		db = "memory"
 	}
+	brk := opts.Broker
+	if brk == "" {
+		brk = "memory"
+	}
 	data := map[string]string{
 		"Name":      opts.Name,
 		"Module":    opts.ModulePath,
@@ -96,6 +104,7 @@ func New(opts Options) error {
 		"EnvPrefix": strings.ToUpper(strings.ReplaceAll(opts.Name, "-", "_")),
 		"GoVersion": goVersion,
 		"DB":        db,
+		"Broker":    brk,
 	}
 
 	// Render everything first, then check every target, then write: a

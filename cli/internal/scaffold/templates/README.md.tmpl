@@ -16,14 +16,17 @@ go run ./cmd/migrate
 Then:
 
 ```bash
+{{- if eq .Broker "kafka" }}
+export {{.EnvPrefix}}_KAFKA_BROKERS=localhost:9092
+{{- end }}
 {{.EnvPrefix}}_NAME={{.Name}} go run ./cmd/{{.Name}}
 ```
 
 It boots the module graph, opens the pool, starts the outbox relay and the
 notification consumer, opens readiness, and drains cleanly on SIGTERM.
-Without `{{.EnvPrefix}}_NAME` or `{{.EnvPrefix}}_DATABASE_URL` it fails at
-boot naming the variable — every error the framework can detect surfaces at
-boot, never on request 1.
+Without `{{.EnvPrefix}}_NAME` or `{{.EnvPrefix}}_DATABASE_URL`{{if eq .Broker "kafka"}} or
+`{{.EnvPrefix}}_KAFKA_BROKERS`{{end}} it fails at boot naming the variable — every
+error the framework can detect surfaces at boot, never on request 1.
 {{- else }}
 
 ```bash

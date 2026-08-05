@@ -8,4 +8,7 @@ require (
 {{- if eq .DB "postgres" }}
 	github.com/MerseniBilel/warren/persistence/postgres {{.Version}}
 {{- end }}
+{{- if eq .Broker "kafka" }}
+	github.com/MerseniBilel/warren/broker/kafka {{.Version}}
+{{- end }}
 )

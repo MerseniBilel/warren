@@ -417,3 +417,93 @@ func read(t *testing.T, dir, rel string) string {
 	}
 	return string(b)
 }
+
+// TestKafkaScaffoldIsWired covers the shape --broker kafka has to produce,
+// which differs from --db postgres in one structural way: kafka.Broker is a
+// MODULE, so platform declares and IMPORTS it rather than providing it, and
+// platform cannot export the ports on its behalf. A module may export only
+// what its own providers return.
+func TestKafkaScaffoldIsWired(t *testing.T) {
+	t.Parallel()
+
+	for _, db := range []string{"memory", "postgres"} {
+		t.Run(db, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			if err := scaffold.New(scaffold.Options{
+				Dir: dir, Name: "app", ModulePath: "example.com/app",
+				Version: "v0.1.0", DB: db, Broker: "kafka",
+			}); err != nil {
+				t.Fatalf("New --broker kafka --db %s: %v", db, err)
+			}
+
+			platform := read(t, dir, "internal/platform/module.go")
+			for _, want := range []string{
+				"kafka.Broker(",
+				"kafka.ConsumerGroup(",
+				"var Broker = sync.OnceValue(",
+				"APP_KAFKA_BROKERS",
+			} {
+				if !strings.Contains(platform, want) {
+					t.Errorf("platform does not wire %q:\n%s", want, platform)
+				}
+			}
+
+			// The in-process broker must be GONE. Two publishers is an
+			// ambiguous binding; worse, a scaffold that quietly kept memory
+			// after --broker kafka would look like it worked and deliver
+			// nothing to Kafka. Comments are stripped first — the file
+			// names memory in prose explaining its absence.
+			code := stripComments(platform)
+			for _, gone := range []string{"memory.New()", "brokerPorts"} {
+				if strings.Contains(code, gone) {
+					t.Errorf("platform still wires the in-process broker %q:\n%s", gone, platform)
+				}
+			}
+			// Exporting a port it does not provide is a boot failure with
+			// its own diagnostic ("cannot re-export an imported type").
+			for _, gone := range []string{
+				"warren.Exports[broker.Publisher]()",
+				"warren.Exports[broker.Subscriber]()",
+			} {
+				if strings.Contains(code, gone) {
+					t.Errorf("platform re-exports %q, which fails the boot:\n%s", gone, platform)
+				}
+			}
+
+			// A consumer injects the ports, so it imports the broker module
+			// itself — the same reason it imports Postgres() for inbox.Store.
+			notification := read(t, dir, "internal/modules/notification/module.go")
+			if !strings.Contains(notification, "platform.Broker()") {
+				t.Errorf("the consumer does not import platform.Broker():\n%s", notification)
+			}
+
+			if gomod := read(t, dir, "go.mod"); !strings.Contains(gomod, "warren/broker/kafka") {
+				t.Errorf("go.mod does not require the kafka module:\n%s", gomod)
+			}
+		})
+	}
+}
+
+// TestMemoryBrokerRemainsTheDefault guards the other direction: nothing about
+// adding kafka may leak into a scaffold that did not ask for it.
+func TestMemoryBrokerRemainsTheDefault(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	if err := scaffold.New(scaffold.Options{
+		Dir: dir, Name: "app", ModulePath: "example.com/app", Version: "v0.1.0",
+	}); err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	platform := read(t, dir, "internal/platform/module.go")
+	if !strings.Contains(platform, "memory.New()") {
+		t.Errorf("the default scaffold lost its in-process broker:\n%s", platform)
+	}
+	if strings.Contains(platform, "kafka.") {
+		t.Errorf("the default scaffold wires kafka:\n%s", platform)
+	}
+	if gomod := read(t, dir, "go.mod"); strings.Contains(gomod, "broker/kafka") {
+		t.Errorf("the default go.mod requires the kafka module:\n%s", gomod)
+	}
+}

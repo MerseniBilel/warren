@@ -2268,7 +2268,7 @@ That analyzer is why the governance commands are cheap once the first exists —
 ```bash
 # scaffold
 warren new myapp --module github.com/acme/myapp \
-  [--db memory] [--broker memory] [--dir .] [--framework ../warren]
+  [--db memory|postgres] [--broker memory|kafka] [--dir .] [--framework ../warren]
 
 # generate  (aliases: warren g …)
 warren generate module     <name>              [--main cmd/app/main.go]
@@ -2284,6 +2284,23 @@ warren version
 ```
 
 Every generator takes `--dir`, `--dry-run` and `--force`.
+
+`--broker kafka` differs from `--db postgres` in shape, not just in name.
+`postgres.Module` is imported by platform and its ports reach a feature
+through platform's own providers; `kafka.Broker` is a module whose ports
+platform CANNOT pass on, because a module may export only what its own
+providers return. So platform declares it as `sync.OnceValue` and imports it
+for the relay's sake, and any feature that consumes events imports
+`platform.Broker()` directly — exactly as it already imports
+`platform.Postgres()` for `inbox.Store`. Attempting the facade instead fails
+the boot with its own diagnostic (§2.1, "cannot re-export an imported type").
+
+The generated app reads `<PREFIX>_KAFKA_BROKERS` at module-declaration time,
+for the reason the DSN is read there: options are needed while the graph is
+being built, before the config module's value exists. It is scaffolded with
+`kafka.AutoCreateTopics()` and a comment saying to remove it — without it the
+first event is rejected, parked and logged rather than delivered, which is
+correct for production and a poor first run.
 
 **Not built yet.** These were the original pitch and several of them are still
 the differentiators, but none exists — an earlier draft of this section listed

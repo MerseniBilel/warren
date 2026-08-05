@@ -20,11 +20,24 @@ import (
 // Module declares the feature. Declared once — see platform.Module.
 var Module = sync.OnceValue(func() warren.Module {
 	return warren.NewModule("notification",
-{{- if eq .DB "postgres" }}
+{{- if and (eq .DB "postgres") (eq .Broker "kafka") }}
+		// Postgres() and Broker() too, because this module injects what
+		// those adapters provide — inbox.Store from one, broker.Publisher
+		// and broker.Subscriber from the other. Exports name what a module
+		// PROVIDES, so platform cannot re-export either on this module's
+		// behalf; Warren refuses that at boot and says so.
+		warren.Imports(platform.Module(), platform.Postgres(), platform.Broker()),
+{{- else if eq .DB "postgres" }}
 		// Postgres() too, because the consumer chain injects inbox.Store,
 		// which the adapter provides. Exports name what a module PROVIDES,
 		// so platform cannot re-export it on this module's behalf.
 		warren.Imports(platform.Module(), platform.Postgres()),
+{{- else if eq .Broker "kafka" }}
+		// Broker() too, because this module injects broker.Publisher and
+		// broker.Subscriber, which that adapter module provides. Exports
+		// name what a module PROVIDES, so platform cannot re-export them on
+		// this module's behalf.
+		warren.Imports(platform.Module(), platform.Broker()),
 {{- else }}
 		warren.Imports(platform.Module()),
 {{- end }}

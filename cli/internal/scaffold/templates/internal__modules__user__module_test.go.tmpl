@@ -2,7 +2,7 @@ package user_test
 
 import (
 	"context"
-{{- if eq .DB "postgres" }}
+{{- if or (eq .DB "postgres") (eq .Broker "kafka") }}
 	"os"
 {{- end }}
 	"testing"
@@ -104,6 +104,16 @@ func boot(t *testing.T) *warrentest.App {
 	if os.Getenv("{{.EnvPrefix}}_DATABASE_URL") == "" {
 		t.Skip("{{.EnvPrefix}}_DATABASE_URL is not set; these tests need a database")
 	}
+{{- if eq .Broker "kafka" }}
+	// The graph includes the Kafka module, and a driver module CONNECTS at
+	// boot — deliberately, so a misconfigured broker fails the boot rather
+	// than request 1. WithMemoryBroker below substitutes the ports this test
+	// reads, but it cannot stop the client dialling, so these tests need a
+	// reachable broker the same way the ones above need a database.
+	if os.Getenv("{{.EnvPrefix}}_KAFKA_BROKERS") == "" {
+		t.Skip("{{.EnvPrefix}}_KAFKA_BROKERS is not set; these tests need a broker")
+	}
+{{- end }}
 	app := warrentest.NewModuleTest(t, user.Module(), warrentest.WithMemoryBroker())
 	reset(t, app)
 	return app
@@ -140,6 +150,16 @@ func reset(t *testing.T, app *warrentest.App) {
 // harness swaps in the recording broker.
 func boot(t *testing.T) *warrentest.App {
 	t.Helper()
+{{- if eq .Broker "kafka" }}
+	// The graph includes the Kafka module, and a driver module CONNECTS at
+	// boot — deliberately, so a misconfigured broker fails the boot rather
+	// than request 1. WithMemoryBroker below substitutes the ports this test
+	// reads, but it cannot stop the client dialling, so these tests need a
+	// reachable broker the same way the ones above need a database.
+	if os.Getenv("{{.EnvPrefix}}_KAFKA_BROKERS") == "" {
+		t.Skip("{{.EnvPrefix}}_KAFKA_BROKERS is not set; these tests need a broker")
+	}
+{{- end }}
 	return warrentest.NewModuleTest(t, user.Module(), warrentest.WithMemoryBroker())
 }
 {{- end }}
