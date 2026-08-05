@@ -888,3 +888,80 @@ func TestWriteErrorIsUsableFromEdgeMiddleware(t *testing.T) {
 		t.Errorf("content type = %q", res.Header.Get("Content-Type"))
 	}
 }
+
+// tenantGuard allows only when the {tenant} path parameter matches the
+// caller's — the shape a real multi-tenant policy has.
+type tenantGuard struct{}
+
+func (tenantGuard) Authorize(ctx context.Context) error {
+	id, ok := app.IdentityFromContext(ctx)
+	if !ok {
+		return errors.Unauthenticated("no caller identity")
+	}
+	p := transport.ParamsFromContext(ctx)
+	if p == nil {
+		// The FAIL-OPEN reading this test exists to make impossible: "no
+		// param, nothing to compare, not applicable". Written the other way
+		// on purpose, so the test fails loudly if params go missing again.
+		return nil
+	}
+	tenant, _ := p.Path("tenant")
+	if want, _ := app.Claim[string](id, "tid"); want != tenant {
+		return errors.PermissionDenied("tenant " + tenant)
+	}
+	return nil
+}
+
+type rawTenantController struct{}
+
+func (rawTenantController) Register(r transport.Registrar) {
+	transport.Raw(r, transport.ProtocolHTTP, "GET /raw/t/{tenant}/doc",
+		http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(200) }),
+		transport.Guard(tenantGuard{}))
+	transport.Get(r, "/typed/t/{tenant}/doc",
+		app.HandlerFunc[tenantReq, userDTO](func(context.Context, tenantReq) (userDTO, error) {
+			return userDTO{ID: "ok"}, nil
+		}),
+		transport.Guard(tenantGuard{}))
+}
+
+type tenantReq struct {
+	Tenant string `param:"tenant"`
+}
+
+// TestGuardsSeeParamsOnRawRoutesToo — field test #6, defect B4. Params were
+// seeded before guards on typed routes and NOT on raw ones, so the same
+// policy on the same URL shape behaved differently. The tester's policy
+// failed closed because they wrote it that way; the natural alternative is a
+// silent cross-tenant bypass on raw routes only.
+func TestGuardsSeeParamsOnRawRoutesToo(t *testing.T) {
+	t.Parallel()
+
+	m := warren.NewModule("rawtenant", warren.Controllers(func() *rawTenantController { return &rawTenantController{} }))
+	base := serve(t, []warren.Module{m}, whttp.Middleware(tenantIdentity))
+
+	for _, path := range []string{"/raw/t/acme/doc", "/typed/t/acme/doc"} {
+		t.Run(path, func(t *testing.T) {
+			// Same tenant: allowed.
+			res, body := doWithHeaders(t, "GET", base+path, "", map[string]string{"X-Tenant": "acme"})
+			if res.StatusCode != 200 {
+				t.Errorf("same tenant = %d, want 200\n%s", res.StatusCode, body)
+			}
+			// Different tenant: MUST be refused on both route shapes.
+			res, body = doWithHeaders(t, "GET", base+path, "", map[string]string{"X-Tenant": "other"})
+			if res.StatusCode != 403 {
+				t.Errorf("cross-tenant = %d, want 403 — the guard could not read {tenant}\n%s", res.StatusCode, body)
+			}
+		})
+	}
+}
+
+func tenantIdentity(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if tid := r.Header.Get("X-Tenant"); tid != "" {
+			r = r.WithContext(app.WithIdentity(r.Context(),
+				app.Identity{Subject: "u-1", Claims: map[string]any{"tid": tid}}))
+		}
+		next.ServeHTTP(w, r)
+	})
+}

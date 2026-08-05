@@ -209,6 +209,21 @@ func IdentityFromContext(ctx context.Context) (Identity, bool) {
 // its own context key. It never panics: a missing key, a wrong type and a nil
 // map all return the zero value and false, because this runs on the request
 // path over a map some verifier produced.
+//
+// JSON NUMBERS DECODE AS float64. This is the wrong type every JWT user
+// reaches for first, and it fails silently:
+//
+//	Claim[int](id, "exp")      // (0, false) — always, for every token
+//	Claim[float64](id, "exp")  // (1735689600, true)
+//
+// A JSON array is []any, not []string, for the same reason — use Scopes for
+// scopes, which is already split. And if your verifier is configured to
+// decode numbers as json.Number instead, every Claim[float64] in your
+// codebase flips to false at once; pick one and keep it.
+//
+// An explicit JSON null is indistinguishable from an absent claim: both are
+// (zero, false). That is the safe direction — a null claim carries no
+// information a handler should act on.
 func Claim[T any](id Identity, name string) (T, bool) {
 	v, ok := id.Claims[name].(T)
 	return v, ok
@@ -249,7 +264,13 @@ func (p scopePolicy) Authorize(ctx context.Context) error {
 	}
 	for _, want := range p.scopes {
 		if !id.HasScope(want) {
-			return errors.PermissionDenied("scope " + want)
+			// The scope is NOT named. errors.PermissionDenied prefixes "not
+			// allowed to ", so naming it would both read badly and hand an
+			// unauthorized caller the exact string to go and obtain — while
+			// three methods up, LogValue redacts scope names on the grounds
+			// that one can carry a tenant or a resource id. The log line has
+			// what an operator needs; the wire does not.
+			return errors.PermissionDenied("this action")
 		}
 	}
 	return nil

@@ -255,9 +255,21 @@ func (s *server) raw(rr transport.RawRoute, h http.Handler) http.Handler {
 	}
 	guards := rr.Guards
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Params are seeded for the GUARDS even though a raw route binds
+		// nothing into a request struct — "no parameter binding" is about the
+		// handler, not about the policy.
+		//
+		// Without this, the same policy on the same URL shape behaved
+		// differently on a raw route: ParamsFromContext returned nil, so a
+		// tenant check had nothing to compare. Whoever wrote the policy chose
+		// which way that failed, and the natural reading — no param, nothing
+		// to compare, not applicable, allow — is a silent cross-tenant bypass
+		// on raw routes only. The asymmetry is the bug; the seeding is one
+		// allocation on a path that has already decided to be hand-written.
+		ctx := transport.WithParams(r.Context(), params{r: r})
 		for _, g := range guards {
-			if err := g.Authorize(r.Context()); err != nil {
-				writeError(w, r, err)
+			if err := g.Authorize(ctx); err != nil {
+				writeError(w, r.WithContext(ctx), err)
 				return
 			}
 		}

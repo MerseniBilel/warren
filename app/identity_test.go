@@ -431,3 +431,49 @@ func sprintfS(v any) string { return fmt.Sprintf("%s", v) }
 type allowAll struct{}
 
 func (*allowAll) Authorize(context.Context) error { return nil }
+
+// TestDeniedResponseDoesNotNameTheScope — field test #6, defect B7. The body
+// read "not allowed to scope docs:admin", handing a caller who just failed
+// authorization the exact scope to go and obtain — while LogValue three
+// methods up redacts scope names because one can carry a tenant or a
+// resource id.
+func TestDeniedResponseDoesNotNameTheScope(t *testing.T) {
+	t.Parallel()
+
+	ctx := app.WithIdentity(context.Background(), app.Identity{Subject: "u-1", Scopes: []string{"docs:read"}})
+	err := app.RequireScope("docs:admin", "tenant:acme").Authorize(ctx)
+	if err == nil {
+		t.Fatal("a caller without the scope was allowed")
+	}
+	for _, leak := range []string{"docs:admin", "tenant:acme"} {
+		if strings.Contains(err.Error(), leak) {
+			t.Errorf("the denial names a scope the caller does not hold (%q): %v", leak, err)
+		}
+	}
+}
+
+// TestClaimOnJSONNumbers pins the sharp edge the doc now warns about: every
+// JSON number arrives as float64, so Claim[int] never works — and failing
+// silently is exactly why it needs a test as well as a sentence.
+func TestClaimOnJSONNumbers(t *testing.T) {
+	t.Parallel()
+
+	// What encoding/json produces for {"exp": 1735689600, "roles": ["a"]}.
+	id := app.Identity{Subject: "u-1", Claims: map[string]any{
+		"exp":   float64(1735689600),
+		"roles": []any{"a", "b"},
+	}}
+
+	if _, ok := app.Claim[int](id, "exp"); ok {
+		t.Error("Claim[int] on a JSON number succeeded — the doc says it never can")
+	}
+	if v, ok := app.Claim[float64](id, "exp"); !ok || v != 1735689600 {
+		t.Errorf("Claim[float64] = %v, %v, want the value", v, ok)
+	}
+	if _, ok := app.Claim[[]string](id, "roles"); ok {
+		t.Error("Claim[[]string] on a JSON array succeeded — it is []any")
+	}
+	if v, ok := app.Claim[[]any](id, "roles"); !ok || len(v) != 2 {
+		t.Errorf("Claim[[]any] = %v, %v", v, ok)
+	}
+}
