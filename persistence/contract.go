@@ -2,6 +2,7 @@ package persistence
 
 import (
 	"context"
+	stderrors "errors"
 	"sync"
 	"testing"
 	"time"
@@ -34,6 +35,39 @@ func RunContract[T domain.Root[K], K domain.ID](t *testing.T, newDriver NewDrive
 	if first == zero || second == zero || first == second {
 		t.Fatal("persistence.RunContract needs two DISTINCT, non-zero identities — the zero value cannot catch a driver storing everything under one key")
 	}
+
+	// A ROLLED-BACK TRANSACTION LEAVES NOTHING BEHIND.
+	//
+	// RunContract's own doc comment has always claimed this suite asserts it.
+	// It did not — fourteen subtests and not one rolled back — so a driver
+	// that committed on the way out of a failing Do passed certification
+	// while breaking the property the unit of work exists for. Found by the
+	// adapter ruling of 2026-08-05, in the same stale-doc class as the jobs
+	// premise.
+	//
+	// It matters most for the drivers not yet written. A Mongo driver on a
+	// standalone topology cannot open a transaction at all; without this
+	// subtest it would write non-transactionally and pass everything Warren
+	// exports.
+	t.Run("a rolled-back transaction leaves nothing behind", func(t *testing.T) {
+		uow, repo := newDriver(t)
+		id := second
+		boom := stderrors.New("the handler changed its mind")
+
+		err := uow.Do(context.Background(), func(ctx context.Context) error {
+			if err := repo.Save(ctx, newAggregate(id)); err != nil {
+				return err
+			}
+			// Saved, and then the transaction fails. Nothing may survive.
+			return boom
+		})
+		if !stderrors.Is(err, boom) {
+			t.Fatalf("Do = %v, want the handler's own error", err)
+		}
+		if _, err := repo.FindByID(context.Background(), id); !errors.Is(err, errors.CodeNotFound) {
+			t.Errorf("the aggregate survived a rolled-back transaction: FindByID = %v, want NOT_FOUND", err)
+		}
+	})
 
 	t.Run("save then find round-trips identity", func(t *testing.T) {
 		uow, repo := newDriver(t)

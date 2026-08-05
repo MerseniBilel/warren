@@ -817,3 +817,54 @@ func TestGuardRefusesANilPolicy(t *testing.T) {
 type nilPolicy struct{}
 
 func (*nilPolicy) Authorize(context.Context) error { return nil }
+
+// TestGRPCAcceptsAParamTaggedHandler — the group adapter ruling, 2026-08-05,
+// found this by execution and it falsifies warren.md §4.2's claim that the
+// gRPC round required "zero changes to core transport".
+//
+// checkWildcards is right for HTTP: a `param:"id"` field with no {id} in the
+// pattern would bind "" on every request. But a gRPC method name is not a
+// path and has no wildcards, so the check refused the canonical Warren
+// handler — the very handler gRPC exists to share with HTTP:
+//
+//	transport.Get(r, "/users/{id}", h)                    // fine
+//	transport.Method(r, "user.v1.UserService/GetUser", h) // BOOT FAILED
+//
+// OnEvent already exempts itself; gRPC was the odd one out.
+func getUserByID(context.Context, getUser) (userDTO, error) { return userDTO{ID: "u-1"}, nil }
+
+func TestGRPCAcceptsAParamTaggedHandler(t *testing.T) {
+	t.Parallel()
+
+	b := transport.NewBuilder()
+	r := b.For("user")
+	transport.Get(r, "/users/{id}", app.HandlerFunc[getUser, userDTO](getUserByID))
+	transport.Method(r, "user.v1.UserService/GetUser",
+		app.HandlerFunc[getUser, userDTO](getUserByID))
+	tbl, err := b.Table()
+	if err != nil {
+		t.Fatalf("a param-tagged handler was refused over gRPC, where there are no path wildcards: %v", err)
+	}
+	tbl.Claim(transport.ProtocolHTTP, "transport/http")
+	tbl.Claim(transport.ProtocolGRPC, "transport/grpc")
+	if n := len(tbl.GRPC()); n != 1 {
+		t.Errorf("gRPC routes = %d, want 1", n)
+	}
+}
+
+// TestHTTPStillRefusesAParamWithNoWildcard — the relaxation must not cost the
+// case the check was written for. On HTTP the field would bind "" on every
+// request and the handler would 404 with nothing saying why.
+func TestHTTPStillRefusesAParamWithNoWildcard(t *testing.T) {
+	t.Parallel()
+
+	b := transport.NewBuilder()
+	transport.Get(b.For("user"), "/users",
+		app.HandlerFunc[getUser, userDTO](getUserByID))
+
+	if _, err := b.Table(); err == nil {
+		t.Fatal("HTTP accepted a param: tag with no matching wildcard")
+	} else if !strings.Contains(err.Error(), "no matching path wildcard") {
+		t.Errorf("wrong diagnostic: %v", err)
+	}
+}

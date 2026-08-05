@@ -668,9 +668,24 @@ func register[Req, Res any](r Registrar, p Protocol, verb, pattern string, h app
 		reg.fail(err)
 		return
 	}
-	if err := checkWildcards(pattern, setters); err != nil {
-		reg.fail(err)
-		return
+	// HTTP only. A `param:` tag with no matching {wildcard} would bind "" on
+	// every HTTP request — the handler looks up the zero value and reports
+	// NOT_FOUND with nothing saying why, which is what this check exists to
+	// prevent. A gRPC method name is not a path and HAS no wildcards, so the
+	// same check refused the canonical Warren handler over the one protocol
+	// gRPC exists to share it with:
+	//
+	//	transport.Get(r, "/users/{id}", h)                    // fine
+	//	transport.Method(r, "user.v1.UserService/GetUser", h) // refused
+	//
+	// OnEvent already exempts itself by never calling this; gRPC was the odd
+	// one out. A gRPC adapter fills Req from the protobuf message, so the
+	// param setters are simply unused there.
+	if p == ProtocolHTTP {
+		if err := checkWildcards(pattern, setters); err != nil {
+			reg.fail(err)
+			return
+		}
 	}
 
 	reg.record(entry{

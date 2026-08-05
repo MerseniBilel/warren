@@ -97,8 +97,29 @@ type Subscriber interface {
 //
 // A driver that does not implement this is assumed to redeliver, which is
 // true of every durable broker and keeps the documented behaviour for them.
+//
+// # The answer must be constant for a driver
+//
+// It is asked ONCE, when the pipeline is composed, and it is asked of the
+// publisher rather than of a subscription — so a driver's answer must hold
+// for every subscription it serves. Kafka (offset rewind), RabbitMQ (nack
+// with requeue) and JetStream (Nak) are all constantly true; the in-process
+// broker is constantly false.
+//
+// A driver that cannot promise that must expose TWO client values rather than
+// one that answers differently per subscription — NATS Core and JetStream
+// from a single connection is the case that forces this, and so is a RabbitMQ
+// driver mixing requeue and no-requeue subscriptions. Moving this method onto
+// Subscriber would make it per-subscription, and that is a breaking change to
+// an exported interface, which is why the constraint is written down here
+// rather than discovered later.
+//
+// It also follows that the dead-letter publisher handed to Pipeline must be
+// the SAME driver as the subscription. If it is a different broker, the
+// pipeline asks the wrong one whether a nack comes back.
 type Redeliverer interface {
-	// Redelivers reports whether a nacked message comes back.
+	// Redelivers reports whether a nacked message comes back. It must return
+	// the same value for the lifetime of the driver.
 	Redelivers() bool
 }
 

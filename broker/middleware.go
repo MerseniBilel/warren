@@ -149,6 +149,9 @@ func Pipeline(subscription, topic string, h MessageHandler, store inbox.Store, d
 	if dlq == nil {
 		panic("broker: Pipeline composed with a nil dead-letter publisher — terminal messages must be preserved, never dropped")
 	}
+	// dlq must be the SAME DRIVER as the subscription: DeadLetter asks it
+	// whether a nack comes back (broker.Redeliverer), and a publisher from a
+	// different broker answers about the wrong one.
 	cfg := subscribeConfig{
 		retry:     ExponentialBackoff(3),
 		dlqTopic:  topic + ".dlq",

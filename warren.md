@@ -1478,10 +1478,28 @@ reaches `protoregistry`, so the reflection service this section turns on by
 default would have nothing to report, and field numbers would live in Go struct
 tags where a reordering silently breaks every deployed client.
 
-The round found **zero required changes to core `transport`**, which is the
-strongest evidence that §3.5's `Codec`/`Bind` design holds. Measured, the
-adapter costs **6 third-party modules** — `grpc`, `protobuf`, `genproto`,
-`x/net`, `x/sys`, `x/text` — plus `buf` as tooling.
+The round found **no change to any EXPORTED core declaration**, which is the
+strongest evidence that §3.5's `Codec`/`Bind` design holds — but it did not
+find zero changes, and the difference was discovered by execution on
+2026-08-05 rather than by reading.
+
+`checkWildcards` ran for every protocol, so a `param:"id"` field with no
+`{id}` in the pattern was refused — and a gRPC method name is not a path and
+HAS no wildcards. The canonical Warren handler could be registered over HTTP
+and not over gRPC, which is the one protocol pair `Bind` exists to serve.
+`OnEvent` already exempted itself; gRPC was the odd one out. The check is now
+gated to `ProtocolHTTP`, which changes no signature and only relaxes an error.
+
+One more thing the gRPC adapter must not "fix" into the port: an all-default
+protobuf message encodes to ZERO BYTES, and the invoker skips `Codec.Decode`
+when the body is empty. On HTTP that is right — no bytes means no body. On
+gRPC the adapter's per-route codec must treat "no bytes" as "the empty
+message", which is semantically identical. Widening `Codec` or `Invoker` to
+express the difference would be a post-tag change to an exported signature,
+and it is not needed.
+
+Measured, the adapter costs **6 third-party modules** — `grpc`, `protobuf`,
+`genproto`, `x/net`, `x/sys`, `x/text` — plus `buf` as tooling.
 
 The v0.2 landing zone, decided rather than guessed:
 
