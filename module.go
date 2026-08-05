@@ -283,6 +283,38 @@ func errDuplicateModule(name, first, second string) error {
 	return diagnostic(fmt.Sprintf("✗ duplicate module name\n\n    %q is declared twice: %s and %s\n\n  Module names are scope names — every diagnostic addresses them — so they\n  must be unique.", name, first, second))
 }
 
+// errCannotReExport is the facade attempt: module A imports B, which exports
+// T, and A tries to export T onward so its own importers get it.
+//
+// Warren forwards exports ONE hop — into the importer's scope, for its own
+// constructors to inject — and no further. A module is an encapsulation
+// boundary (warren.md §1.2), so "everything my imports export, I export too"
+// would make that boundary leak by default.
+//
+// It matters because it is the shape a generated app reaches for first: one
+// platform module that owns every adapter, so features import one thing. The
+// working idiom is the scaffold's own — declare the adapter module once with
+// sync.OnceValue and let features import THAT, beside platform.
+func errCannotReExport(module, declared, from string, t reflect.Type) error {
+	return diagnostic(fmt.Sprintf("✗ cannot re-export an imported type\n\n"+
+		"    module %q (%s)\n"+
+		"    exports %s, but does not provide it — it imports that\n"+
+		"    from module %q.\n\n"+
+		"  A module may export only what its own providers return. An export is\n"+
+		"  forwarded INTO an importer, for its own constructors to inject, and\n"+
+		"  not THROUGH it: a module is an encapsulation boundary, so passing on\n"+
+		"  everything it imports would make that boundary leak by default.\n\n"+
+		"  Let whoever needs it import that module directly, and declare the\n"+
+		"  module once so every importer means the same one:\n\n"+
+		"      var Broker = sync.OnceValue(func() warren.Module {\n"+
+		"          return kafka.Broker(...)\n"+
+		"      })\n\n"+
+		"      warren.Imports(platform.Module(), platform.Broker())\n\n"+
+		"  sync.OnceValue matters: a plain factory called by two importers is\n"+
+		"  two modules sharing a name, which is its own boot error.",
+		module, declared, t, from))
+}
+
 func errExportWithoutProvider(module, declared string, t reflect.Type) error {
 	return diagnostic(fmt.Sprintf("✗ export without provider\n\n    module %q (%s) exports %s, but none of its providers returns it.\n\n  Add the constructor to warren.Providers, remove the export, or — if a\n  provider returns a concrete type that implements it — declare that\n  constructor's return type as the exported interface.", module, declared, t))
 }

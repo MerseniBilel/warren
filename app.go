@@ -224,6 +224,17 @@ func (a *App) Start(ctx context.Context) error {
 		}
 		for _, t := range m.exports {
 			if !provided[t] {
+				// A module exporting something it IMPORTS is a facade
+				// attempt, not a forgotten constructor, and the generic
+				// advice ("add the constructor") is useless there — the
+				// constructor exists, in the module next door. Warren does
+				// not forward transitively, so say so and name the idiom
+				// that does work.
+				for _, imp := range m.imports {
+					if slices.Contains(imp.exports, t) {
+						return errCannotReExport(m.name, m.declared, imp.name, t)
+					}
+				}
 				return errExportWithoutProvider(m.name, m.declared, t)
 			}
 		}
