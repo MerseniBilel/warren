@@ -264,7 +264,6 @@ Stated elsewhere in warren.md but **absent from §8's command surface**:
 | Command | Source | What it does there |
 |---|---|---|
 | `warren g proto user --service UserService` | §4.2 | generates the `.proto`, runs `buf generate`, and wires the generated service to existing handlers |
-| `warren openapi export > openapi.yaml` | §4.3 | emits the OpenAPI 3.1 document for CI |
 | `warren templates eject` | §8 (Templates row) | copies the embedded templates out for a per-org fork |
 
 These are real commands the manifest commits to; which group each belongs to is
@@ -503,7 +502,7 @@ and not `go/ast`.
 **Per command — every one of `new`, `g module`, `g entity`, `g command`,
 `g repository`, `g consumer`, `g proto`, `lint arch`, `doctor`,
 `graph modules`, `graph di`, `graph events`, `explain di`, `add`,
-`migrate layout`, `extract module`, `templates eject`, `openapi export`:**
+`migrate layout`, `extract module`, `templates eject`:**
 
 - [ ] Implemented with exactly the flags recorded in **Command surface** — no
       flag invented, none dropped.
@@ -601,11 +600,19 @@ and not `go/ast`.
    leave a shim, rewrite the memory-broker wiring into a real driver on both
    sides, create a `go.mod` in the target, or emit a plan for a human?
 
-8. **Which group do `warren g proto`, `warren openapi export` and `warren
-   templates eject` belong to?** All three are committed to elsewhere in
-   warren.md (§4.2, §4.3, §8) and none appears in §8's four-group command
-   surface. `warren openapi export` in particular reads as a fifth group or a
-   top-level noun. §8 needs amending either way.
+8. **Which group do `warren g proto` and `warren templates eject` belong
+   to?** Both are committed to elsewhere in warren.md (§4.2, §8) and neither
+   appears in §8's four-group command surface. §8 needs amending either way.
+
+   **`warren openapi export` is STRUCK (2026-08-05).** The route table is
+   filled at boot step 5 by running the application's own Register methods,
+   and `Request`/`Response` reach `HTTPRoute` as type arguments inferred at
+   the call site — so a CLI outside the process could only recover them with
+   full type checking, via the `x/tools/go/packages` this CLI deliberately
+   dropped so that `lint arch` works on a project that does not compile.
+   `warren/openapi` runs inside the application instead and serves
+   `/openapi.json`; CI boots the binary and fetches it. One mechanism, not
+   two. See warren.md §4.3.
 
 9. **Does `warren lint arch` check anything that is not import-shaped?** The layer
    rule and the ring rule are both import-graph questions. Invariants 2, 3 and 7

@@ -205,7 +205,7 @@ warren/testing/                         (core)  stdlib only — no testify
 warren/cli/                             MODULE  cobra                   (build-time only)
 
 DEFERRED to v0.2 — each spec records why
-warren/openapi/                         MODULE  —                       first for v0.2
+warren/openapi/                         MODULE  —                       rank 1 for v0.2; spec APPROVED, architecture ruled
 warren/auth/                            MODULE  golang-jwt + go-oidc    verification only; app.Identity ships in v0.1
 warren/transport/grpc/                  MODULE  google.golang.org/grpc  needs `warren g proto`
 warren/jobs/                            MODULE  robfig/cron             amends the boot/shutdown orders
@@ -1516,9 +1516,55 @@ surface gains it in the same change — not before.
 
 ### 4.3 `warren/openapi`
 
-- **Mode** Build
+- **Mode** Build · **DEFERRED TO v0.2, RANK 1.** Spec APPROVED 2026-08-05 —
+  the architecture is ruled and nothing in core waits on it.
 
-Reads route registrations plus DTO struct tags (including `validate:` constraints) and emits OpenAPI 3.1. No annotations, no separate spec file to drift. Serves Scalar/Swagger UI at `/docs`, or `warren openapi export > openapi.yaml` for CI.
+Reads the frozen route table (§3.5) plus DTO struct tags — `json:`, `param:`,
+`query:`, `validate:` — and emits OpenAPI 3.1. No annotations, no IDL, no
+checked-in spec file to drift.
+
+**It runs inside the application, not in the CLI.** `Request`/`Response` reach
+`HTTPRoute` as type arguments inferred at the call site, so recovering them
+statically needs full type checking — `golang.org/x/tools/go/packages`, dropped
+in §9 — and would be a second implementation of a table boot already builds
+correctly. Instead `openapi.Module(...)` injects the `*transport.Table` bound
+in the root scope at step 2, provides a controller that registers
+`transport.Raw(r, ProtocolHTTP, "GET /openapi.json", …)`, and builds the
+document ONCE in an `OnStart` hook after step 5. Whichever adapter claims
+`ProtocolHTTP` mounts it: this module imports `net/http` and no adapter —
+invariant 4 intact, and no `net/http` type in any public signature — and
+`Table.Unserved()` already fails the boot if it is added with no HTTP server.
+CI boots the binary and fetches `/openapi.json`, which is one mechanism
+instead of two; there is deliberately no `warren openapi export`. Output is
+JSON only — JSON is valid YAML 1.2, so `> openapi.yaml` still works and no
+YAML dependency is bought.
+
+**Zero third-party.** Audited 2026-08-05: `getkin/kin-openapi` (v0.146.0
+2026-08-03, 3270 stars, not archived, 13 modules) and `pb33f/libopenapi`
+(v0.38.7 2026-07-15, 862 stars, not archived, 8 modules) are both healthy and
+both PARSERS — bought for `$ref` resolution and round-tripping this package
+never does, and kin-openapi's model is 3.0-shaped. `huma` (v2.39.1, 4293
+stars), the closest competitor and the same types-first model, hand-rolls its
+own 3.1 types in 1854 lines and depends on neither. Warren's subset is smaller
+still.
+
+**What it refuses to guess** — each refusal reaches `Document.Refusals()`, a
+boot WARN, and an `x-warren-undescribed` extension on the operation, so it
+survives into the published artifact rather than living in a log line nobody
+reads; `openapi.Strict()` makes them boot failures. Prose: there is none until
+a carrier exists, and "RegisterUser" is not "Registers a user". The shape of
+any `json.Marshaler` outside `time.Time`. `security`: an
+`AuthorizationPolicy` is one opaque method, so the 401/403 responses are
+emitted instead of a guessed scheme. The payload of a `transport.Raw` route.
+And every `validate:`-derived constraint when the installed validator is
+`validate.None()` — which accepts every tag and enforces nothing, so a
+tag-reading emitter would otherwise publish `required` for an API that
+accepts `{}`.
+
+**`Raw` routes are emitted, not omitted.** A document missing a route claims a
+smaller API than reality, and that is the one error a generated client acts
+on: it cannot call an endpoint that exists, and nothing says why. Event and
+gRPC routes are out of scope — OpenAPI describes HTTP.
 
 ---
 

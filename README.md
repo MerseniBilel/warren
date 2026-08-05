@@ -14,7 +14,9 @@
 > type and the policies ship in `app`), `transport/grpc`, `jobs`, `resilience`,
 > `broker/rabbitmq`, `broker/nats`, and the Mongo/Redis/MySQL drivers — each
 > deferred to v0.2 **with the reason recorded in its own spec**, not left as
-> an open question. The short version: `openapi` is undecided architecture,
+> an open question. The short version: `openapi`'s architecture is now ruled
+> and its spec approved — it is a pure add-on over a route table frozen in
+> v0.1, so `go get` gets it in v0.2 with no migration —
 > `auth` needs two dependency audits that have not been run, `jobs` would
 > amend the boot and shutdown orders, `resilience`
 > is mostly shipped already, and a third broker driver answers nothing that
