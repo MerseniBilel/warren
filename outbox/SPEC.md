@@ -357,9 +357,11 @@ names none.
     `PollInterval`, `BatchSize`, and `LeaderElection` all need defaults — and a
     default leader-election mechanism implies a default database, which
     question 1 says core cannot know about.
-11. **Two leader-election mechanisms exist with no shared abstraction:**
-    `outbox.LeaderElection(...)` here and `jobs.LeaderOnly()` in §7.4. Whether
-    they share a port is unstated.
+11. ~~**Two leader-election mechanisms exist with no shared abstraction.**~~
+    **RESOLVED (2026-08-05):** there is only one. `warren/jobs` was DROPPED —
+    a scheduler is an ordinary `lifecycle.Hook` — so `jobs.LeaderOnly()` does
+    not exist and never will. `outbox.Elector` is the single port, and a
+    scheduler that wants leader-only injects the same one.
 12. **Is the relay's flush bounded?** §2.3 step 6 sets a 30s force-exit
     deadline; whether a flush with a large backlog is capped by a per-hook
     timeout (`lifecycle.Hook.Timeout`, §2.3) or by that deadline is unstated.

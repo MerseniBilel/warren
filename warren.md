@@ -208,9 +208,8 @@ DEFERRED to v0.2 — each spec records why
 warren/openapi/                         MODULE  —                       rank 1 for v0.2; spec APPROVED, architecture ruled
 warren/auth/                            MODULE  golang-jwt + go-oidc    verification only; app.Identity ships in v0.1
 warren/transport/grpc/                  MODULE  google.golang.org/grpc  needs `warren g proto`
-warren/jobs/                            MODULE  robfig/cron             amends the boot/shutdown orders
 warren/persistence/mongo/               MODULE  mongo-driver            design round CLOSED: port needs no change
-warren/persistence/redis/               MODULE  redis/go-redis          entangled with jobs' elector
+warren/persistence/redis/               MODULE  redis/go-redis          cache + lock; the jobs entanglement is gone
 warren/broker/rabbitmq/                 MODULE  rabbitmq/amqp091-go     memory already proves the swap
 warren/broker/nats/                     MODULE  nats-io/nats.go         §5.3 is seven words
 warren/persistence/mysql/               —                               not in this table by design
