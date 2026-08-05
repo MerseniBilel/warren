@@ -3,7 +3,7 @@
 # Adapter modules are appended here as they are created.
 MODULES := . cli transport/http persistence/postgres observability broker/kafka validate/playground
 
-.PHONY: ci fmt vet lint invariants test bench workspace
+.PHONY: ci fmt vet lint invariants test integration bench workspace
 
 ci: workspace fmt vet lint invariants test
 
@@ -37,6 +37,23 @@ invariants:
 
 test: workspace
 	@set -e; for m in $(MODULES); do echo "--- test $$m"; (cd $$m && go test -race ./...); done
+
+# The suites that need a real server. NOT part of `ci`: AGENT.md's unit-test
+# rule is no Docker and no network, so these sit behind the `integration` tag
+# and skip cleanly when their variable is unset.
+#
+#   docker run --rm -d --name warren-pg    -p 5433:5432 -e POSTGRES_PASSWORD=warren postgres:17
+#   docker run --rm -d --name warren-kafka -p 9092:9092 apache/kafka:3.9.0
+#
+#   WARREN_TEST_POSTGRES_DSN='postgres://postgres:warren@localhost:5433/postgres?sslmode=disable' \
+#   WARREN_TEST_KAFKA_BROKERS=localhost:9092 \
+#   make integration
+#
+# Both run an EXPORTED contract suite — persistence.RunContract and
+# brokertest.Run — which is the same standard a community adapter is held to.
+integration: workspace
+	@set -e; for m in persistence/postgres broker/kafka; do \
+		echo "--- integration $$m"; (cd $$m && go test -tags integration -count=1 ./...); done
 
 bench: workspace
 	@set -e; for m in $(MODULES); do echo "--- bench $$m"; (cd $$m && go test -run '^$$' -bench . -benchmem ./...); done

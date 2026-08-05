@@ -11,12 +11,25 @@
 
 ## Why it is deferred
 
-**The job a second driver does is already done by a shipped module.**
-`broker/memory` implements the same port and passes the same exported
-`broker/brokertest` contract suite that `broker/kafka` passes — so
-"the broker port swaps" is demonstrated, by two implementations, with a
-contract suite as the evidence. A third driver buys a bullet point and costs a
-module, an audit, and a maintained integration suite.
+**The job a second driver does is already done by a shipped module** — but
+the sentence that used to be here overstated the evidence, and the correction
+matters more than the deferral.
+
+It said `broker/memory` "passes the same exported `broker/brokertest`
+contract suite that `broker/kafka` passes". **`broker/kafka` did not pass it,
+because it never ran it.** Until 2026-08-05, `brokertest.Run` had exactly one
+caller: `broker/memory`. So the port's swappability was demonstrated by ONE
+implementation and an interface, not by two — and an in-process broker is the
+easiest possible subject, where "the subscription is live" is a map insert
+and ordering is whatever order the sender used.
+
+`broker/kafka/integration_test.go` now runs the suite behind the `integration`
+tag, against a real broker. **Until someone runs it green and records that
+here, the certification claim this deferral rests on is unproven**, and so is
+the community-adapter strategy that depends on the same suite.
+
+A third driver still buys a bullet point and costs a module, an audit, and a
+maintained integration suite — that part of the argument stands on its own.
 
 It is also not settled. §5.2 gives four sentences, and among its eight open
 questions is a **direct contradiction**: §3.4 calls `Message.Key` the routing

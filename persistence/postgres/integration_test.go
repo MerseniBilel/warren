@@ -560,8 +560,17 @@ func TestIdleRelayDoesNotExhaustThePool(t *testing.T) {
 
 	// And the relay must be holding at most ONE listener, not one per tick.
 	var listeners int
+	// Scoped to THIS database. pg_stat_activity is server-wide, so without
+	// the filter any other Warren service on the same Postgres — a colleague's
+	// dev app, another suite in CI, a scaffolded project someone left running
+	// — fails this test with a diagnostic pointing at the relay. That
+	// happened: two abandoned field-test apps made a green tree look like a
+	// regression in the very defect this test guards.
 	if err := db(probeCtx).QueryRow(probeCtx,
-		`SELECT count(*) FROM pg_stat_activity WHERE query LIKE 'LISTEN%' AND pid <> pg_backend_pid()`,
+		`SELECT count(*) FROM pg_stat_activity
+		  WHERE query LIKE 'LISTEN%'
+		    AND datname = current_database()
+		    AND pid <> pg_backend_pid()`,
 	).Scan(&listeners); err != nil {
 		t.Fatalf("counting listeners: %v", err)
 	}
