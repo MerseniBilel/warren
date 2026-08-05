@@ -1792,6 +1792,18 @@ fault); `INVALID` parks immediately (retrying a deterministic rejection would
 stall the queue forever); anything else retries under `Backoff` and then
 parks. Parking is loud — it breaks ordering for that key permanently.
 
+**A rejected BATCH is retried one record at a time.** A batch is how records
+were sent, not what they are: a broker refuses the record it objects to and
+accepts the rest. Measured against real Kafka, a five-record batch containing
+one oversized message returned `MESSAGE_TOO_LARGE` and left **four of the
+five in the topic** — so parking the batch's head parked records that had
+already been delivered, and the outbox reported delivered events as failed
+for ever. Isolation happens only on `INVALID`; `UNAVAILABLE` is the broker
+being down, which is not about any record. The records the broker already
+accepted are sent again during isolation, which at-least-once permits and the
+inbox dedupes — the cheaper mistake than losing the truth about a delivered
+record permanently.
+
 **Leader election** is a port, and the wiring is two halves that must both be
 present. `postgres.WithAdvisoryLock()` makes the postgres module PROVIDE an
 `outbox.Elector`; the relay's constructor then injects it and passes

@@ -555,6 +555,30 @@ func (r *Relay) DrainOnce(ctx context.Context) (int, error) {
 		}
 
 		if err := r.pub.Publish(ctx, topic, msgs...); err != nil {
+			// A REJECTION IS ABOUT ONE RECORD, and a batch is how records
+			// were sent, not what they are. The broker accepts the rest of
+			// the batch and refuses that one: measured against real Kafka, a
+			// five-record batch with one oversized message returned
+			// MESSAGE_TOO_LARGE and left FOUR of the five in the topic.
+			//
+			// Parking the head on that error parked records the broker had
+			// already delivered — the outbox then reports a delivered event
+			// as failed for ever, and replaying parked rows re-sends
+			// something that already went out. So the batch is retried one
+			// record at a time, and each gets its own verdict.
+			//
+			// Only for INVALID. UNAVAILABLE is the broker being down, which
+			// is not about any record, and isolating there would be N
+			// pointless publishes instead of one.
+			if len(group) > 1 && codeOf(err) == errors.CodeInvalid {
+				n, isoErr := r.publishEach(ctx, topic, group)
+				published += n
+				if isoErr != nil {
+					return published, isoErr
+				}
+				i = j
+				continue
+			}
 			return published, r.disposition(ctx, group, err)
 		}
 		if err := r.store.MarkPublished(ctx, ids...); err != nil {
@@ -565,6 +589,33 @@ func (r *Relay) DrainOnce(ctx context.Context) (int, error) {
 		r.forget(ids)
 		published += len(group)
 		i = j
+	}
+	return published, nil
+}
+
+// publishEach republishes a rejected batch one record at a time, so the
+// broker's verdict on each is its own.
+//
+// THE RECORDS THE BROKER ALREADY ACCEPTED ARE SENT AGAIN. That is the price
+// of a port whose Publish returns one error for many messages, and it is the
+// cheaper mistake: at-least-once already permits a duplicate and the inbox
+// dedupes it, whereas parking a delivered record loses the truth about it
+// permanently. It happens only on the failure path.
+//
+// It stops at the first record that does not publish. A parked record ends
+// this drain; the ones behind it are pending and the next drain — a poll
+// interval away — takes them.
+func (r *Relay) publishEach(ctx context.Context, topic string, group []Record) (int, error) {
+	published := 0
+	for _, rec := range group {
+		if err := r.pub.Publish(ctx, topic, rec.Message); err != nil {
+			return published, r.disposition(ctx, []Record{rec}, err)
+		}
+		if err := r.store.MarkPublished(ctx, rec.Message.ID); err != nil {
+			return published, fmt.Errorf("outbox: marking record %s published: %w", rec.Message.ID, err)
+		}
+		r.forget([]string{rec.Message.ID})
+		published++
 	}
 	return published, nil
 }

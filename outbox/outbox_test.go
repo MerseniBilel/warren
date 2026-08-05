@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	stderrors "errors"
+	"fmt"
 	"log/slog"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -781,3 +783,109 @@ type nonRedeliveringPublisher struct{}
 
 func (nonRedeliveringPublisher) Publish(context.Context, string, ...broker.Message) error { return nil }
 func (nonRedeliveringPublisher) Redelivers() bool                                         { return false }
+
+// pickyPublisher accepts every message except one, which it rejects the way
+// a broker rejects a single bad record — INVALID for that record, while the
+// others in the same call are ACCEPTED and delivered.
+//
+// That is not a contrivance. Measured against real Kafka: a five-record batch
+// with one 2 MiB message returned MESSAGE_TOO_LARGE, and four of the five
+// records were in the topic afterwards.
+type pickyPublisher struct {
+	mu     sync.Mutex
+	reject string
+	got    map[string][]broker.Message
+}
+
+func newPicky(reject string) *pickyPublisher {
+	return &pickyPublisher{reject: reject, got: map[string][]broker.Message{}}
+}
+
+func (p *pickyPublisher) Publish(_ context.Context, topic string, msgs ...broker.Message) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	var bad *broker.Message
+	for i, m := range msgs {
+		if m.ID == p.reject {
+			bad = &msgs[i]
+			continue
+		}
+		p.got[topic] = append(p.got[topic], m)
+	}
+	if bad != nil {
+		return werrors.Invalid("record", fmt.Errorf("message %s is too large", bad.ID))
+	}
+	return nil
+}
+
+// recordingStore reports which records were parked and which were marked
+// published — neither is observable through the Store interface, and the
+// difference between them is the whole defect.
+type recordingStore struct {
+	outbox.Store
+	mu        sync.Mutex
+	parked    []string
+	published []string
+}
+
+func (s *recordingStore) MarkFailed(ctx context.Context, id string, cause error) error {
+	s.mu.Lock()
+	s.parked = append(s.parked, id)
+	s.mu.Unlock()
+	return s.Store.MarkFailed(ctx, id, cause)
+}
+
+func (s *recordingStore) MarkPublished(ctx context.Context, ids ...string) error {
+	s.mu.Lock()
+	s.published = append(s.published, ids...)
+	s.mu.Unlock()
+	return s.Store.MarkPublished(ctx, ids...)
+}
+
+// TestOneBadRecordParksOnlyItself is the defect a multi-partition topic made
+// visible: the relay parked the batch's HEAD on any rejection, and the head
+// is not the record the broker refused.
+//
+// With records a b c d e and c rejected, a and b were marked FAILED — records
+// the broker had accepted and delivered. The outbox then reports delivered
+// events as failed for ever, and an operator replaying parked rows re-sends
+// something that already went out.
+func TestOneBadRecordParksOnlyItself(t *testing.T) {
+	t.Parallel()
+
+	store := &recordingStore{Store: outbox.NewMemoryStore()}
+	pub := newPicky("c")
+	ctx := context.Background()
+	for _, id := range []string{"a", "b", "c", "d", "e"} {
+		_ = store.Append(ctx, outbox.Record{Topic: "orders", Message: broker.Message{ID: id, Key: id}})
+	}
+
+	relay := outbox.NewRelay(store, pub)
+	// Drain repeatedly: a rejection ends a drain, so the records after it
+	// belong to the next one.
+	for range 8 {
+		n, _ := relay.DrainOnce(ctx)
+		pending, _ := store.Pending(ctx, 10)
+		if n == 0 && len(pending) == 0 {
+			break
+		}
+	}
+
+	store.mu.Lock()
+	parked := append([]string(nil), store.parked...)
+	published := append([]string(nil), store.published...)
+	store.mu.Unlock()
+
+	if len(parked) != 1 || parked[0] != "c" {
+		t.Errorf("parked %v, want only [c] — every other record was accepted by the broker", parked)
+	}
+	for _, id := range []string{"a", "b", "d", "e"} {
+		if !slices.Contains(published, id) {
+			t.Errorf("%s was accepted by the broker but never marked published; published=%v parked=%v",
+				id, published, parked)
+		}
+	}
+	if pending, _ := store.Pending(ctx, 10); len(pending) != 0 {
+		t.Errorf("%d record(s) still pending, want none", len(pending))
+	}
+}
