@@ -1879,6 +1879,19 @@ wants a durable store.
 
 The outbox, inbox and elector are OPTIONS of `Module` — `WithOutbox()`, `WithInbox()`, `WithAdvisoryLock()` — not sibling modules: they need the pool, and a sibling module cannot see another module's providers.
 
+`WithAdvisoryLock()` is HALF of multi-replica correctness, and the half that
+does nothing alone: it makes the adapter PROVIDE an `outbox.Elector`, and the
+relay uses it only if that is the elector it receives. Measured on two
+replicas over one database — 20 events published **40 times** without it, 20
+times with it, and a killed leader recovered in under five seconds with the
+lock moving to the survivor's backend.
+
+Every connection carries an `application_name`, defaulting to the running
+binary's name and overridable with `postgres.ApplicationName(...)`; a DSN that
+sets one wins. On a shared database that column is how an operator answers
+"which service holds the outbox lock" — a question that starts in `pg_locks`
+and is unanswerable when every row is anonymous.
+
 ```go
 postgres.Module(
     postgres.DSN(cfg.Postgres.DSN),

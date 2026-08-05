@@ -9,6 +9,9 @@ import (
 	"testing"
 
 	"github.com/MerseniBilel/warren/persistence"
+
+	"github.com/MerseniBilel/warren/health"
+	"github.com/MerseniBilel/warren/lifecycle"
 )
 
 var update = flag.Bool("update", false, "rewrite golden files")
@@ -375,4 +378,60 @@ func TestMigrateWithoutADSNIsRefused(t *testing.T) {
 	if err := Migrate(context.Background(), "  ", Schema); err == nil {
 		t.Fatal("Migrate with no DSN must fail")
 	}
+}
+
+// TestApplicationNameIdentifiesTheService covers the column an operator reads
+// on a shared database. A two-replica outbox has exactly one leader, and
+// finding which process holds the advisory lock used to start with a blank
+// pg_stat_activity.application_name.
+func TestApplicationNameIdentifiesTheService(t *testing.T) {
+	t.Parallel()
+
+	const dsn = "postgres://app:pw@localhost:5432/db"
+
+	t.Run("defaults to the binary name", func(t *testing.T) {
+		t.Parallel()
+		cfg := defaults()
+		cfg.dsn = dsn
+		p, err := newPool(cfg, lifecycle.New(), health.New(func() bool { return true }))
+		if err != nil {
+			t.Fatalf("newPool: %v", err)
+		}
+		got := p.pgxCfg.ConnConfig.RuntimeParams["application_name"]
+		if got == "" {
+			t.Fatal("application_name is empty; every connection is anonymous")
+		}
+		if got != binaryName() {
+			t.Errorf("application_name = %q, want the binary name %q", got, binaryName())
+		}
+	})
+
+	t.Run("the option overrides it", func(t *testing.T) {
+		t.Parallel()
+		cfg := defaults()
+		cfg.dsn = dsn
+		ApplicationName("billing").apply(&cfg)
+		p, err := newPool(cfg, lifecycle.New(), health.New(func() bool { return true }))
+		if err != nil {
+			t.Fatalf("newPool: %v", err)
+		}
+		if got := p.pgxCfg.ConnConfig.RuntimeParams["application_name"]; got != "billing" {
+			t.Errorf("application_name = %q, want %q", got, "billing")
+		}
+	})
+
+	// An explicit choice in the connection string is not overridden by a
+	// default derived from argv.
+	t.Run("the DSN wins", func(t *testing.T) {
+		t.Parallel()
+		cfg := defaults()
+		cfg.dsn = dsn + "?application_name=from-dsn"
+		p, err := newPool(cfg, lifecycle.New(), health.New(func() bool { return true }))
+		if err != nil {
+			t.Fatalf("newPool: %v", err)
+		}
+		if got := p.pgxCfg.ConnConfig.RuntimeParams["application_name"]; got != "from-dsn" {
+			t.Errorf("application_name = %q, want the DSN's %q", got, "from-dsn")
+		}
+	})
 }

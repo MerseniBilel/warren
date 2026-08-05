@@ -22,6 +22,9 @@ export {{.EnvPrefix}}_KAFKA_BROKERS=localhost:9092
 {{.EnvPrefix}}_NAME={{.Name}} go run ./cmd/{{.Name}}
 ```
 
+It listens on 8080; `{{.EnvPrefix}}_HTTP_PORT` moves it, which is what lets a
+second replica run on the same host.
+
 It boots the module graph, opens the pool, starts the outbox relay and the
 notification consumer, opens readiness, and drains cleanly on SIGTERM.
 Without `{{.EnvPrefix}}_NAME` or `{{.EnvPrefix}}_DATABASE_URL`{{if eq .Broker "kafka"}} or

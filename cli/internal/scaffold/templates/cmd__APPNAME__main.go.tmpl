@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"strconv"
 
 	"github.com/MerseniBilel/warren"
 	"github.com/MerseniBilel/warren/log"
@@ -14,6 +15,36 @@ import (
 	"{{.Module}}/internal/modules/user"
 	"{{.Module}}/internal/platform"
 )
+
+// port is the HTTP port, from {{.EnvPrefix}}_HTTP_PORT, default 8080.
+//
+// It is read HERE rather than from config.Config for the same reason the DSN
+// is: whttp.Server's options are needed while the module graph is being
+// DECLARED, before boot step 4 builds the config value. A listening port is
+// bootstrap configuration — the thing you need in order to start, not a thing
+// you get out of the container.
+//
+// It exists because without it a second replica cannot start on one host:
+// every container platform assigns ports, and editing main.go per replica is
+// not a deployment strategy.
+//
+// A value that does not parse is FATAL, not ignored. Falling back to 8080
+// would start the service on a port nobody asked for, and with two replicas
+// the second would then fail with "address already in use" — a diagnostic
+// pointing at the wrong thing entirely. Every error the framework can detect
+// surfaces at boot, naming the variable.
+func port() int {
+	v := os.Getenv("{{.EnvPrefix}}_HTTP_PORT")
+	if v == "" {
+		return 8080
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 1 || n > 65535 {
+		fmt.Fprintf(os.Stderr, "{{.EnvPrefix}}_HTTP_PORT=%q is not a port between 1 and 65535\n", v)
+		os.Exit(1)
+	}
+	return n
+}
 
 func main() {
 	// Every log record carries the correlation ID that ties one request's
@@ -32,7 +63,7 @@ func main() {
 		// Serves every route the controllers registered. Health probes come
 		// with it: /healthz runs no checks, /readyz gates on the lifecycle
 		// and every critical check.
-		whttp.Server(whttp.Port(8080)),
+		whttp.Server(whttp.Port(port())),
 	).Run()
 
 	if err != nil {

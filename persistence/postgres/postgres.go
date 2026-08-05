@@ -23,6 +23,8 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -68,6 +70,7 @@ type config struct {
 	maxConnIdleTime  time.Duration
 	connectTimeout   time.Duration
 	statementTimeout time.Duration
+	appName          string
 	cacheMode        CacheMode
 	healthTimeout    time.Duration
 	raw              []func(context.Context, *pgxpool.Pool) error
@@ -84,6 +87,16 @@ type config struct {
 // goroutine on it for ever.
 const defaultStatementTimeout = 30 * time.Second
 
+// binaryName is the default application_name: the running executable's base
+// name. Under `go run` that is still the command's name, because the temp
+// binary it builds keeps it.
+func binaryName() string {
+	if len(os.Args) == 0 {
+		return ""
+	}
+	return filepath.Base(os.Args[0])
+}
+
 func defaults() config {
 	return config{
 		maxConns:         10,
@@ -92,6 +105,7 @@ func defaults() config {
 		maxConnIdleTime:  30 * time.Minute,
 		connectTimeout:   5 * time.Second,
 		statementTimeout: defaultStatementTimeout,
+		appName:          binaryName(),
 		cacheMode:        StatementCachePrepare,
 		healthTimeout:    2 * time.Second,
 	}
@@ -227,6 +241,22 @@ func ConnectTimeout(d time.Duration) Option {
 // re-run the transaction.
 func StatementTimeout(d time.Duration) Option {
 	return Option{apply: func(c *config) { c.statementTimeout = d }}
+}
+
+// ApplicationName is what this service calls itself to Postgres. It defaults
+// to the name of the running binary.
+//
+// It is not decoration. An operator looking at pg_stat_activity or pg_locks
+// on a shared database sees one row per connection, and without this every
+// row is anonymous: which service holds the outbox's advisory lock, which one
+// is running the query that will not finish, which one to restart. A
+// multi-replica outbox has exactly one leader by design, and finding it
+// started with a blank column.
+//
+// A DSN that already sets application_name WINS — an explicit choice in the
+// connection string is not overridden by a default derived from argv.
+func ApplicationName(name string) Option {
+	return Option{apply: func(c *config) { c.appName = name }}
 }
 
 // StatementCacheMode selects how prepared statements are cached. Use
@@ -387,6 +417,16 @@ func newPool(cfg config, lc lifecycle.Lifecycle, reg health.Registry) (*pool, er
 		}
 		pgxCfg.ConnConfig.RuntimeParams["statement_timeout"] =
 			strconv.FormatInt(cfg.statementTimeout.Milliseconds(), 10)
+	}
+	// application_name, so a connection identifies its service in
+	// pg_stat_activity and pg_locks. Never overwrites one the DSN set.
+	if _, set := pgxCfg.ConnConfig.RuntimeParams["application_name"]; !set {
+		if name := cfg.appName; name != "" {
+			if pgxCfg.ConnConfig.RuntimeParams == nil {
+				pgxCfg.ConnConfig.RuntimeParams = map[string]string{}
+			}
+			pgxCfg.ConnConfig.RuntimeParams["application_name"] = name
+		}
 	}
 	if cfg.cacheMode == StatementCacheDescribe {
 		pgxCfg.ConnConfig.DefaultQueryExecMode = pgx.QueryExecModeDescribeExec
