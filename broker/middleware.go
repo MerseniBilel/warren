@@ -470,21 +470,6 @@ func DeadLetter(pub Publisher, originTopic, dlqTopic string) Middleware {
 			dead.Headers["warren-error-code"] = string(codeOf(err))
 			dead.Headers["warren-error"] = err.Error()
 			dead.Headers["warren-attempts"] = strconv.Itoa(attemptsOf(err))
-			// warren.md §2.6: the DLQ "stops the message, keeps it for
-			// inspection, and fires the DLQ alert. Which is correct, because
-			// this should wake someone up." Nothing woke up — with the
-			// scaffold's memory broker and nobody subscribed to <topic>.dlq,
-			// a poison message vanished leaving no trace in logs or storage.
-			// This line IS the alert: it is the one consumer event that
-			// should page a human.
-			log.FromContext(ctx).ErrorContext(ctx, "message dead-lettered",
-				"message_id", msg.ID,
-				"type", msg.Type,
-				"origin_topic", originTopic,
-				"dlq_topic", dlqTopic,
-				"attempts", attemptsOf(err),
-				"code", string(codeOf(err)),
-				"error", err.Error())
 			if perr := pub.Publish(ctx, dlqTopic, dead); perr != nil {
 				// Worse than a dead-letter: the message is now neither handled
 				// nor preserved, and the nack sends it round again.
@@ -494,6 +479,30 @@ func DeadLetter(pub Publisher, originTopic, dlqTopic string) Middleware {
 					"error", perr.Error())
 				return errors.Unavailable("dead-letter publish to "+dlqTopic, perr)
 			}
+			// warren.md §2.6: the DLQ "stops the message, keeps it for
+			// inspection, and fires the DLQ alert. Which is correct, because
+			// this should wake someone up." Nothing woke up — with the
+			// scaffold's memory broker and nobody subscribed to <topic>.dlq,
+			// a poison message vanished leaving no trace in logs or storage.
+			// This line IS the alert: it is the one consumer event that
+			// should page a human.
+			//
+			// AFTER the publish, not before. Emitted first, it announced a
+			// preservation that had not happened and might not: a missing
+			// <topic>.dlq — the ordinary state of a production cluster where
+			// someone provisioned the topics their handlers consume and knew
+			// nothing of the shadow set — made it fire on every redelivery
+			// of a message that was never preserved at all. An alert rule
+			// keyed on this line would have reported the poison message as
+			// safely parked while the consumer looped on it for ever.
+			log.FromContext(ctx).ErrorContext(ctx, "message dead-lettered",
+				"message_id", msg.ID,
+				"type", msg.Type,
+				"origin_topic", originTopic,
+				"dlq_topic", dlqTopic,
+				"attempts", attemptsOf(err),
+				"code", string(codeOf(err)),
+				"error", err.Error())
 			return nil
 		}
 	}

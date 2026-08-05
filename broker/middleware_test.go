@@ -1,8 +1,10 @@
 package broker_test
 
 import (
+	"bytes"
 	"context"
 	stderrors "errors"
+	"log/slog"
 	"runtime"
 	"slices"
 	"strconv"
@@ -16,6 +18,7 @@ import (
 	"github.com/MerseniBilel/warren/broker"
 	werrors "github.com/MerseniBilel/warren/errors"
 	"github.com/MerseniBilel/warren/inbox"
+	"github.com/MerseniBilel/warren/log"
 )
 
 // capturePublisher records DLQ publishes; fail makes every publish fail.
@@ -967,5 +970,60 @@ func TestAGuardedConsumerDeadLettersEveryMessage(t *testing.T) {
 	}
 	if n := dlq.count("doc.created.dlq"); n != 1 {
 		t.Errorf("dead-lettered %d messages, want 1 — §7.2 promises the message is preserved", n)
+	}
+}
+
+// TestTheDeadLetterAlertFollowsThePublish pins WHEN the alert fires.
+//
+// "message dead-lettered" is the one consumer event meant to page a human,
+// and it used to be logged BEFORE the publish that preserves the message. So
+// on the ordinary production failure — a missing <topic>.dlq, because
+// somebody provisioned the topics their handlers consume and knew nothing of
+// the shadow set — it announced a preservation that never happened, on every
+// redelivery of a message the consumer was looping on for ever.
+func TestTheDeadLetterAlertFollowsThePublish(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, nil))
+	ctx := log.WithLogger(context.Background(), logger)
+
+	pub := &capturePublisher{failed: werrors.Unavailable("kafka", stderrors.New("no such topic"))}
+	h := broker.DeadLetter(pub, "orders", "orders.dlq")(
+		func(context.Context, broker.Message) error {
+			return werrors.Invalid("payload", nil) // terminal
+		})
+
+	err := h(ctx, broker.Message{ID: "m-1", Type: "t"})
+	if err == nil {
+		t.Fatal("a failed dead-letter publish must nack, not ack")
+	}
+	if code := werrors.CodeOf(err); code != werrors.CodeUnavailable {
+		t.Errorf("code = %v, want UNAVAILABLE so the broker redelivers", code)
+	}
+
+	out := buf.String()
+	if !strings.Contains(out, "dead-letter publish failed") {
+		t.Errorf("the failure was not reported:\n%s", out)
+	}
+	if strings.Contains(out, "message dead-lettered") {
+		t.Errorf("the alert claims the message was dead-lettered, but the publish failed:\n%s", out)
+	}
+
+	// And on the happy path it must still fire — an alert that never
+	// arrives is the defect this line exists to prevent.
+	var ok bytes.Buffer
+	okCtx := log.WithLogger(context.Background(), slog.New(slog.NewTextHandler(&ok, nil)))
+	good := &capturePublisher{}
+	h2 := broker.DeadLetter(good, "orders", "orders.dlq")(
+		func(context.Context, broker.Message) error { return werrors.Invalid("payload", nil) })
+	if err := h2(okCtx, broker.Message{ID: "m-2", Type: "t"}); err != nil {
+		t.Fatalf("a successful dead-letter must ack: %v", err)
+	}
+	if !strings.Contains(ok.String(), "message dead-lettered") {
+		t.Errorf("the alert never fired on a successful dead-letter:\n%s", ok.String())
+	}
+	if len(good.dlq("orders.dlq")) != 1 {
+		t.Errorf("the envelope did not reach the dead-letter topic")
 	}
 }

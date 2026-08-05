@@ -1651,6 +1651,20 @@ func Raw(func(context.Context, *kgo.Client) error) Option
 func RawSASL(sasl.Mechanism) Option
 ```
 
+**Every subscribed topic needs a `<topic>.dlq` beside it.** The dead-letter
+topic is derived, not declared, so a cluster with auto-creation off — the
+production default — has a shadow set of topics nobody provisioned. A
+terminal message then cannot be preserved: the publish fails, the chain nacks
+so the message is not lost, and the consumer redelivers it for ever. That is
+loud rather than silent (the failure names the missing topic), but it is
+still a stalled consumer, and the fix is to provision the dead-letter topics
+with the rest.
+
+The `message dead-lettered` alert fires only AFTER the envelope is safely on
+that topic. Before 2026-08-05 it was logged first, so the one consumer event
+meant to page a human announced a preservation that had not happened and, on
+a missing dead-letter topic, never would.
+
 **A message without a key is left unkeyed on the wire**, and that is a
 distinction Go makes easy to lose: `[]byte("")` is not nil. franz-go hashes
 records with non-nil keys and distributes the rest, so handing it a
