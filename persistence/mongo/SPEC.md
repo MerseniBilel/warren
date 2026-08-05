@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | **DEFERRED to v0.2 — as a DESIGN ROUND, not a build (decided 2026-08-02)** — see **Why it is deferred** below. Nothing in shipped code depends on it. |
+| **Status** | **DEFERRED to v0.2. The DESIGN ROUND IS CLOSED (2026-08-05).** Its finding — the only reason to defer rather than decide — is that **the `persistence` port needs no change and a Mongo driver is additive**. The ruling lives in warren.md §6.2–6.4 and §9. Whether Warren ships a FIRST-PARTY module is a product decision for the human; the port question is settled either way, and nothing here gates the v0.1 tag. |
 | **Source** | [warren.md §6.2–6.4](../../warren.md) |
 | **Module** | own module (`warren/persistence/mongo`) |
 | **Mode** | undecided — **no §9 ledger row** |

@@ -209,7 +209,7 @@ warren/openapi/                         MODULE  —                       rank 1
 warren/auth/                            MODULE  golang-jwt + go-oidc    verification only; app.Identity ships in v0.1
 warren/transport/grpc/                  MODULE  google.golang.org/grpc  needs `warren g proto`
 warren/jobs/                            MODULE  robfig/cron             amends the boot/shutdown orders
-warren/persistence/mongo/               MODULE  mongo-driver            design round on the UnitOfWork port
+warren/persistence/mongo/               MODULE  mongo-driver            design round CLOSED: port needs no change
 warren/persistence/redis/               MODULE  redis/go-redis          entangled with jobs' elector
 warren/broker/rabbitmq/                 MODULE  rabbitmq/amqp091-go     memory already proves the swap
 warren/broker/nats/                     MODULE  nats-io/nats.go         §5.3 is seven words
@@ -1924,7 +1924,48 @@ after the write, and the version-checked SQL of §3.3's optimistic concurrency.
 
 ### 6.2–6.4 `mysql` / `mongo` / `redis`
 
-Same `Repository` and `UnitOfWork` ports. Mongo's UoW uses sessions; Redis provides cache + distributed lock rather than repositories.
+Same `Repository` and `UnitOfWork` ports. Redis provides cache + distributed
+lock rather than repositories. All three are deferred to v0.2.
+
+**The Mongo DESIGN ROUND is CLOSED (2026-08-05), and its finding is the one
+that mattered: the `persistence` port needs no change, and a Mongo driver is
+additive.** That was the only reason to defer rather than decide.
+
+`mongo-driver/v2` carries its session on a plain `context.Context` —
+`NewSessionContext(ctx, sess) context.Context`, `SessionFromContext(ctx)`, and
+`WithTransaction(ctx, func(ctx context.Context) (any, error))`. **There is no
+`SessionContext` type in v2 at all**, so the feared leak of a driver type into
+user repositories cannot happen: that is the same context-carried propagation
+`persistence.Collect`/`Track` and `postgres.DB` already use. `MatchedCount ==
+0` is `rows affected == 0`, so `domain.VersionedRoot` and
+`RunVersionedContract` need nothing added. `mongo.ErrNoDocuments` is
+`pgx.ErrNoRows`. A nested `Do` must JOIN, because Mongo forbids nested
+transactions on a session — so the port's rule is the only implementable one.
+
+**Two rules bind any Mongo adapter, first- or third-party**, and the design
+round found both:
+
+1. **Fail the boot on a standalone topology.** A standalone `mongod` cannot
+   open a transaction, so `Do` cannot be atomic there. §1.3 says every
+   detectable error surfaces at boot, and §3.3 forbids a silent downgrade by
+   name — running non-transactionally would make `UnitOfWork.Do` a lie and the
+   outbox a fiction.
+2. **Do not use `Session.WithTransaction`'s retry loop.** It re-runs the
+   callback on a transient COMMIT failure — by which point `drain()` has run,
+   and `PullEvents` is destructive, so the retry writes an EMPTY outbox for a
+   committed change. Events lost silently, which is the precise failure the
+   pattern exists to prevent. Drive the transaction manually and map
+   `TransientTransactionError` to `errors.Unavailable`, so `app.Retrying`
+   composed OUTSIDE `app.Transactional` re-runs the whole thing — the path
+   §3.3 already specifies for Postgres `40001`. A write conflict on a
+   version-predicated write maps to `CONFLICT`, not `UNAVAILABLE`, or
+   `RunVersionedContract`'s concurrency subtest fails.
+
+`persistence.RunContract` and `RunVersionedContract` are EXPORTED, so a third
+party writes the adapter and is held to the same standard Warren holds itself
+to. **Whether Warren SHIPS a first-party Mongo module is a product decision
+for the human, not a consequence of this round** — the port question is
+settled either way.
 
 ---
 
@@ -2073,14 +2114,52 @@ framework that owns an implementation: it exports `circuitbreaker.Client()`
 with **no `Server()`**, and it works only because kratos owns the outbound
 client. Warren does not.
 
-### 7.4 `warren/jobs`
+### 7.4 `warren/jobs` — DROPPED (2026-08-05)
 
-**Wraps** `robfig/cron/v3`. Cron and background workers as lifecycle participants — they start after dependencies are ready and drain on shutdown, unlike loose goroutines.
+**There is no jobs module and there will not be one.** The claim §7.4 used to
+make — cron and background workers as "lifecycle participants, unlike loose
+goroutines" — is already true in v0.1, and true without this package.
+
+**A scheduler is an ordinary `lifecycle.Hook`, and the ordering needs no
+amendment.** Hooks start in registration order, which IS dependency order,
+because they are appended as their owning singletons are instantiated
+topologically — and they stop in the exact reverse. So a loop registered from
+a constructor that injects the pool starts after that pool and is joined
+before it closes, by construction. "A job holding a pool that is closing" is
+the bug this package existed to prevent, and `warren/lifecycle` prevents it.
+The outbox relay, every consumer subscription, the HTTP server and the
+Postgres pool all register exactly this way, and §1.3 step 6 was never amended
+for any of them. `TestABackgroundLoopNeedsNoOrderingAmendment` pins it.
+
+**Leader election ships and is already shared.** `outbox.Elector` is a core
+port — `Lead(ctx, fn) error`, precisely a scheduler's shape — and
+`postgres.WithAdvisoryLock()` provides AND exports an implementation into the
+container. Inject it and wrap the loop; that is `LeaderOnly()`, with no second
+mechanism.
+
+**A job is a trigger, not a handler type.** There is no `Job` type and no
+`Handler[struct{}, struct{}]` — a tick has neither request nor response. The
+tick invokes whatever `app.Handler[Req, Res]` you already have, so `Chain`,
+`Retrying`, `Timeout` and `Transactional` apply at their natural types instead
+of at two empty structs. `app.Stamp(name, tel)` names the span and the metric
+that a transport would otherwise have seeded — without it `Traced` and
+`Metered` stamp `""`, which is misreporting, not middleware.
 
 ```go
-jobs.Cron("0 2 * * *", cleanupHandler, jobs.LeaderOnly())
-jobs.Worker(reconcileHandler, jobs.Interval(30*time.Second))
+lc.Append(lifecycle.Hook{
+    Name:    "billing cleanup job",
+    OnStart: func(context.Context) error { go run(ctx); return nil },
+    OnStop:  func(c context.Context) error { cancel(); return join(c) },
+})
 ```
+
+**Scheduled is not queued.** Work triggered by a domain fact goes through the
+broker: raise the event, `outbox.Sink` writes it in the same transaction, the
+relay publishes it, a consumer handles it with retry, dedupe and dead-letter
+(§5). That ships, and it is a stronger answer than a job queue for anything a
+domain event already describes. A general-purpose queue — river, asynq — is an
+outbound dependency and lives in `infrastructure/`, where `warren lint arch`
+sends it, exactly as §7.3's breaker does.
 
 ### 7.5 `warren/testing`
 
@@ -2215,7 +2294,8 @@ All generators support `--dry-run` and `--force`.
 | Telemetry | OpenTelemetry Go | Wrap | **Audited 2026-08-02**: v1.44.0 (2026-05-27), Apache-2.0, 6 500 stars, pushed 2026-08-02, not archived. **24 third-party modules in the build graph**, including grpc, protobuf and genproto — an order of magnitude above anything else here (core 1, transport/http 0, postgres 6), which is why it is opt-in in its own module and `scripts/invariants.sh` refuses `go.opentelemetry.io` in any other go.mod. OTLP over gRPC only: the HTTP exporter reaches grpc through its own config package and is not lighter. Wiring only — no OTel type in any Warren signature |
 | Auth | `golang-jwt/jwt/v5`, `coreos/go-oidc` | Wrap | **v0.2, audits outstanding.** The identity type is NOT here: `app.Identity` ships in v0.1 core, stdlib only, zero third-party (§3.2) |
 | Resilience | **none — module DROPPED 2026-08-05** | Build | Retry and timeout are core-ring and ship in `app`/`broker`, stdlib only. The breaker and limiter guard OUTBOUND calls and live in the user's `infrastructure/` adapter. **Audited 2026-08-05, none adopted:** `sony/gobreaker/v2` v2.4.0 (2026-01-01), MIT, not archived, 3674★, zero runtime deps, generic, **two lines to use** — fewer than any wrapper. `golang.org/x/time/rate` v0.15.0 (2026-02-11), BSD-3, **no require block at all** — `http.Middleware`'s stdlib shape takes it unmodified. **`cenkalti/backoff/v4` REJECTED**: three majors stale (default branch is v7; v4.3.0 dates to 2024-01-02) *and* redundant — `broker.ExponentialBackoff` is 20 lines of core with full jitter and an overflow guard. **`failsafe-go` REJECTED** (v0.9.6, 2026-02-09): richest policy set and the only both-directions API, but one module requiring `google.golang.org/grpc` + `protobuf`, so those enter the graph whether or not you import them — disqualifying against §1.7. **`go-kratos/aegis` REJECTED** (v0.2.0, **2023-05-08**, 7 direct requires): kratos v3 dropped it too |
-| Cron | `robfig/cron/v3` | Wrap | lifecycle-aware |
+| Mongo | **none adopted** | — | The design round CLOSED 2026-08-05: the port needs no change and a driver is additive, certified by the exported `RunContract`/`RunVersionedContract`. **Audited 2026-08-05:** `go.mongodb.org/mongo-driver/v2` v2.8.0 (2026-07-10), **Apache-2.0** — the SSPL question is about the SERVER, not the driver — not archived, 8535★, pushed 2026-08-05, 19 open issues. Healthy, and not the reason to wait: v2's session rides on `context.Context`, so no driver type reaches a signature |
+| Cron / jobs | **none — module DROPPED 2026-08-05** | Build | A scheduler is an ordinary `lifecycle.Hook`; `outbox.Elector` + `postgres.WithAdvisoryLock()` already give leader-only, provided and exported. **`robfig/cron/v3` REJECTED**: MIT, 14165★, **not archived** — and that is the trap. Its last release `v3.0.1` is tagged at a commit dated **2020-01-04**, its last commit on master is **2021-01-06**, `/releases/latest` returns **404** (no release object exists at all), and its `go.mod` declares **`go 1.12`**. `pushed_at: 2024-07-08` is repo metadata, not code. That is §9's httprouter rejection, three years worse, under a framework targeting Go 1.27. **`go-co-op/gocron/v2` REJECTED** (v2.22.0, 2026-07-09, 7126★, MIT, genuinely healthy): it **requires `robfig/cron/v3 v3.0.1`** transitively, and ships its own scheduler lifecycle, `Elector` and `Locker` — a second lifecycle beside `warren/lifecycle`, which is the one line this ledger rejected `fx` on. **`river` (MPL-2.0) / `asynq` (MIT) not adopted**: queues, not schedulers, and outbound — the user's `infrastructure/` |
 | Testing | none — stdlib + core | Build | `testify` and `testcontainers-go` were both budgeted and neither adopted: assertions are `if got != want`, and Docker fixtures wait for `warren/testing/containers`, its own module. |
 | CLI | `cobra` | Vendor | build-time only |
 

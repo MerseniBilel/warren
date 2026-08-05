@@ -11,18 +11,21 @@
 > **`persistence/postgres`**, whose unit of work commits aggregate state and
 > the outbox rows for that aggregate's events in one transaction. What is
 > **not** in v0.1: `openapi`, `auth` (the JWT/OIDC **verifier** — the identity
-> type and the policies ship in `app`), `transport/grpc`, `jobs`,
+> type and the policies ship in `app`), `transport/grpc`,
 > `broker/rabbitmq`, `broker/nats`, and the Mongo/Redis/MySQL drivers — each
 > deferred to v0.2 **with the reason recorded in its own spec**, not left as
 > an open question. The short version: `openapi`'s architecture is now ruled
 > and its spec approved — it is a pure add-on over a route table frozen in
 > v0.1, so `go get` gets it in v0.2 with no migration —
-> `auth` needs two dependency audits that have not been run, `jobs` would
-> amend the boot and shutdown orders, and a third broker driver answers
-> nothing that `broker/memory` plus the shared contract suite does not.
-> `resilience` is not on that list at all any more: it was **dropped**, since
-> retry and timeout are core-ring and ship, while a breaker guards an
-> outbound call Warren does not make.
+> `auth` needs two dependency audits that have not been run, and a third
+> broker driver answers nothing that `broker/memory` plus the shared contract
+> suite does not.
+> Two planned modules are not on that list at all any more. `resilience` was
+> **dropped** — retry and timeout are core-ring and ship, while a breaker
+> guards an outbound call Warren does not make. `jobs` was **dropped** too: a
+> scheduler is an ordinary `lifecycle.Hook`, which starts after its
+> dependencies and is joined before them by construction, and `outbox.Elector`
+> already gives leader-only.
 > The repository is being rebuilt spec-first: every
 > package gets an approved `SPEC.md` before its first line of Go, retired once
 > the package is implemented and reviewed. [warren.md](warren.md) is the
@@ -206,7 +209,7 @@ contract now.
       type, AssertPublished, Golden *(implemented; stdlib + core only)*
 - [x] `app.Identity` — the identity seam, policies and the 401/403 split (v0.1)
 - [x] `app.Timeout` + the resilience ruling: module DROPPED, not deferred (v0.1)
-- [ ] `auth` (verifier), `jobs`, `openapi`
+- [ ] `auth` (verifier), `openapi`
 
 ### Phase 6 — the CLI *(the discovery engine: scaffolding real apps is how
 ### weaknesses get found)*

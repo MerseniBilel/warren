@@ -637,3 +637,97 @@ func TestNilProviderDiagnosticOffersOptional(t *testing.T) {
 		t.Errorf("the nil diagnostic never mentions the waiver for a deliberate nil:\n%s", err)
 	}
 }
+
+// --- the jobs ruling, 2026-08-05 -------------------------------------------
+
+// poolish stands in for anything a background loop depends on — a pool, a
+// repository, a broker client. It registers a lifecycle hook from its
+// constructor, exactly as postgres, kafka, http and the outbox relay all do.
+type poolish struct{}
+
+func newPoolish(lc lifecycle.Lifecycle, order *[]string, mu *sync.Mutex) *poolish {
+	lc.Append(lifecycle.Hook{
+		Name:    "pool",
+		OnStart: func(context.Context) error { record(mu, order, "pool.start"); return nil },
+		OnStop:  func(context.Context) error { record(mu, order, "pool.stop"); return nil },
+	})
+	return &poolish{}
+}
+
+// jobish is the background loop warren/jobs was going to own: it INJECTS the
+// pool, so its own hook is necessarily appended second.
+type jobish struct{}
+
+func newJobish(_ *poolish, lc lifecycle.Lifecycle, order *[]string, mu *sync.Mutex) *jobish {
+	lc.Append(lifecycle.Hook{
+		Name:    "job",
+		OnStart: func(context.Context) error { record(mu, order, "job.start"); return nil },
+		OnStop:  func(context.Context) error { record(mu, order, "job.stop"); return nil },
+	})
+	return &jobish{}
+}
+
+func record(mu *sync.Mutex, order *[]string, s string) {
+	mu.Lock()
+	*order = append(*order, s)
+	mu.Unlock()
+}
+
+// TestABackgroundLoopNeedsNoOrderingAmendment is the load-bearing test behind
+// dropping warren/jobs.
+//
+// That spec's entire deferral rested on "cannot be built without amending two
+// orderings AGENT.md forbids changing silently" — §1.3's boot step 6 and
+// §2.3's shutdown. The claim was STALE. lifecycle's own package doc says hooks
+// start in registration order, which IS dependency order because they are
+// appended as their owning singletons are instantiated topologically, and stop
+// in the exact reverse.
+//
+// So a scheduler that injects the pool it works against cannot start before
+// that pool and cannot stop after it — the bug §7.4 existed to prevent is
+// prevented by construction, with nobody deciding anything.
+//
+// This test turns that argument into a fact CI defends. It is what would fail
+// if someone later "tidied" registration order, and the drop is only
+// defensible while it passes.
+func TestABackgroundLoopNeedsNoOrderingAmendment(t *testing.T) {
+	t.Parallel()
+
+	var mu sync.Mutex
+	var order []string
+
+	infra := warren.NewModule("infra",
+		warren.Providers(func(lc lifecycle.Lifecycle) *poolish {
+			return newPoolish(lc, &order, &mu)
+		}),
+		warren.Exports[*poolish](),
+	)
+	jobs := warren.NewModule("jobs",
+		warren.Imports(infra),
+		warren.Providers(func(p *poolish, lc lifecycle.Lifecycle) *jobish {
+			return newJobish(p, lc, &order, &mu)
+		}),
+		warren.Eager[*jobish](),
+	)
+	// The JOB module is listed FIRST in New — the position that would break
+	// the ordering if hooks were appended in module order.
+	a := warren.New(jobs, infra)
+
+	if err := a.Start(context.Background()); err != nil {
+		t.Fatalf("boot: %v", err)
+	}
+	if err := a.Stop(context.Background()); err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+
+	mu.Lock()
+	got := strings.Join(order, " → ")
+	mu.Unlock()
+
+	const want = "pool.start → job.start → job.stop → pool.stop"
+	if got != want {
+		t.Errorf("lifecycle order = %s\nwant                 %s\n\n"+
+			"A background loop must start AFTER what it depends on and be stopped BEFORE it. "+
+			"If this changed, warren/jobs's ordering premise is live again and §7.4 needs revisiting.", got, want)
+	}
+}

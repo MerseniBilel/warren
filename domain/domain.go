@@ -108,7 +108,7 @@ type Event interface {
 // though no import crosses — and it is unimplementable for Mongo and Redis.
 // Pushing a predicate down to a query is the driver's business: a repository
 // type-asserts for its own translator interface (postgres.SQLSpecification,
-// mongo.FilterSpecification) and falls back to in-memory evaluation.
+// a driver's own filter translator) and falls back to in-memory evaluation.
 type Specification[T any] interface {
 	// IsSatisfiedBy reports whether the candidate matches the specification.
 	IsSatisfiedBy(T) bool
