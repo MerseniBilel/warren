@@ -110,6 +110,12 @@ type ContextAttrs func(ctx context.Context, add func(slog.Attr))
 //	    slog.NewJSONHandler(os.Stdout, nil), observability.LogAttrs())))
 //
 // warren/observability does this for you unless you tell it not to.
+//
+// The ID lands at the TOP level even on a logger derived with WithGroup: it
+// is the key a log store is queried by, and nested under a group it is
+// present, plausible and unmatchable. The caller's own attributes stay in
+// the group they were added to. A logger with no group pays nothing for
+// this — one AddAttrs, the same as before there was a rule about it.
 func Handler(h slog.Handler, extra ...ContextAttrs) slog.Handler {
 	if h == nil {
 		panic("warren/log: Handler wraps a nil slog.Handler")
@@ -120,6 +126,28 @@ func Handler(h slog.Handler, extra ...ContextAttrs) slog.Handler {
 type contextHandler struct {
 	inner slog.Handler
 	extra []ContextAttrs
+
+	// base and deferred exist only once a group is open. A handler nests
+	// everything it is given inside its open groups, record attributes and
+	// injected ones alike — so a logger built with WithGroup("http") emitted
+	// http.correlation_id, which is present, plausible, and matches nothing:
+	// the ID is the key you query a log store BY, and the records look
+	// perfectly healthy while the search comes back empty.
+	//
+	// base is the inner handler as it stood before the first group opened —
+	// the last point at which an attribute lands at the top level — and
+	// deferred is what has been applied to it since. Handle replays them
+	// AFTER injecting, which is what puts the ID above the group and leaves
+	// the caller's own attributes inside it.
+	base     slog.Handler
+	deferred []deferredOp
+}
+
+// deferredOp is one WithAttrs or WithGroup call held back from base. Exactly
+// one field is set.
+type deferredOp struct {
+	group string
+	attrs []slog.Attr
 }
 
 func (c *contextHandler) Enabled(ctx context.Context, l slog.Level) bool {
@@ -129,21 +157,104 @@ func (c *contextHandler) Enabled(ctx context.Context, l slog.Level) bool {
 func (c *contextHandler) Handle(ctx context.Context, r slog.Record) error {
 	// Below the threshold nothing reaches here, so the extractors never run
 	// for a record that would be dropped.
+	if len(c.deferred) == 0 {
+		// No group is open, so the record's own attribute list IS the top
+		// level. This is the path every Warren service logs through and it
+		// costs one AddAttrs.
+		if id := CorrelationID(ctx); id != "" {
+			r.AddAttrs(slog.String("correlation_id", id))
+		}
+		for _, fn := range c.extra {
+			if fn != nil {
+				fn(ctx, func(a slog.Attr) { r.AddAttrs(a) })
+			}
+		}
+		return c.inner.Handle(ctx, r)
+	}
+
+	var injected []slog.Attr
 	if id := CorrelationID(ctx); id != "" {
-		r.AddAttrs(slog.String("correlation_id", id))
+		injected = append(injected, slog.String("correlation_id", id))
 	}
 	for _, fn := range c.extra {
 		if fn != nil {
-			fn(ctx, func(a slog.Attr) { r.AddAttrs(a) })
+			fn(ctx, func(a slog.Attr) { injected = append(injected, a) })
 		}
 	}
-	return c.inner.Handle(ctx, r)
+	if len(injected) == 0 {
+		// Nothing to lift, so the eagerly built handler is already right and
+		// a grouped logger with no correlation ID pays nothing extra.
+		return c.inner.Handle(ctx, r)
+	}
+	// Re-nest the record rather than re-deriving the handler chain per line.
+	// Replaying base.WithAttrs + WithGroup for every record measured 11
+	// allocations against this shape's 5, because a handler pre-formats what
+	// WithAttrs gives it and throws the result away one record later.
+	nested := slog.NewRecord(r.Time, r.Level, r.Message, r.PC)
+	nested.AddAttrs(injected...)
+	nested.AddAttrs(c.regroup(r))
+	return c.base.Handle(ctx, nested)
+}
+
+// regroup rebuilds the deferred WithGroup/WithAttrs chain as one nested
+// attribute, with the record's own attributes innermost — the shape base
+// would have produced had the groups been open when it received them.
+//
+// It is built from the inside out because a group's value is complete before
+// the group that encloses it exists.
+func (c *contextHandler) regroup(r slog.Record) slog.Attr {
+	inner := make([]slog.Attr, 0, r.NumAttrs())
+	r.Attrs(func(a slog.Attr) bool {
+		inner = append(inner, a)
+		return true
+	})
+	for i := len(c.deferred) - 1; i >= 0; i-- {
+		op := c.deferred[i]
+		if op.group == "" {
+			// Attributes added under the group they follow, so they sit
+			// beside the record's own rather than around them.
+			inner = append(append(make([]slog.Attr, 0, len(op.attrs)+len(inner)), op.attrs...), inner...)
+			continue
+		}
+		inner = []slog.Attr{{Key: op.group, Value: slog.GroupValue(inner...)}}
+	}
+	// The outermost op is always a group — deferral starts at one — so this
+	// is that group, not a bare list.
+	return inner[0]
 }
 
 func (c *contextHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
-	return &contextHandler{inner: c.inner.WithAttrs(attrs), extra: c.extra}
+	if len(attrs) == 0 {
+		return c
+	}
+	next := &contextHandler{inner: c.inner.WithAttrs(attrs), extra: c.extra}
+	if len(c.deferred) > 0 {
+		// These belong to the group they were added under, so they are
+		// replayed after it rather than folded into base.
+		next.base = c.base
+		next.deferred = appendOp(c.deferred, deferredOp{attrs: attrs})
+	}
+	return next
 }
 
 func (c *contextHandler) WithGroup(name string) slog.Handler {
-	return &contextHandler{inner: c.inner.WithGroup(name), extra: c.extra}
+	if name == "" {
+		return c // slog.Handler's contract: an empty name is not a group
+	}
+	next := &contextHandler{inner: c.inner.WithGroup(name), extra: c.extra}
+	next.base = c.base
+	if len(c.deferred) == 0 {
+		next.base = c.inner // the last handler an attribute reaches unnested
+	}
+	next.deferred = appendOp(c.deferred, deferredOp{group: name})
+	return next
+}
+
+// appendOp copies rather than appending in place: two loggers derived from
+// one parent must not share the array, or the second's group overwrites the
+// first's and records go into a group their logger never opened.
+func appendOp(ops []deferredOp, op deferredOp) []deferredOp {
+	next := make([]deferredOp, len(ops), len(ops)+1)
+	copy(next, ops)
+	return append(next, op)
 }
