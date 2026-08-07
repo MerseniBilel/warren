@@ -209,6 +209,12 @@ func TLSFiles(certFile, keyFile string) Option {
 // H2C accepts unencrypted HTTP/2 alongside HTTP/1.1, through
 // http.Protocols.SetUnencryptedHTTP2. Service meshes speak it, and since Go
 // 1.24 it needs no golang.org/x/net.
+//
+// It costs about a second at shutdown, measured: an idle HTTP/2 connection
+// is closed by GOAWAY and a ping Go waits out, where HTTP/1.1 closes in
+// microseconds. That is well inside ShutdownTimeout's 15s default and worth
+// knowing before you lower it — a budget under a second turns every drain
+// on a meshed service into a timeout error.
 func H2C() Option {
 	return Option{apply: func(c *config) { c.h2c = true }}
 }
