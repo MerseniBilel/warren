@@ -214,6 +214,12 @@ func (c *client) Publish(ctx context.Context, topic string, msgs ...broker.Messa
 	if c.kc == nil {
 		return errors.Unavailable("kafka", errNotStarted())
 	}
+	// A publisher adapter's first act: what makes a span survive into the
+	// consumer, and the other half of the chain's TraceExtract stage. Before
+	// the timeout context, so the headers describe the caller's span rather
+	// than this function's derived one.
+	broker.InjectTrace(ctx, msgs)
+
 	ctx, cancel := context.WithTimeout(ctx, c.cfg.produceTimeout)
 	defer cancel()
 

@@ -91,6 +91,11 @@ type subscription struct {
 // publishers (§1.3 step 6) — and a test that publishes before its
 // subscription is delivering will see nothing.
 func (b *Broker) Publish(ctx context.Context, topic string, msgs ...broker.Message) error {
+	// A publisher adapter's first act: what makes a span survive into the
+	// consumer, and the other half of the chain's TraceExtract stage. It is
+	// a nil check when no telemetry is bound.
+	broker.InjectTrace(ctx, msgs)
+
 	b.mu.RLock()
 	subs := append([]*subscription(nil), b.topics[topic]...)
 	b.mu.RUnlock()

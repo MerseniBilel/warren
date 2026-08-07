@@ -172,6 +172,21 @@ func Sink(store Store, enc Encoder) func(context.Context, []domain.Event) error 
 			}
 			recs = append(recs, rec)
 		}
+		// The trace goes on HERE, at Append, for the reason the correlation
+		// ID does: the relay publishes minutes later from a context whose
+		// span — if it has one at all — is the drain's, not the request's.
+		// Guarded, so an uninstrumented service pays one nil check per
+		// commit rather than a slice per commit.
+		if app.TelemetryFromContext(ctx) != nil {
+			msgs := make([]broker.Message, len(recs))
+			for i := range recs {
+				msgs[i] = recs[i].Message
+			}
+			broker.InjectTrace(ctx, msgs)
+			for i := range recs {
+				recs[i].Message = msgs[i]
+			}
+		}
 		return store.Append(ctx, recs...)
 	}
 }

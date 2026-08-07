@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MerseniBilel/warren/app"
 	"github.com/MerseniBilel/warren/broker"
 	"github.com/MerseniBilel/warren/domain"
 	werrors "github.com/MerseniBilel/warren/errors"
@@ -554,6 +555,66 @@ func TestSinkStampsTheCorrelationID(t *testing.T) {
 	if got := recs[0].Message.Headers[broker.CorrelationHeader]; got != "corr-1" {
 		t.Errorf("header %q = %q, want %q — the relay publishes long after the request is gone", broker.CorrelationHeader, got, "corr-1")
 	}
+}
+
+// TestSinkStampsTheTraceContext — the same argument as the correlation ID,
+// and it was missing for the whole of the trace. broker.InjectTrace had no
+// caller anywhere: not this Sink, not a publisher adapter, though its own doc
+// named both. So every consumer span opened a NEW ROOT TRACE and the question
+// tracing is bought to answer — what did this request cause — had no answer,
+// with nothing anywhere reporting a problem.
+func TestSinkStampsTheTraceContext(t *testing.T) {
+	t.Parallel()
+
+	store := outbox.NewMemoryStore()
+	sink := outbox.Sink(store, outbox.JSONEncoder())
+	tel := &injectingTelemetry{header: "00-place-order"}
+	ctx := app.WithTelemetry(context.Background(), tel)
+
+	if err := sink(ctx, []domain.Event{placed{Order: "o-1", Total: 100, At: time.Unix(1, 0)}}); err != nil {
+		t.Fatalf("Sink: %v", err)
+	}
+	recs, _ := store.Pending(context.Background(), 10)
+	if len(recs) != 1 {
+		t.Fatalf("appended %d records, want 1", len(recs))
+	}
+	// At APPEND, not at publish: the relay drains minutes later, and a span
+	// parented to the drain leads back to a timer.
+	if got := recs[0].Message.Headers["traceparent"]; got != "00-place-order" {
+		t.Errorf("traceparent = %q, want the request's span", got)
+	}
+}
+
+// TestSinkWithoutTelemetryStampsNothing — an uninstrumented service pays one
+// nil check per commit, not a header map per event.
+func TestSinkWithoutTelemetryStampsNothing(t *testing.T) {
+	t.Parallel()
+
+	store := outbox.NewMemoryStore()
+	sink := outbox.Sink(store, outbox.JSONEncoder())
+
+	if err := sink(context.Background(), []domain.Event{placed{Order: "o-1", Total: 100, At: time.Unix(1, 0)}}); err != nil {
+		t.Fatalf("Sink: %v", err)
+	}
+	recs, _ := store.Pending(context.Background(), 10)
+	if recs[0].Message.Headers != nil {
+		t.Errorf("headers = %v, want none", recs[0].Message.Headers)
+	}
+}
+
+// injectingTelemetry is app.Telemetry reduced to the one method this is
+// about.
+type injectingTelemetry struct{ header string }
+
+func (i *injectingTelemetry) Span(ctx context.Context, _ string) (context.Context, func(error)) {
+	return ctx, func(error) {}
+}
+func (i *injectingTelemetry) Record(string, time.Duration, error) {}
+func (i *injectingTelemetry) Inject(_ context.Context, set func(key, value string)) {
+	set("traceparent", i.header)
+}
+func (i *injectingTelemetry) Extract(ctx context.Context, _ func(string) string) context.Context {
+	return ctx
 }
 
 // TestSinkWithoutACorrelationIDStampsNothing — events raised by a consumer or

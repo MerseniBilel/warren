@@ -618,6 +618,11 @@ func attemptsOf(err error) int {
 // relay runs long after the request's span ended, and a span parented to the
 // relay's own context is a trace nobody can follow back to the request that
 // caused it.
+// It never OVERWRITES a header that is already there, for the same reason
+// Correlating does not: the outbox stamps at Append, inside the request, and
+// the relay publishes from a context whose span is its OWN. An overwriting
+// injector would reparent every event to the drain that happened to carry
+// it, which is a trace that leads back to a timer.
 func InjectTrace(ctx context.Context, msgs []Message) {
 	tel := app.TelemetryFromContext(ctx)
 	if tel == nil {
@@ -625,6 +630,9 @@ func InjectTrace(ctx context.Context, msgs []Message) {
 	}
 	for i := range msgs {
 		tel.Inject(ctx, func(k, v string) {
+			if _, ok := msgs[i].Headers[k]; ok {
+				return
+			}
 			if msgs[i].Headers == nil {
 				msgs[i].Headers = map[string]string{}
 			}
