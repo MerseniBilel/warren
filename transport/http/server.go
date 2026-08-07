@@ -2,6 +2,7 @@ package http
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	stdlog "log"
@@ -197,6 +198,17 @@ func (s *server) start(context.Context) error {
 			return errCannotListen(s.cfg.addr, err)
 		}
 	}
+	// TLS is checked HERE, before the listener is announced, because
+	// ServeTLS runs in the goroutine below: a mistyped certificate path let
+	// start return nil, logged "http server listening tls=true", and the
+	// error waited for OnStop. Measured, the process then stays up with the
+	// listener open and NOTHING accepting — a TCP connect succeeds and every
+	// request hangs until the client's own timeout, on a service whose log
+	// says it is serving.
+	if err := s.checkTLS(); err != nil {
+		return err
+	}
+
 	s.ln = ln
 	// One line on start, and the address it actually bound — which is the
 	// only way to learn it when the port is 0 or a Listener was supplied.
@@ -332,6 +344,68 @@ func errCannotListen(addr string, cause error) error {
 	}
 	return diagnostic(fmt.Sprintf(
 		"✗ cannot listen on %s\n\n    %v\n\n%s", addr, cause, hint))
+}
+
+// checkTLS reports whether this server can actually serve TLS, by doing at
+// boot the work ServeTLS would otherwise do — and discard — inside its
+// goroutine. It reads the files rather than stat-ing them: an unreadable
+// PEM, a key that does not match its certificate and a missing file all end
+// the same way, and only one of the three is visible from a directory
+// listing.
+func (s *server) checkTLS() error {
+	cert, key := s.cfg.certFile, s.cfg.keyFile
+	if cert == "" && key == "" {
+		if s.cfg.tls == nil {
+			return nil
+		}
+		// TLS(cfg) with nothing to present fails identically, and this is
+		// the door an mTLS mesh comes through.
+		c := s.cfg.tls
+		if len(c.Certificates) == 0 && c.GetCertificate == nil && c.GetConfigForClient == nil {
+			return errTLSWithoutCertificate()
+		}
+		return nil
+	}
+	if cert == "" || key == "" {
+		return errHalfATLSPair(cert, key)
+	}
+	if _, err := tls.LoadX509KeyPair(cert, key); err != nil {
+		return errCannotLoadCertificate(cert, key, err)
+	}
+	return nil
+}
+
+func errCannotLoadCertificate(cert, key string, cause error) error {
+	return diagnostic(fmt.Sprintf(
+		"✗ cannot load the TLS certificate\n\n"+
+			"    certificate: %s\n    key:         %s\n\n    %v\n\n"+
+			"  The server would have bound its port, logged that it was\n"+
+			"  listening, and then accepted nothing — so this fails the boot\n"+
+			"  instead, where the path is still in front of you.",
+		cert, key, cause))
+}
+
+func errHalfATLSPair(cert, key string) error {
+	missing, given, value := "key", "certificate", cert
+	if cert == "" {
+		missing, given, value = "certificate", "key", key
+	}
+	return diagnostic(fmt.Sprintf(
+		"✗ TLS was given a %s and no %s\n\n    %s: %s\n\n"+
+			"  http.TLSFiles takes both:\n\n"+
+			"      http.TLSFiles(certFile, keyFile)\n\n"+
+			"  An empty one is usually an environment variable that is set in\n"+
+			"  one deployment and not in this one.",
+		given, missing, given, value))
+}
+
+func errTLSWithoutCertificate() error {
+	return diagnostic(
+		"✗ TLS is configured with nothing to present\n\n" +
+			"    The *tls.Config passed to http.TLS has no Certificates, no\n" +
+			"    GetCertificate and no GetConfigForClient, so every handshake\n" +
+			"    would fail — the server binds its port and answers nobody.\n\n" +
+			"  Set one of the three, or use http.TLSFiles(certFile, keyFile).")
 }
 
 // portOf renders lsof's ":port" filter from a listen address.

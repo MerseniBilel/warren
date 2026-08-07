@@ -1424,8 +1424,8 @@ func MaxBodyBytes(int64) Option                              // 1 MiB — Invoke
 func DrainDelay(time.Duration) Option                        // 5s — step 9b
 func ShutdownTimeout(time.Duration) Option                   // 15s, inside lifecycle's 30s
 
-func TLS(*tls.Config) Option
-func TLSFiles(certFile, keyFile string) Option
+func TLS(*tls.Config) Option                                 // checked at boot, not at handshake
+func TLSFiles(certFile, keyFile string) Option               // both, or the boot fails naming them
 
 // for EDGE MIDDLEWARE that refuses before any route runs — an authenticator
 // rejecting a forged token renders the same envelope the framework does,
