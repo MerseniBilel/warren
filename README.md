@@ -72,9 +72,17 @@ CONTRACTS   app.Handler · broker.Publisher · Registrar · …     ports & shar
 KERNEL      warren · di · lifecycle · config · log · errors    stdlib + dig only
 ```
 
-One line of `main.go` swaps Kafka for RabbitMQ. One handler serves three
-protocols. Every error the framework can detect surfaces at boot — never on
-request 1.
+One handler serves three protocols. Every error the framework can detect
+surfaces at boot — never on request 1.
+
+Swapping a driver is **one line of `platform`**, not of `main.go`, and how
+many other lines depends on the driver's shape: a driver whose ports
+`platform` can re-export (the in-process broker) is invisible to every
+feature module, while one that must be its own module (`platform.Broker()`
+for Kafka, `platform.Postgres()`) is imported by each feature that consumes
+it — because a module may export only what its own providers return. This
+line used to claim `main.go` and one edit; a field test diffed two scaffolds
+and found N+1 files, none of them `main.go`.
 
 ---
 

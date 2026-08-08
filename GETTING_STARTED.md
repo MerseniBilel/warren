@@ -501,6 +501,7 @@ correct behaviour but worth knowing.
 | Bounding a slow dependency | `app.Timeout(3*time.Second)` — inside `Retrying` bounds each attempt, outside bounds the sequence |
 | File upload, download, SSE, WebSocket | `transport.Raw(r, transport.ProtocolHTTP, "POST /uploads", h)` from your controller — note the pattern carries the method here |
 | `pprof`, static assets, a webhook receiver | `whttp.Handle("GET /debug/pprof/", h)` — for handlers needing no module dependency |
+| **Refusing a misspelled field** | `whttp.Codec(transport.StrictJSON())`. The default codec IGNORES unknown members, so a client sending `reorderPoint` for `reorder_point` gets a 201 and a record with the field it asked for left at zero. That default is deliberate — one codec decodes HTTP *and* events, and an INVALID on a consumer dead-letters without retry, so a producer adding a field would DLQ 100% of a consumer's traffic — but on an HTTP-only service strict is usually what you want |
 | A test that boots the app | `warren/testing` — `NewModuleTest`, `Replace`, `Invoke` |
 | A fast test suite | `whttp.DrainDelay(0)` — the 5s default is correct in production and costs 5s per test |
 | Scaffolding the next feature | `warren new` and `warren g` — see the CLI's skills |
@@ -623,6 +624,22 @@ func (sameTenant) Authorize(ctx context.Context) error {
 empty one would answer `("", false)` for every name, which reads as "no such
 parameter" and lets a policy conclude it has nothing to check. The nil forces
 the choice to be written down.
+
+**Where this file goes matters.** It imports `warren/transport`, so
+`warren lint arch` will refuse it in `application/` or `domain/` — a handler
+imports no transport package, and that holds through a helper too. Put a
+policy that reads path parameters in the feature's own `controller.go`,
+which is unlayered and is exactly where a use case meets a protocol, or in a
+package of your own outside `internal/modules/` that only the controller
+imports. A field test put it beside its tenant reader in one `internal/auth`
+and had to split the package once the linter told it so.
+
+**A path parameter can contain a `/`.** Go's `ServeMux` unescapes `%2F`
+inside a segment, so `GET /tenants/evil/stock/acme%2fWIDGET` yields
+`sku = "acme/WIDGET"`. That is harmless when the tenant is a whole segment,
+as above — and it is a cross-tenant read the moment a policy composes two
+values into one key, because the caller controls where the separator falls.
+Compare parameters individually, never concatenated.
 
 **Identity does not cross the broker in v0.1.** A consumer's context carries
 the correlation ID but no caller, so an audit trail built from events must
