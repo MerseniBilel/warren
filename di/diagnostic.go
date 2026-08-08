@@ -112,7 +112,37 @@ func errMissing(target string, chain []string, declared, scope string, candidate
 			}
 		}
 	}
+	// Nothing provides it and nothing satisfies it, so there is no candidate
+	// to name — and until 2026-08-08 the block simply ended here, leaving the
+	// reader with a perfect requirement chain and no next step. A field test
+	// reported it as the showcased "Did you mean" having vanished, because
+	// nothing says the hints above are conditional.
+	//
+	// There are exactly two shapes the fix can take and the container cannot
+	// tell which, so it names both rather than guessing. Saying "one of these
+	// two lines" beats saying nothing.
+	if len(candidates) == 0 && len(implementers) == 0 {
+		fmt.Fprintf(&b, "\n  Nothing in the graph provides it, so one of two lines is missing:\n\n"+
+			"    • If %s belongs to this module, provide it:\n"+
+			"          warren.Providers(NewWhateverReturns%s)\n\n"+
+			"    • If another module owns it, import that module — and it must\n"+
+			"      export the type, or the import cannot see it:\n"+
+			"          warren.Imports(other.Module())   in %q\n"+
+			"          warren.Exports[%s]()   in the module that provides it\n\n"+
+			"  A constructor whose return type is the CONCRETE type does not\n"+
+			"  satisfy this either — the container resolves by the declared type.\n",
+			target, shortTypeName(target), scope, target)
+	}
 	return &diagnostic{text: strings.TrimRight(b.String(), "\n")}
+}
+
+// shortTypeName is the bare type name, for a suggested constructor that
+// reads like something a user would type.
+func shortTypeName(target string) string {
+	if i := strings.LastIndex(target, "."); i >= 0 {
+		return strings.TrimPrefix(target[i+1:], "*")
+	}
+	return strings.TrimPrefix(target, "*")
 }
 
 // shortName drops the package qualifier from a provider name, so the

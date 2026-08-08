@@ -779,3 +779,44 @@ func TestAnUnrelatedConcreteTypeIsNotSuggested(t *testing.T) {
 		t.Errorf("an unrelated type was offered as satisfying the port:\n%s", err)
 	}
 }
+
+// TestAnUnprovidedTypeStillGetsAClosingSuggestion — field test #10, defect 5.
+// When nothing in the graph provides the type AND nothing satisfies it, the
+// diagnostic simply stopped:
+//
+//	✗ cannot resolve dependency
+//	    domain.StockRepository
+//	      └─ required by app.Handler[…]
+//	  No provider found in scope "ordering" or its imports.
+//
+// The chain is excellent and the reader is then on their own. The two hint
+// blocks above this one only fire when there is a candidate to name, which
+// the docs never said — so the showcased "Did you mean" appeared to have
+// vanished. There are only two shapes the fix can take, and saying both is
+// better than saying nothing.
+func TestAnUnprovidedTypeStillGetsAClosingSuggestion(t *testing.T) {
+	t.Parallel()
+
+	root := di.New()
+	ordering := root.Scope("ordering")
+	// A handler that needs a port nothing provides and nothing satisfies.
+	if err := ordering.Provide(user.NewRegisterUserHandler); err != nil {
+		t.Fatalf("providing handler: %v", err)
+	}
+
+	err := root.Validate()
+	if err == nil {
+		t.Fatal("Validate() = nil though nothing provides the port")
+	}
+	got := err.Error()
+	for _, want := range []string{
+		"warren.Providers",  // the local fix
+		"warren.Imports",    // the other-module fix
+		"warren.Exports",    // and what the other module must have done
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("the diagnostic never names %s:\n%s", want, got)
+		}
+	}
+	assertNoDigLeak(t, err)
+}
