@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/MerseniBilel/warren/app"
+	"github.com/MerseniBilel/warren/errors"
 	"github.com/MerseniBilel/warren/health"
 	"github.com/MerseniBilel/warren/lifecycle"
 	"github.com/MerseniBilel/warren/transport"
@@ -300,5 +301,29 @@ func TestAllowAnyContentTypeReopensIt(t *testing.T) {
 	s.mux.ServeHTTP(rec, req)
 	if rec.Code != http.StatusCreated {
 		t.Errorf("AllowAnyContentType still refused text/plain: %d\n%s", rec.Code, rec.Body)
+	}
+}
+
+// TestEveryCodeMapsToAStatus — the structural trap the 2026-08-08 ruling
+// flagged. statusFor's default arm answers 500, which is correct policy for
+// a code it has never heard of and a silent trap for one that was just
+// added: ship a new code in warren/errors, forget this file, and it renders
+// 500 with no compile error, no test failure and no log. golangci runs no
+// exhaustive linter, so nothing else catches it.
+//
+// errors.Codes() exists to make "the set is closed" a thing CI checks
+// instead of a thing the manifest claims.
+func TestEveryCodeMapsToAStatus(t *testing.T) {
+	t.Parallel()
+
+	for _, code := range errors.Codes() {
+		got := statusFor(code)
+		if code != errors.CodeInternal && got == http.StatusInternalServerError {
+			t.Errorf("%s renders 500 — it fell through to statusFor's default arm, "+
+				"so this adapter has never heard of it", code)
+		}
+		if got < 200 || got > 599 {
+			t.Errorf("%s renders %d, which is not an HTTP status", code, got)
+		}
 	}
 }

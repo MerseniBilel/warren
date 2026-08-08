@@ -497,7 +497,7 @@ correct behaviour but worth knowing.
 | Reading the caller | `id, ok := app.IdentityFromContext(ctx)` — seeded by your own edge middleware with `app.WithIdentity`. The ok-bool is the point: `IdentityFromContext(ctx).Subject` does not compile |
 | Cross-cutting logic on every protocol | `app.Chain` / core middleware — wraps the handler, so it applies to HTTP, gRPC and consumers identically |
 | Retrying a lost connection | `app.Retrying(broker.ExponentialBackoff(3))` — retries `UNAVAILABLE` only |
-| **Contention on one aggregate** | `app.RetryingOn(p, errors.CodeConflict)`. A stale write is `CONFLICT`, which `Retrying` does NOT retry — so concurrent buyers of the same thing undersell. Your handler must RE-READ the aggregate each attempt; this re-invokes the handler, not the transaction. Note it retries only the codes you name, so pass `CodeUnavailable` too if you want both |
+| **Contention on one aggregate** | `app.Retrying(p)` — no code list. A stale write is `CONTENTION`, which `Retrying` covers along with `UNAVAILABLE`. Two rules, both load-bearing: your handler must **RE-READ** the aggregate on each attempt (this re-invokes the handler, not the transaction, so one closing over a stale aggregate contends for ever), and `Retrying` goes **OUTSIDE** `Transactional` (inside, every attempt re-runs in a transaction already doomed). `RetryingOn(p, errors.CodeConflict)` is a boot panic now: a business refusal is refused identically on every attempt, and retrying it cost a measured 6 transactions and 1.25s against 7ms |
 | Bounding a slow dependency | `app.Timeout(3*time.Second)` — inside `Retrying` bounds each attempt, outside bounds the sequence |
 | File upload, download, SSE, WebSocket | `transport.Raw(r, transport.ProtocolHTTP, "POST /uploads", h)` from your controller — note the pattern carries the method here |
 | `pprof`, static assets, a webhook receiver | `whttp.Handle("GET /debug/pprof/", h)` — for handlers needing no module dependency |
@@ -657,6 +657,7 @@ A consumer's error decides its own fate, by its `warren/errors` code —
 | Code | What happens |
 |---|---|
 | `NOT_FOUND`, `CONFLICT` | acked. The work is already done, or was never possible. |
+| `CONTENTION` | nacked and redelivered. The work was **not** done — a conditional write matched no row — so acking it would destroy a message whose effect never happened. This row is why a repository must return `errors.Contention` and not `errors.Conflict` for a lost version race. |
 | `UNAVAILABLE` | retried with backoff, then nacked so the broker redelivers — **or dead-lettered, if the broker cannot redeliver**. See below. |
 | everything else | retried, then **dead-lettered**. |
 

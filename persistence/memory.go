@@ -532,14 +532,20 @@ func errUnsupportedIsolation(level Level) error {
 // paying one invoice four times concurrently got four 201s and published four
 // events. The message names both versions because "conflict" alone leaves the
 // caller unable to tell a stale read from a vanished row.
+// The three cases are NOT one answer to the caller, and saying they were is
+// what the 2026-08-08 ruling corrected. Two of them are races that the next
+// attempt usually wins; the third is two requests minting one identity,
+// which is arithmetic and true for ever.
 func errStaleWrite(key string, expected, current int64) error {
 	if current < 0 {
-		return errors.Conflict("%s was loaded at version %d, but it no longer exists — it was deleted after this request read it", key, expected)
+		return errors.Contention("%s was loaded at version %d, but it no longer exists — it was deleted after this request read it", key, expected)
 	}
 	if expected == 0 {
+		// CONFLICT, not CONTENTION: a retry re-reads and finds the row still
+		// there, on this attempt and on every one after it.
 		return errors.Conflict("%s already exists at version %d, and this write expected to create it", key, current)
 	}
-	return errors.Conflict("%s was loaded at version %d and is now at version %d — another writer committed first, so this update was refused rather than silently overwriting theirs", key, expected, current)
+	return errors.Contention("%s was loaded at version %d and is now at version %d — another writer committed first, so this update was refused rather than silently overwriting theirs", key, expected, current)
 }
 
 // errReadOnlyWrite refuses a write in a transaction the caller declared

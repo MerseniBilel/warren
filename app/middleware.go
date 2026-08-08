@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	stderrors "errors"
+	"fmt"
 	"reflect"
 	"slices"
 	"time"
@@ -264,7 +265,9 @@ func Stamp(name string, t Telemetry) func(context.Context) context.Context {
 }
 
 // Retrying re-invokes the handler when the error's OUTERMOST code is
-// CodeUnavailable — the one retryable code. The outermost code decides,
+// CodeUnavailable or CodeContention — the two retryable codes. It is what
+// optimistic concurrency needs: a stale write is CONTENTION, and re-invoking
+// the handler re-reads the aggregate, which is the whole point. The outermost code decides,
 // exactly as an adapter's status mapping does, because wrapping is
 // recategorization: a handler that wraps an Unavailable inside Internal has
 // declared the failure non-retryable, and this middleware agrees. A plain
@@ -351,6 +354,11 @@ func RetryingOn[Req, Res any](policy RetryPolicy, codes ...errors.Code) Middlewa
 	if len(codes) == 0 {
 		panic("app: RetryingOn requires at least one code — with none it would retry nothing, which is app.Chain without it")
 	}
+	for _, c := range codes {
+		if slices.Contains(terminal, c) {
+			panic(errTerminalRetry(c))
+		}
+	}
 	return retrying[Req, Res](policy, func(err error) bool {
 		var e *errors.Error
 		if !stderrors.As(err, &e) {
@@ -367,9 +375,23 @@ func RetryingOn[Req, Res any](policy RetryPolicy, codes ...errors.Code) Middlewa
 func retryable(err error) bool {
 	var e *errors.Error
 	if stderrors.As(err, &e) {
-		return e.Code() == errors.CodeUnavailable
+		// The two codes whose definition is "the same request may succeed
+		// later unchanged". They retry for different reasons — Unavailable
+		// means make the same call again, Contention means start the
+		// read-modify-write sequence again — and this middleware does the
+		// second by construction, because it re-invokes the HANDLER.
+		return e.Code() == errors.CodeUnavailable || e.Code() == errors.CodeContention
 	}
 	return false
+}
+
+// terminal are the codes for which the same request can never succeed
+// unchanged, per warren.md §2.6. Retrying one is never correct: it spends
+// the whole backoff budget, and a transaction per attempt, to return the
+// answer it already had.
+var terminal = []errors.Code{
+	errors.CodeInvalid, errors.CodeNotFound, errors.CodeConflict,
+	errors.CodeUnauthenticated, errors.CodePermissionDenied,
 }
 
 // Authorized runs the policy before invoking the handler; a denial
@@ -474,4 +496,25 @@ func Metered[Req, Res any]() Middleware[Req, Res] {
 			return res, err
 		})
 	}
+}
+
+// errTerminalRetry refuses a retry that can never succeed.
+//
+// A field test measured the cost of the one this exists to prevent:
+// RetryingOn(p, CodeConflict) turned a guaranteed refusal — five units asked
+// for, three in stock — into six database transactions and 1.25s, against
+// 7ms for the same refusal returned once. Anyone who knew a SKU could burn a
+// worker per request. Composition time is the only place to catch it, because
+// at run time the two look identical.
+func errTerminalRetry(code errors.Code) string {
+	return fmt.Sprintf(
+		"app: RetryingOn was composed on %s, which can never succeed on a retry — "+
+			"a request refused by a business rule is refused identically on every "+
+			"attempt, so this would spend the whole backoff budget and a database "+
+			"transaction per attempt to return the same answer.\n\n"+
+			"  A stale write is not %s. It is CONTENTION, and app.Retrying already "+
+			"retries it:\n\n"+
+			"      app.Chain(h, app.Retrying(policy), app.Transactional(uow))\n\n"+
+			"  Retrying re-invokes the HANDLER, so your handler must re-read its "+
+			"aggregate on each attempt.", code, code)
 }

@@ -448,7 +448,7 @@ func DeadLetter(pub Publisher, originTopic, dlqTopic string) Middleware {
 			switch codeOf(err) {
 			case errors.CodeNotFound, errors.CodeConflict:
 				return nil
-			case errors.CodeUnavailable:
+			case errors.CodeUnavailable, errors.CodeContention:
 				// Nack, so the broker brings it back — §2.6's disposition,
 				// and the right one whenever the premise holds.
 				//
@@ -525,7 +525,12 @@ func Retry(policy app.RetryPolicy) Middleware {
 					return nil
 				}
 				code := codeOf(err)
-				if code != errors.CodeUnavailable && code != errors.CodeInternal {
+				// CONTENTION retries for a different reason from the other
+				// two: nothing was written, and the next attempt re-reads
+				// and usually wins. Not retrying it acked a message whose
+				// work was never done.
+				if code != errors.CodeUnavailable && code != errors.CodeInternal &&
+					code != errors.CodeContention {
 					return &attemptedError{err: err, attempts: attempt}
 				}
 				delay, retry := policy.Next(attempt)

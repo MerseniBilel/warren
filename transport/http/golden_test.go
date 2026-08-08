@@ -120,3 +120,4 @@ func TestBootDiagnosticsAreGolden(t *testing.T) {
 
 	assertGolden(t, "boot_diagnostics", b.String())
 }
+

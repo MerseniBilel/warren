@@ -670,7 +670,8 @@ type Code string
 const (
     CodeInvalid          Code = "INVALID"
     CodeNotFound         Code = "NOT_FOUND"
-    CodeConflict         Code = "CONFLICT"
+    CodeConflict         Code = "CONFLICT"     // terminal: a rule refused
+    CodeContention       Code = "CONTENTION"   // retryable: a race was lost, nothing written
     CodeUnauthenticated  Code = "UNAUTHENTICATED"
     CodePermissionDenied Code = "PERMISSION_DENIED"
     CodeUnavailable      Code = "UNAVAILABLE"   // retryable
@@ -707,12 +708,45 @@ stays the standard library (see §6.1).
 | `INVALID` | 400 | `InvalidArgument` | → DLQ (never retry) |
 | `NOT_FOUND` | 404 | `NotFound` | ack + log |
 | `CONFLICT` | 409 | `AlreadyExists` | ack (idempotent replay) |
+| `CONTENTION` | 409 | `Aborted` | nack + backoff retry (never DLQ while the broker redelivers) |
 | `UNAUTHENTICATED` | 401 | `Unauthenticated` | → DLQ (never retry) |
 | `PERMISSION_DENIED` | 403 | `PermissionDenied` | → DLQ (never retry) |
 | `UNAVAILABLE` | 503 | `Unavailable` | nack + backoff retry (see below) |
 | `INTERNAL` | 500 | `Internal` | nack + retry, then DLQ |
 
 This table is why domain code can return `errors.Conflict(...)` and never import `net/http`.
+
+**`CONFLICT` and `CONTENTION` are one status and two meanings, and the split
+is load-bearing.** The test is one sentence: *would the same request succeed
+if the caller sent it again ten seconds later with nothing else changed?*
+Yes is `CONTENTION` — a conditional write lost a race, nothing was written,
+and the next attempt re-reads and usually wins. No is `CONFLICT` — three
+units in stock and a request for five is refused identically on the tenth
+attempt.
+
+They were one code until 2026-08-08, and it cost both ways. `app.Retrying`
+did not retry a lost race, so concurrent buyers undersold; and the
+documented workaround, `RetryingOn(p, CodeConflict)`, turned a guaranteed
+refusal into **six database transactions and 1.25s against 7ms**, which
+anyone who knew a resource id could trigger per request. On the CONSUMER
+side it was worse and silent: `CONFLICT` acks, so a handler that lost a race
+had its message **destroyed with the work not done** — no retry, no DLQ, no
+log distinguishing it from success. That is why `CONTENTION`'s consumer
+column is a nack: `CONFLICT` acks because its justification is "already
+applied", and `CONTENTION` asserts the opposite.
+
+`app.Retrying` covers `UNAVAILABLE` and `CONTENTION` — the two codes whose
+definition is "the same request may succeed later unchanged" — so a handler
+author needs no code list. `app.RetryingOn` **panics at composition** on a
+terminal code, because at run time a retried refusal and a retried race look
+identical and only the composition site can tell them apart.
+
+**Compose `Retrying` OUTSIDE `Transactional`.** Inside, every attempt re-runs
+in a transaction already doomed to lose, so the loop spends its whole budget
+to return the same answer — the measured DoS, in private. And the handler
+must RE-READ its aggregate on each attempt: `Retrying` re-invokes the
+handler, not the transaction, and one closing over a stale aggregate
+contends for ever.
 
 A `Code` the table does not list is treated by every adapter as `INTERNAL` —
 the safe default for the unknown: 500, `Internal`, nack + retry, then DLQ.
@@ -906,7 +940,7 @@ func (a *AggregateRoot[T]) PullEvents() []Event   // drained by UnitOfWork
 
 // Optimistic concurrency, OPT-IN. Embed VersionedRoot instead of
 // AggregateRoot and Repository.Save becomes conditional on the version the
-// aggregate was loaded at: a stale write is CodeConflict and changes nothing.
+// aggregate was loaded at: a stale write is CodeContention and changes nothing.
 type Versioned interface {
     Version() int64        // 0 = never persisted, so the write is an insert
     SetVersion(v int64)    // drivers only: at reconstitution, and after a write
@@ -2108,7 +2142,8 @@ round found both:
    `TransientTransactionError` to `errors.Unavailable`, so `app.Retrying`
    composed OUTSIDE `app.Transactional` re-runs the whole thing — the path
    §3.3 already specifies for Postgres `40001`. A write conflict on a
-   version-predicated write maps to `CONFLICT`, not `UNAVAILABLE`, or
+   version-predicated write maps to `CONTENTION` (it mapped to `CONFLICT`
+   until 2026-08-08, and to `UNAVAILABLE` before that), or
    `RunVersionedContract`'s concurrency subtest fails.
 
 `persistence.RunContract` and `RunVersionedContract` are EXPORTED, so a third
@@ -2207,7 +2242,7 @@ primitives it was to own split cleanly in two, and only one half is Warren's.
 **Retry and timeout are core-ring, and they ship.** `app.RetryPolicy` is the
 port; `app.Retrying(policy)` retries `CodeUnavailable` and nothing else, and
 `app.RetryingOn(policy, codes...)` retries exactly the codes you name —
-`errors.CodeConflict` is the one optimistic concurrency needs;
+`errors.CodeContention` is the one optimistic concurrency needs;
 `app.Timeout(d)` bounds the handler's context; `broker.ExponentialBackoff(n)`
 is a concrete policy in the core module with zero dependencies, and
 `broker.Retry` / `broker.WithRetry` reuse the same port on the consumer chain.

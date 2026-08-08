@@ -655,7 +655,16 @@ func mapError(err error) error {
 	}
 	switch pgErr.Code {
 	case "40001", "40P01": // serialization_failure, deadlock_detected
-		return errors.Unavailable("postgres", err)
+		// CONTENTION, not UNAVAILABLE. A serialization failure and a
+		// version-check failure are one phenomenon reached two ways, and
+		// returning different codes for them would make a handler that wants
+		// to catch contention care which isolation level its repository
+		// chose. It also removes a lie: Unavailable renders "postgres is
+		// unavailable" and a 503 for a database that is perfectly healthy,
+		// which sheds load and trips client breakers under ordinary
+		// contention. Retry behaviour is unchanged — app.Retrying covers
+		// both codes.
+		return errors.Contention("the transaction was rolled back to preserve serializability (%s); nothing was written", pgErr.Code)
 	case "23505": // unique_violation
 		return errors.Conflict("%s", pgErr.ConstraintName+" violated")
 	default:

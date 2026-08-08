@@ -26,7 +26,11 @@ func statusFor(code errors.Code) int {
 		return http.StatusBadRequest
 	case errors.CodeNotFound:
 		return http.StatusNotFound
-	case errors.CodeConflict:
+	case errors.CodeConflict, errors.CodeContention:
+		// Both 409: the caller's write collided with current state. What
+		// differs is whether trying again can help, and a client that needs
+		// to know reads the code in the body — which is what the code field
+		// is on the wire for.
 		return http.StatusConflict
 	case errors.CodeUnauthenticated:
 		return http.StatusUnauthorized
@@ -40,7 +44,7 @@ func statusFor(code errors.Code) int {
 }
 
 // errorBody is the wire shape. code is errors.Code verbatim — a closed set of
-// seven values, so a client can switch on it — and it is deliberately not RFC
+// eight values, so a client can switch on it — and it is deliberately not RFC
 // 9457 problem+json, whose "type" is a URI that errors.Code is not.
 type errorBody struct {
 	Error errorPayload `json:"error"`

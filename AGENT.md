@@ -339,6 +339,7 @@ transports:
 | `INVALID` | 400 | `InvalidArgument` | → DLQ (never retry) |
 | `NOT_FOUND` | 404 | `NotFound` | ack + log |
 | `CONFLICT` | 409 | `AlreadyExists` | ack (idempotent replay) |
+| `CONTENTION` | 409 | `Aborted` | nack + backoff retry — nothing was written, so acking destroys work never done |
 | `UNAUTHENTICATED` | 401 | `Unauthenticated` | → DLQ (never retry) |
 | `PERMISSION_DENIED` | 403 | `PermissionDenied` | → DLQ (never retry) |
 | `UNAVAILABLE` | 503 | `Unavailable` | nack + backoff retry |

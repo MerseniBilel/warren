@@ -27,7 +27,9 @@ import (
 //     outside a unit of work and a write does not.
 //  3. persistence.Track after a successful write. That is what enlists the
 //     aggregate so its events reach the outbox in the same commit.
-//  4. Every write carries the version it read, and a write that matches no
+//  4. Every write carries the version it read. A write that matches no row is
+//     a CONTENTION on update and a CONFLICT on insert — never a silent
+//     no-op, and never a blind upsert. The old text said a write that matches no
 //     row is a CONFLICT — never a silent no-op, and never a blind upsert.
 type {{.Name}}Repository struct{ db postgres.DB }
 
@@ -102,10 +104,19 @@ func (r *{{.Name}}Repository) Save(ctx context.Context, {{.Lower}} *domain.{{.Na
 		return err
 	}
 	if n == 0 {
-		// RULE 4. Zero rows means the version moved, or the row was deleted,
-		// or the insert collided. All three are the same answer to the
-		// caller: your write was refused, reload and decide.
-		return werrors.Conflict("{{.Lower}} %s was changed by another request since it was loaded (expected version %d)", {{.Lower}}.ID(), expected)
+		// RULE 4, and the two halves are NOT the same answer.
+		if expected == 0 {
+			// The row is already there: two requests minted the same
+			// identity. CONFLICT — a retry re-reads and finds it still
+			// there, on this attempt and on every one after it.
+			return werrors.Conflict("{{.Lower}} %s already exists", {{.Lower}}.ID())
+		}
+		// The version moved, or the row was deleted under us. NOTHING was
+		// written. CONTENTION — app.Retrying re-invokes the handler, which
+		// re-reads and usually wins the next round. Returning CONFLICT here
+		// is not a cosmetic mistake: on a CONSUMER that code ACKS, so the
+		// message would be destroyed with its work not done.
+		return werrors.Contention("{{.Lower}} %s was changed by another request since it was loaded (it was at version %d)", {{.Lower}}.ID(), expected)
 	}
 	// Advance the in-memory aggregate to what was just written, so a second
 	// Save in the same request checks against the new version instead of

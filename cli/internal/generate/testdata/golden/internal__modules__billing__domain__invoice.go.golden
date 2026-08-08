@@ -21,8 +21,9 @@ func (id InvoiceID) String() string { return string(id) }
 //
 // It embeds VersionedRoot, so writes are checked against the version this
 // invoice was loaded at: two requests that both read version 3 cannot both
-// commit, and the loser gets CodeConflict instead of silently erasing the
-// winner's change. Swap it for wdomain.AggregateRoot (and drop the version
+// commit, and the loser gets CodeContention instead of silently erasing the
+// winner's change — which app.Retrying retries, because re-invoking the
+// handler re-reads this aggregate. Swap it for wdomain.AggregateRoot (and drop the version
 // column) only if something else already serialises writes to this aggregate.
 type Invoice struct {
 	wdomain.VersionedRoot[InvoiceID]
@@ -82,10 +83,14 @@ func (e InvoiceCreated) AggregateID() string { return e.InvoiceID.String() }
 // lives here, in the domain, so infrastructure depends on the domain and
 // never the other way round.
 //
-// Save returns an error carrying errors.CodeConflict when the invoice was
-// changed by someone else since it was loaded. Handlers that must not lose
-// that change reload and retry; handlers that can let the caller decide let
-// the 409 through.
+// Save returns an error carrying errors.CodeContention when the invoice
+// was changed by someone else since it was loaded. Wrap the handler in
+// app.Retrying and it reloads and retries for you; without it, the 409
+// reaches the caller.
+//
+// Your own methods above return errors.Conflict when a RULE refuses — an
+// oversell, an illegal transition. Those are never retried, and the
+// distinction is the difference between a 409 in 7ms and a 409 in 3s.
 type InvoiceRepository interface {
 	FindByID(ctx context.Context, id InvoiceID) (*Invoice, error)
 	Save(ctx context.Context, invoice *Invoice) error

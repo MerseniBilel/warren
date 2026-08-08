@@ -19,7 +19,7 @@ import (
 )
 
 // Code is the semantic classification of a failure. The set is closed: these
-// seven codes are the whole vocabulary, and every adapter maps every one of
+// eight codes are the whole vocabulary, and every adapter maps every one of
 // them. An adapter treats a code it does not know as CodeInternal — the safe
 // default for the unknown.
 type Code string
@@ -34,7 +34,30 @@ const (
 
 	// CodeConflict means the request collided with the current state — a
 	// duplicate, or a transition the aggregate does not allow from here.
+	//
+	// It is TERMINAL. Retrying cannot change the answer, and app.RetryingOn
+	// refuses to be composed on it. A write refused because someone else
+	// committed first is NOT this — that is CodeContention, and it retries.
 	CodeConflict Code = "CONFLICT"
+
+	// CodeContention means a conditional write lost a race: another writer
+	// committed first, so this request's read-modify-write sequence was
+	// refused rather than allowed to overwrite theirs. Nothing was written.
+	//
+	// It is the second retryable code, and it retries DIFFERENTLY from
+	// CodeUnavailable. Unavailable means "make the same call again";
+	// Contention means "start the sequence again" — re-read the aggregate,
+	// re-decide, re-write. That is exactly what app.Retrying does, because it
+	// re-invokes the HANDLER and not the transaction.
+	//
+	// It is gRPC's ABORTED, whose own guidance is the test to apply:
+	// "use ABORTED if the client should retry at a higher level … restart a
+	// read-modify-write sequence".
+	//
+	// It is not CodeConflict. A conflict is arithmetic — three units in stock
+	// and a request for five is refused identically on the tenth attempt.
+	// Contention is a race, and the race is usually won on the next attempt.
+	CodeContention Code = "CONTENTION"
 
 	// CodeUnauthenticated means the caller's identity was absent or could not
 	// be established.
@@ -49,7 +72,9 @@ const (
 	CodePermissionDenied Code = "PERMISSION_DENIED"
 
 	// CodeUnavailable means a dependency was temporarily unreachable: the same
-	// request may succeed later unchanged. It is the retryable code.
+	// request may succeed later unchanged. It is one of the two retryable
+	// codes: this one means "make the same call again", where CodeContention
+	// means "start the read-modify-write sequence again".
 	//
 	// This is the code for failing to authenticate to a downstream dependency
 	// — that failure is about your service's credentials, not the caller's
@@ -109,6 +134,36 @@ func Conflict(msg string, args ...any) *Error {
 		msg = fmt.Sprintf(msg, args...)
 	}
 	return &Error{code: CodeConflict, msg: msg}
+}
+
+// Contention reports that a conditional write was refused because another
+// writer committed first. The resulting Error carries CodeContention. args
+// are fmt operands for msg; when args is empty, msg is used verbatim.
+//
+// It is written by REPOSITORIES, not by aggregates. If you are about to
+// return it from a method that enforces a business rule, you want Conflict:
+// the test is whether the same request would succeed if the caller sent it
+// again ten seconds later with nothing else changed. Yes is Contention, no
+// is Conflict.
+func Contention(msg string, args ...any) *Error {
+	if len(args) > 0 {
+		msg = fmt.Sprintf(msg, args...)
+	}
+	return &Error{code: CodeContention, msg: msg}
+}
+
+// Codes returns the closed set, in the order warren.md §2.6 tables them.
+//
+// It exists so an adapter's mapping can be TESTED for exhaustiveness rather
+// than asserted to be. Every switch over Code in this repository has a
+// default arm answering INTERNAL — correct policy for a code it has never
+// heard of, and a silent trap for one that was just added, because the
+// forgotten adapter renders 500 with no compile error and no test failure.
+func Codes() []Code {
+	return []Code{
+		CodeInvalid, CodeNotFound, CodeConflict, CodeContention,
+		CodeUnauthenticated, CodePermissionDenied, CodeUnavailable, CodeInternal,
+	}
 }
 
 // Unauthenticated reports that the caller's identity was absent or could not

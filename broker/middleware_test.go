@@ -1027,3 +1027,80 @@ func TestTheDeadLetterAlertFollowsThePublish(t *testing.T) {
 		t.Errorf("the envelope did not reach the dead-letter topic")
 	}
 }
+
+// TestContentionIsNackedNotAcked — the disposition that fixes a live silent
+// data loss. Today a consumer handler that loses an optimistic-lock race
+// returns errors.Conflict, which Retry does not retry and DeadLetter ACKS:
+//
+//	case errors.CodeNotFound, errors.CodeConflict:
+//	    return nil
+//
+// so the message is destroyed with the work NOT done — no log at ERROR, no
+// DLQ entry, nothing distinguishing it from success.
+//
+// CONFLICT keeps acking, and rightly: its justification is "idempotent
+// replay", meaning the work was already applied. CONTENTION asserts the
+// opposite — the conditional write matched zero rows, so nothing was
+// applied — and a message whose work was never done has to come back.
+func TestContentionIsNackedNotAcked(t *testing.T) {
+	t.Parallel()
+
+	h, dlq := pipelineFor(t, func(context.Context, broker.Message) error {
+		return werrors.Contention("stock s-1 was changed by another request")
+	}, broker.WithRetry(zeroDelay{max: 2}))
+
+	err := h(context.Background(), msg("m-1"))
+	if err == nil {
+		t.Fatal("a contended message was ACKED — its work was never done, and it is now gone")
+	}
+	if got := werrors.CodeOf(err); got != werrors.CodeContention {
+		t.Errorf("code = %s, want CONTENTION", got)
+	}
+	// Not dead-lettered: redelivery is overwhelmingly likely to succeed, and
+	// dead-lettering ordinary contention turns a busy aggregate into an
+	// operational incident and a page.
+	if n := len(dlq.dlq("user.events")); n != 0 {
+		t.Errorf("%d message(s) dead-lettered — contention is expected to succeed on redelivery", n)
+	}
+}
+
+// TestContentionIsRetriedInProcessFirst — Pipeline composes Retry inside
+// DeadLetter, so ordinary contention is absorbed by backoff and the nack is
+// the fallback rather than the first answer.
+func TestContentionIsRetriedInProcessFirst(t *testing.T) {
+	t.Parallel()
+
+	attempts := 0
+	h, _ := pipelineFor(t, func(context.Context, broker.Message) error {
+		attempts++
+		if attempts < 3 {
+			return werrors.Contention("lost the race")
+		}
+		return nil
+	}, broker.WithRetry(zeroDelay{max: 5}))
+
+	if err := h(context.Background(), msg("m-1")); err != nil {
+		t.Fatalf("a contended message that would have succeeded was not retried: %v", err)
+	}
+	if attempts != 3 {
+		t.Errorf("attempts = %d, want 3", attempts)
+	}
+}
+
+// TestConflictStillAcks — the control. A business refusal is arithmetic: the
+// tenth delivery is refused exactly like the first, so redelivering it for
+// ever is the wrong answer and always was.
+func TestConflictStillAcks(t *testing.T) {
+	t.Parallel()
+
+	h, dlq := pipelineFor(t, func(context.Context, broker.Message) error {
+		return werrors.Conflict("already applied")
+	}, broker.WithRetry(zeroDelay{max: 2}))
+
+	if err := h(context.Background(), msg("m-1")); err != nil {
+		t.Errorf("CONFLICT was not acked: %v", err)
+	}
+	if n := len(dlq.dlq("user.events")); n != 0 {
+		t.Errorf("CONFLICT was dead-lettered: %d", n)
+	}
+}

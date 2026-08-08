@@ -300,8 +300,13 @@ func RunVersionedContract[T domain.Root[K], K domain.ID](t *testing.T, newDriver
 			t.Fatalf("the first writer must win: %v", err)
 		}
 		err = save(uow, repo, two)
-		if !errors.Is(err, errors.CodeConflict) {
-			t.Errorf("the second writer got %v, want CodeConflict — a blind upsert here is the lost update the version exists to prevent", err)
+		// CodeContention, not CodeConflict: nothing was written, and the
+		// next attempt re-reads and usually wins. A driver returning
+		// CONFLICT here fails this suite on purpose — on a CONSUMER that
+		// code ACKS, so the message would be destroyed with its work not
+		// done.
+		if !errors.Is(err, errors.CodeContention) {
+			t.Errorf("the second writer got %v, want CodeContention — a blind upsert here is the lost update the version exists to prevent", err)
 		}
 	})
 
@@ -482,9 +487,9 @@ func RunVersionedContract[T domain.Root[K], K domain.ID](t *testing.T, newDriver
 			switch {
 			case err == nil:
 				won++
-			case errors.Is(err, errors.CodeConflict):
+			case errors.Is(err, errors.CodeContention):
 			default:
-				t.Errorf("writer %d = %v, want nil or CodeConflict", i, err)
+				t.Errorf("writer %d = %v, want nil or CodeContention", i, err)
 			}
 		}
 		// This is the field-test defect exactly: 8 writers all loaded version
