@@ -311,15 +311,6 @@ func (e *electors) elector(name string) outbox.Elector {
 	}
 }
 
-// claimed reports how many leaderships this registry has handed out,
-// including the relay's. Each one that LEADS holds a pooled connection for
-// as long as it leads.
-func (e *electors) claimed() int {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	return len(e.names)
-}
-
 func errUnnamedLeadership() error {
 	return diagnostic(
 		"✗ a leadership needs a name\n\n" +

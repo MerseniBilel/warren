@@ -810,9 +810,9 @@ func TestAnUnprovidedTypeStillGetsAClosingSuggestion(t *testing.T) {
 	}
 	got := err.Error()
 	for _, want := range []string{
-		"warren.Providers",  // the local fix
-		"warren.Imports",    // the other-module fix
-		"warren.Exports",    // and what the other module must have done
+		"warren.Providers", // the local fix
+		"warren.Imports",   // the other-module fix
+		"warren.Exports",   // and what the other module must have done
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("the diagnostic never names %s:\n%s", want, got)

@@ -678,9 +678,12 @@ const (
     CodeInternal         Code = "INTERNAL"
 )
 
+func Codes() []Code // the closed set, in the order tabled below, so an adapter's mapping can be TESTED for exhaustiveness
+
 func Invalid(field string, err error) *Error          // "field <field> is invalid", wraps err
 func NotFound(resource string, id any) *Error         // "<resource> <id> not found"
 func Conflict(msg string, args ...any) *Error         // printf-style; args are fmt operands
+func Contention(msg string, args ...any) *Error       // printf-style; written by REPOSITORIES, not aggregates
 func Unauthenticated(reason string) *Error            // "<reason>" — about the CALLER's identity
 func PermissionDenied(action string) *Error           // "not allowed to <action>"
 func Unavailable(dependency string, err error) *Error // "<dependency> is unavailable", wraps err

@@ -387,13 +387,7 @@ func Authorized[Req, Res any](policy AuthorizationPolicy) Middleware[Req, Res] {
 		panic("app: Authorized composed with a nil policy — construct the policy before boot step 5 composes the route table")
 	}
 	return func(next Handler[Req, Res]) Handler[Req, Res] {
-		return HandlerFunc[Req, Res](func(ctx context.Context, req Req) (Res, error) {
-			if err := policy.Authorize(ctx); err != nil {
-				var zero Res
-				return zero, err
-			}
-			return next.Handle(ctx, req)
-		})
+		return authorizedHandler[Req, Res]{policy: policy, next: next}
 	}
 }
 
@@ -436,16 +430,7 @@ func Transactional[Req, Res any](uow UnitOfWork) Middleware[Req, Res] {
 // an exact pass-through.
 func Traced[Req, Res any]() Middleware[Req, Res] {
 	return func(next Handler[Req, Res]) Handler[Req, Res] {
-		return HandlerFunc[Req, Res](func(ctx context.Context, req Req) (Res, error) {
-			t := TelemetryFromContext(ctx)
-			if t == nil {
-				return next.Handle(ctx, req)
-			}
-			sctx, end := t.Span(ctx, HandlerName(ctx))
-			res, err := next.Handle(sctx, req)
-			end(err)
-			return res, err
-		})
+		return tracedHandler[Req, Res]{next: next}
 	}
 }
 
@@ -455,16 +440,7 @@ func Traced[Req, Res any]() Middleware[Req, Res] {
 // Telemetry it is an exact pass-through.
 func Metered[Req, Res any]() Middleware[Req, Res] {
 	return func(next Handler[Req, Res]) Handler[Req, Res] {
-		return HandlerFunc[Req, Res](func(ctx context.Context, req Req) (Res, error) {
-			t := TelemetryFromContext(ctx)
-			if t == nil {
-				return next.Handle(ctx, req)
-			}
-			start := time.Now()
-			res, err := next.Handle(ctx, req)
-			t.Record(HandlerName(ctx), time.Since(start), err)
-			return res, err
-		})
+		return meteredHandler[Req, Res]{next: next}
 	}
 }
 
@@ -502,15 +478,35 @@ func errTerminalRetry(code errors.Code) string {
 // within the file, so adding an unrelated closure above renumbers it and the
 // check quietly stops firing.
 
-// composed is a handler that wraps another. Warren's own middleware
-// implement it so Chain can walk a stack it was handed rather than only the
+// composed is a handler that wraps another. EVERY middleware Warren ships
+// implements it so Chain can walk a stack it was handed rather than only the
 // one it is building — Chain(Chain(h, Retrying(p)), Transactional(uow)) is
-// the same mistake spelled in two calls. The walk stops at a user's own
-// middleware, which is a known limit, stated in the panic text.
+// the same mistake spelled in two calls.
+//
+// "Every" is load-bearing, and was not always true. Traced, Metered,
+// Authorized and Timeout each returned an anonymous HandlerFunc, so a
+// Retrying beneath one of them was invisible to the walk and
+// Chain(Chain(h, Traced(), Retrying(p)), Transactional(uow)) built the
+// corrupting composition without a word. The limit is a USER's middleware —
+// which the panic text states — so anything Warren ships must be walkable, and
+// a new middleware here MUST be a named type with an inner(), not a closure.
 type composed[Req, Res any] interface {
 	Handler[Req, Res]
 	inner() Handler[Req, Res]
 }
+
+// Every middleware Warren ships is walkable, asserted at compile time. Add a
+// middleware and this block is the one place that fails until you have given
+// it a named handler type — which is the point: the walk failing open is
+// silent, and this is not.
+var (
+	_ composed[any, any] = retryingHandler[any, any]{}
+	_ composed[any, any] = transactionalHandler[any, any]{}
+	_ composed[any, any] = authorizedHandler[any, any]{}
+	_ composed[any, any] = tracedHandler[any, any]{}
+	_ composed[any, any] = meteredHandler[any, any]{}
+	_ composed[any, any] = timeoutHandler[any, any]{}
+)
 
 type retryingHandler[Req, Res any] struct {
 	policy      RetryPolicy
@@ -518,6 +514,13 @@ type retryingHandler[Req, Res any] struct {
 	next        Handler[Req, Res]
 }
 
+// inner is reached through composed[Req,Res], in Chain's containsRetrying
+// walk. staticcheck's unused does not track interface satisfaction by a
+// GENERIC method, so it reports every one of these as dead; the var _ composed
+// block and TestTheMistakeHiddenBehindWarrensOwnMiddlewareIsRefused both
+// prove otherwise.
+//
+//nolint:unused // false positive: generic method satisfying composed[Req,Res]
 func (h retryingHandler[Req, Res]) inner() Handler[Req, Res] { return h.next }
 
 func (h retryingHandler[Req, Res]) Handle(ctx context.Context, req Req) (Res, error) {
@@ -544,11 +547,88 @@ func (h retryingHandler[Req, Res]) Handle(ctx context.Context, req Req) (Res, er
 	}
 }
 
+type authorizedHandler[Req, Res any] struct {
+	policy AuthorizationPolicy
+	next   Handler[Req, Res]
+}
+
+// inner is reached through composed[Req,Res], in Chain's containsRetrying
+// walk. staticcheck's unused does not track interface satisfaction by a
+// GENERIC method, so it reports every one of these as dead; the var _ composed
+// block and TestTheMistakeHiddenBehindWarrensOwnMiddlewareIsRefused both
+// prove otherwise.
+//
+//nolint:unused // false positive: generic method satisfying composed[Req,Res]
+func (h authorizedHandler[Req, Res]) inner() Handler[Req, Res] { return h.next }
+
+func (h authorizedHandler[Req, Res]) Handle(ctx context.Context, req Req) (Res, error) {
+	if err := h.policy.Authorize(ctx); err != nil {
+		var zero Res
+		return zero, err
+	}
+	return h.next.Handle(ctx, req)
+}
+
+type tracedHandler[Req, Res any] struct {
+	next Handler[Req, Res]
+}
+
+// inner is reached through composed[Req,Res], in Chain's containsRetrying
+// walk. staticcheck's unused does not track interface satisfaction by a
+// GENERIC method, so it reports every one of these as dead; the var _ composed
+// block and TestTheMistakeHiddenBehindWarrensOwnMiddlewareIsRefused both
+// prove otherwise.
+//
+//nolint:unused // false positive: generic method satisfying composed[Req,Res]
+func (h tracedHandler[Req, Res]) inner() Handler[Req, Res] { return h.next }
+
+func (h tracedHandler[Req, Res]) Handle(ctx context.Context, req Req) (Res, error) {
+	t := TelemetryFromContext(ctx)
+	if t == nil {
+		return h.next.Handle(ctx, req)
+	}
+	sctx, end := t.Span(ctx, HandlerName(ctx))
+	res, err := h.next.Handle(sctx, req)
+	end(err)
+	return res, err
+}
+
+type meteredHandler[Req, Res any] struct {
+	next Handler[Req, Res]
+}
+
+// inner is reached through composed[Req,Res], in Chain's containsRetrying
+// walk. staticcheck's unused does not track interface satisfaction by a
+// GENERIC method, so it reports every one of these as dead; the var _ composed
+// block and TestTheMistakeHiddenBehindWarrensOwnMiddlewareIsRefused both
+// prove otherwise.
+//
+//nolint:unused // false positive: generic method satisfying composed[Req,Res]
+func (h meteredHandler[Req, Res]) inner() Handler[Req, Res] { return h.next }
+
+func (h meteredHandler[Req, Res]) Handle(ctx context.Context, req Req) (Res, error) {
+	t := TelemetryFromContext(ctx)
+	if t == nil {
+		return h.next.Handle(ctx, req)
+	}
+	start := time.Now()
+	res, err := h.next.Handle(ctx, req)
+	t.Record(HandlerName(ctx), time.Since(start), err)
+	return res, err
+}
+
 type transactionalHandler[Req, Res any] struct {
 	uow  UnitOfWork
 	next Handler[Req, Res]
 }
 
+// inner is reached through composed[Req,Res], in Chain's containsRetrying
+// walk. staticcheck's unused does not track interface satisfaction by a
+// GENERIC method, so it reports every one of these as dead; the var _ composed
+// block and TestTheMistakeHiddenBehindWarrensOwnMiddlewareIsRefused both
+// prove otherwise.
+//
+//nolint:unused // false positive: generic method satisfying composed[Req,Res]
 func (h transactionalHandler[Req, Res]) inner() Handler[Req, Res] { return h.next }
 
 func (h transactionalHandler[Req, Res]) Handle(ctx context.Context, req Req) (Res, error) {

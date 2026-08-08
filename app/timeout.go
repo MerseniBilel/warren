@@ -41,10 +41,28 @@ func Timeout[Req, Res any](d time.Duration) Middleware[Req, Res] {
 		panic("app: Timeout composed with a non-positive duration — a deadline already in the past would fail every request; omit the middleware instead")
 	}
 	return func(next Handler[Req, Res]) Handler[Req, Res] {
-		return HandlerFunc[Req, Res](func(ctx context.Context, req Req) (Res, error) {
-			ctx, cancel := context.WithTimeout(ctx, d)
-			defer cancel()
-			return next.Handle(ctx, req)
-		})
+		return timeoutHandler[Req, Res]{d: d, next: next}
 	}
+}
+
+// timeoutHandler is a named type, not a closure, because Chain's walk has to
+// see through it — see composed in middleware.go.
+type timeoutHandler[Req, Res any] struct {
+	d    time.Duration
+	next Handler[Req, Res]
+}
+
+// inner is reached through composed[Req,Res], in Chain's containsRetrying
+// walk. staticcheck's unused does not track interface satisfaction by a
+// GENERIC method, so it reports every one of these as dead; the var _ composed
+// block and TestTheMistakeHiddenBehindWarrensOwnMiddlewareIsRefused both
+// prove otherwise.
+//
+//nolint:unused // false positive: generic method satisfying composed[Req,Res]
+func (h timeoutHandler[Req, Res]) inner() Handler[Req, Res] { return h.next }
+
+func (h timeoutHandler[Req, Res]) Handle(ctx context.Context, req Req) (Res, error) {
+	ctx, cancel := context.WithTimeout(ctx, h.d)
+	defer cancel()
+	return h.next.Handle(ctx, req)
 }

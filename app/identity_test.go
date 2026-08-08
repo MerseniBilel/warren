@@ -894,3 +894,45 @@ func TestTheSameMistakeInTwoChainCallsIsRefused(t *testing.T) {
 	_ = app.Chain(inner, app.Transactional[string, string](&countingUoW{}))
 }
 
+// TestTheMistakeHiddenBehindWarrensOwnMiddlewareIsRefused — the walk's stated
+// limit is that it stops at a USER's middleware. It used to stop at Warren's
+// own too: Traced, Metered, Authorized and Timeout each returned an anonymous
+// HandlerFunc, so a Retrying underneath one of them was invisible and
+// Chain(Chain(h, Traced, Retrying), Transactional) built the corrupting
+// composition in silence. Every middleware Warren ships is now walkable.
+func TestTheMistakeHiddenBehindWarrensOwnMiddlewareIsRefused(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name string
+		hide app.Middleware[string, string]
+	}{
+		{"Traced", app.Traced[string, string]()},
+		{"Metered", app.Metered[string, string]()},
+		{"Timeout", app.Timeout[string, string](time.Second)},
+		{"Authorized", app.Authorized[string, string](&allowAll{})},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			h := app.HandlerFunc[string, string](func(context.Context, string) (string, error) {
+				return "", nil
+			})
+			// Traced(Retrying(h)) — the Retrying is one level down, behind a
+			// middleware that is Warren's own.
+			inner := app.Chain(h, tc.hide,
+				app.Retrying[string, string](broker.ExponentialBackoff(3)))
+
+			defer func() {
+				r := recover()
+				if r == nil {
+					t.Fatalf("Transactional outside a Retrying hidden behind %s was accepted", tc.name)
+				}
+				if msg, _ := r.(string); !strings.Contains(msg, "OUTSIDE Retrying") {
+					t.Errorf("panicked for another reason:\n%s", msg)
+				}
+			}()
+			_ = app.Chain(inner, app.Transactional[string, string](&countingUoW{}))
+		})
+	}
+}
