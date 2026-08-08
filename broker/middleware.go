@@ -447,6 +447,20 @@ func DeadLetter(pub Publisher, originTopic, dlqTopic string) Middleware {
 			}
 			switch codeOf(err) {
 			case errors.CodeNotFound, errors.CodeConflict:
+				// Acked — §2.6 — and SAID SO. The table's NOT_FOUND row has
+				// read "ack + log" from the beginning and there was no log
+				// call here, so a consumer discarding messages because a row
+				// is missing produced no record anywhere: a queue draining
+				// to nothing looked exactly like a queue being handled.
+				//
+				// At INFO, not WARN: both dispositions are correct and
+				// expected. What was missing was the fact, not an alarm.
+				log.FromContext(ctx).InfoContext(ctx, "message discarded",
+					"topic", originTopic,
+					"message_id", msg.ID,
+					"code", string(codeOf(err)),
+					"reason", discardReason(codeOf(err)),
+					"error", err.Error())
 				return nil
 			case errors.CodeUnavailable, errors.CodeContention:
 				// Nack, so the broker brings it back — §2.6's disposition,
@@ -644,4 +658,14 @@ func InjectTrace(ctx context.Context, msgs []Message) {
 			msgs[i].Headers[k] = v
 		})
 	}
+}
+
+// discardReason says which of the two acked dispositions this was, because
+// they are not the same event: one means the work is already done, the other
+// means it can never be done here.
+func discardReason(code errors.Code) string {
+	if code == errors.CodeConflict {
+		return "the work was already applied — an idempotent replay, so redelivering it cannot help"
+	}
+	return "the message addressed something that does not exist, so redelivering it cannot help"
 }

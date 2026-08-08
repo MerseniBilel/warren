@@ -783,3 +783,77 @@ func TestRetryingCoversBothRetryableCodes(t *testing.T) {
 		})
 	}
 }
+
+// TestChainsFirstMiddlewareIsOutermost — field test #10, defect 1. Both
+// orderings compile, boot, pass every generated test and serve 201s, and
+// only one of them retries. The tester wrote the wrong one straight from the
+// docs and measured eight handler attempts for eight concurrent requests:
+// zero retries, two callers refused for stock that existed.
+//
+// So the rule the docs now state is pinned here rather than described.
+func TestChainsFirstMiddlewareIsOutermost(t *testing.T) {
+	t.Parallel()
+
+	var order []string
+	mark := func(name string) app.Middleware[string, string] {
+		return func(next app.Handler[string, string]) app.Handler[string, string] {
+			return app.HandlerFunc[string, string](func(ctx context.Context, s string) (string, error) {
+				order = append(order, name)
+				return next.Handle(ctx, s)
+			})
+		}
+	}
+	h := app.HandlerFunc[string, string](func(context.Context, string) (string, error) {
+		order = append(order, "handler")
+		return "", nil
+	})
+
+	if _, err := app.Chain(h, mark("first"), mark("second")).Handle(context.Background(), "x"); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if got := strings.Join(order, ","); got != "first,second,handler" {
+		t.Errorf("order = %s, want first,second,handler — Chain(h, A, B) is A(B(h))", got)
+	}
+}
+
+// TestRetryingOutsideTransactionalGetsAFreshTransactionEachAttempt — the
+// consequence that matters. The unit of work counts how many transactions
+// were opened; with Retrying outermost it is one per attempt, which is what
+// makes a re-read see another writer's commit.
+func TestRetryingOutsideTransactionalGetsAFreshTransactionEachAttempt(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name         string
+		retryingWraps bool
+		wantTx       int
+	}{
+		{"Retrying outermost", true, 3},
+		{"Transactional outermost", false, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			uow := &countingUoW{}
+			attempts := 0
+			h := app.HandlerFunc[string, string](func(context.Context, string) (string, error) {
+				attempts++
+				if attempts < 3 {
+					return "", werrors.Contention("version moved")
+				}
+				return "ok", nil
+			})
+
+			retry := app.Retrying[string, string](broker.ExponentialBackoff(5))
+			tx := app.Transactional[string, string](uow)
+			chained := app.Chain(h, retry, tx)
+			if !tc.retryingWraps {
+				chained = app.Chain(h, tx, retry)
+			}
+			_, _ = chained.Handle(context.Background(), "x")
+
+			if uow.opened != tc.wantTx {
+				t.Errorf("%s opened %d transaction(s), want %d", tc.name, uow.opened, tc.wantTx)
+			}
+		})
+	}
+}
+

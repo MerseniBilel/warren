@@ -28,6 +28,18 @@ type voidInvoice struct{}
 //
 // Transactional wraps the handler in the unit of work, so the rows it
 // writes and the outbox rows announcing them commit together or not at all.
+//
+// CHAIN'S FIRST MIDDLEWARE IS THE OUTERMOST ONE. That matters the moment you
+// add a retry for contention, because both orderings compile and only one
+// works:
+//
+//	app.Chain(h, app.Retrying(p), app.Transactional(uow))   // each attempt, its own transaction
+//	app.Chain(h, app.Transactional(uow), app.Retrying(p))   // ONE transaction around every attempt
+//
+// A field test wrote the second, measured eight handler attempts for eight
+// concurrent requests — zero retries — and had two callers refused for stock
+// that existed. Append to this list and you get the second one, so put
+// Retrying BEFORE Transactional when you add it.
 func NewVoidInvoiceHandler(uow app.UnitOfWork) app.Handler[VoidInvoice, VoidInvoiceResult] {
 	return app.Chain[VoidInvoice, VoidInvoiceResult](
 		&voidInvoice{},

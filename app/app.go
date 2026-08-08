@@ -61,6 +61,15 @@ type Middleware[Req, Res any] func(Handler[Req, Res]) Handler[Req, Res]
 // exact outcome the boot-ordering rule exists to prevent. Note a conditional
 // middleware belongs in the slice only when enabled — append it, don't leave
 // a nil hole.
+// THE FIRST MIDDLEWARE IS THE OUTERMOST ONE, and the loop below is why: it
+// wraps from the end, so mw[0] is applied last and therefore sees the request
+// first. Chain(h, A, B) is A(B(h)).
+//
+// That ordering is load-bearing for exactly one pair, and both spellings
+// compile: Retrying BEFORE Transactional gives each attempt its own
+// transaction, and the reverse wraps one transaction around every attempt. A
+// field test wrote the reverse and measured zero retries across eight
+// concurrent requests, with two callers refused for stock that existed.
 func Chain[Req, Res any](h Handler[Req, Res], mw ...Middleware[Req, Res]) Handler[Req, Res] {
 	if h == nil {
 		panic("app: Chain composed around a nil handler — the handler must exist before boot step 5 builds the route table")

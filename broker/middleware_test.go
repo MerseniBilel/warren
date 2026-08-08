@@ -1104,3 +1104,49 @@ func TestConflictStillAcks(t *testing.T) {
 		t.Errorf("CONFLICT was dead-lettered: %d", n)
 	}
 }
+
+// TestADiscardedMessageIsLogged — field test #10, defect 3. §2.6's row for
+// NOT_FOUND says "ack + log" and there was no log call on that branch, so a
+// consumer discarding messages because a row is missing produced no record
+// anywhere. That is the class of silence the CONTENTION split was introduced
+// to kill, promised in the table and not delivered.
+//
+// CONFLICT is discarded too and its row honestly says "ack (idempotent
+// replay)" — but a message dropped because the work was already done is
+// still a message dropped, and an operator watching a queue drain to nothing
+// deserves to know which of the two it was.
+func TestADiscardedMessageIsLogged(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"NOT_FOUND", werrors.NotFound("order", "o-9"), "NOT_FOUND"},
+		{"CONFLICT", werrors.Conflict("already applied"), "CONFLICT"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			prev := slog.Default()
+			slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, nil)))
+			t.Cleanup(func() { slog.SetDefault(prev) })
+
+			h, _ := pipelineFor(t, func(context.Context, broker.Message) error {
+				return tc.err
+			})
+			if err := h(context.Background(), msg("m-1")); err != nil {
+				t.Fatalf("the message was not acked: %v", err)
+			}
+
+			out := buf.String()
+			if !strings.Contains(out, "message discarded") {
+				t.Errorf("a discarded message left no trace in the log: %q", out)
+			}
+			if !strings.Contains(out, tc.want) {
+				t.Errorf("the line does not carry the code %s: %q", tc.want, out)
+			}
+			if !strings.Contains(out, "m-1") {
+				t.Errorf("the line does not name the message: %q", out)
+			}
+		})
+	}
+}

@@ -497,7 +497,7 @@ correct behaviour but worth knowing.
 | Reading the caller | `id, ok := app.IdentityFromContext(ctx)` — seeded by your own edge middleware with `app.WithIdentity`. The ok-bool is the point: `IdentityFromContext(ctx).Subject` does not compile |
 | Cross-cutting logic on every protocol | `app.Chain` / core middleware — wraps the handler, so it applies to HTTP, gRPC and consumers identically |
 | Retrying a lost connection | `app.Retrying(broker.ExponentialBackoff(3))` — retries `UNAVAILABLE` only |
-| **Contention on one aggregate** | `app.Retrying(p)` — no code list. A stale write is `CONTENTION`, which `Retrying` covers along with `UNAVAILABLE`. Two rules, both load-bearing: your handler must **RE-READ** the aggregate on each attempt (this re-invokes the handler, not the transaction, so one closing over a stale aggregate contends for ever), and `Retrying` goes **OUTSIDE** `Transactional` (inside, every attempt re-runs in a transaction already doomed). `RetryingOn(p, errors.CodeConflict)` is a boot panic now: a business refusal is refused identically on every attempt, and retrying it cost a measured 6 transactions and 1.25s against 7ms |
+| **Contention on one aggregate** | `app.Retrying(p)` — no code list. A stale write is `CONTENTION`, which `Retrying` covers along with `UNAVAILABLE`. **Write it exactly like this**, and read the note under this table before you change the order: `app.Chain(h, app.Retrying(p), app.Transactional(uow))`. Your handler must also **RE-READ** the aggregate on each attempt — `Retrying` re-invokes the handler, not the transaction, so one closing over a stale aggregate contends for ever. `RetryingOn(p, errors.CodeConflict)` is a boot panic: a business refusal is refused identically on every attempt, and retrying it cost a measured 6 transactions and 1.25s against 7ms |
 | Bounding a slow dependency | `app.Timeout(3*time.Second)` — inside `Retrying` bounds each attempt, outside bounds the sequence |
 | File upload, download, SSE, WebSocket | `transport.Raw(r, transport.ProtocolHTTP, "POST /uploads", h)` from your controller — note the pattern carries the method here |
 | `pprof`, static assets, a webhook receiver | `whttp.Handle("GET /debug/pprof/", h)` — for handlers needing no module dependency |
@@ -505,6 +505,24 @@ correct behaviour but worth knowing.
 | A test that boots the app | `warren/testing` — `NewModuleTest`, `Replace`, `Invoke` for a handler, and `Resolve[T]` for anything else the boot built (a repository, the publisher, a sweeper). `Resolve` returns the instance the boot made, not a second construction |
 | A fast test suite | `whttp.DrainDelay(0)` — the 5s default is correct in production and costs 5s per test |
 | Scaffolding the next feature | `warren new` and `warren g` — see the CLI's skills |
+
+> **`app.Chain`'s first middleware is the OUTERMOST one.** So
+> `app.Chain(h, app.Retrying(p), app.Transactional(uow))` gives each retry
+> its own transaction, and swapping those two arguments wraps one transaction
+> around the whole retry loop.
+>
+> That is worth spelling out because **both spellings compile, boot, pass
+> every generated test and serve 201s** — a field test wrote the wrong one
+> straight from an earlier version of this table and measured *eight handler
+> attempts for eight concurrent requests*: zero retries, and two callers got
+> a 409 for stock that existed. With the arguments the right way round, the
+> same test succeeded 8 of 8.
+>
+> Note the failure is not always the one you would predict. Against the
+> in-memory driver the version check runs at COMMIT, which is outside the
+> retry loop in the wrong ordering — so `Retrying` sees no error at all and
+> retries **zero** times, rather than spending its budget on a doomed
+> transaction.
 
 ---
 
