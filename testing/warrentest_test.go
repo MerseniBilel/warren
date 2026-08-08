@@ -426,3 +426,88 @@ func TestAsCallerDrivesAGuardedHandler(t *testing.T) {
 		t.Error("AsCaller carried a blank subject")
 	}
 }
+
+// TestResolvePullsADependencyOutOfTheBootedApp — field test #8, defect 12.
+// To get a broker.Publisher out of a booted test app the tester had to drop
+// to App.Warren().Invoke("picking", fn) — a CONTAINER SCOPE NAME, which
+// GETTING_STARTED never mentions, from a package whose documented surface is
+// "NewModuleTest, Replace, Invoke". warrentest.Invoke only reaches
+// app.Handler types.
+func TestResolvePullsADependencyOutOfTheBootedApp(t *testing.T) {
+	t.Parallel()
+
+	a := warrentest.NewModuleTest(t, resolvableModule())
+	got := warrentest.Resolve[*counter](t, a)
+	if got == nil {
+		t.Fatal("Resolve returned nil")
+	}
+	got.n++
+
+	// The SAME instance the boot built, not a second construction — which is
+	// the whole reason to reach into the container rather than call the
+	// constructor again.
+	again := warrentest.Resolve[*counter](t, a)
+	if again.n != 1 {
+		t.Errorf("Resolve built a second instance: n = %d, want 1", again.n)
+	}
+}
+
+// TestResolveInReachesANamedModule — a test spanning several features needs
+// the same escape hatch InvokeIn gives handlers.
+func TestResolveInReachesANamedModule(t *testing.T) {
+	t.Parallel()
+
+	a := warrentest.NewModuleTest(t, resolvableModule(),
+		warrentest.WithModules(neighbourModule()))
+	if got := warrentest.ResolveIn[*neighbour](t, a, "neighbour"); got == nil {
+		t.Fatal("ResolveIn returned nil")
+	}
+}
+
+// TestResolveFailsTheTestWithWarrensDiagnostic — a type the module does not
+// provide is a test failure naming it, not a nil the test then dereferences.
+func TestResolveFailsTheTestWithWarrensDiagnostic(t *testing.T) {
+	t.Parallel()
+
+	a := warrentest.NewModuleTest(t, resolvableModule())
+	ft := &fatalRecorder{TB: t}
+	_ = warrentest.Resolve[*neighbour](ft, a)
+	if !ft.failed {
+		t.Fatal("resolving an unprovided type did not fail the test")
+	}
+	if !strings.Contains(ft.msg, "neighbour") {
+		t.Errorf("the failure does not name the type: %s", ft.msg)
+	}
+}
+
+type counter struct{ n int }
+
+type neighbour struct{}
+
+func resolvableModule() warren.Module {
+	return warren.NewModule("resolvable",
+		warren.Providers(func() *counter { return &counter{} }),
+		warren.Eager[*counter](),
+	)
+}
+
+func neighbourModule() warren.Module {
+	return warren.NewModule("neighbour",
+		warren.Providers(func() *neighbour { return &neighbour{} }),
+		warren.Eager[*neighbour](),
+	)
+}
+
+// fatalRecorder captures a Fatalf instead of ending the test.
+type fatalRecorder struct {
+	testing.TB
+	failed bool
+	msg    string
+}
+
+func (f *fatalRecorder) Fatalf(format string, args ...any) {
+	f.failed = true
+	f.msg = fmt.Sprintf(format, args...)
+}
+
+func (f *fatalRecorder) Helper() {}

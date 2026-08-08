@@ -129,7 +129,10 @@ func (r *{{.Name}}Repository) Save(ctx context.Context, {{.Lower}} *domain.{{.Na
 	return nil
 }
 
-// Delete removes it.
+// Delete removes it. The domain's {{.Name}}Repository port does NOT declare
+// this — see the note on the in-memory implementation. Add
+// `Delete(ctx context.Context, id {{.Name}}ID) error` to the port when you
+// need it.
 func (r *{{.Name}}Repository) Delete(ctx context.Context, id domain.{{.Name}}ID) error {
 	if err := postgres.RequireTx(ctx, "delete {{.Lower}}"); err != nil {
 		return err

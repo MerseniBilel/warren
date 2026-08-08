@@ -1110,3 +1110,40 @@ func TestAWriteIsStillTransactional(t *testing.T) {
 		}
 	}
 }
+
+// TestBothRepositoryDriversOfferTheSameSurface — field test #8, defect 11.
+// The Postgres template implemented Delete and the in-memory one did not,
+// while the port declares neither — so swapping drivers silently changed
+// what the repository could do, and a project that had widened its port for
+// Delete stopped compiling on the driver that lacked it.
+func TestBothRepositoryDriversOfferTheSameSurface(t *testing.T) {
+	t.Parallel()
+
+	methods := func(driver string) []string {
+		dir := app(t)
+		if _, err := generate.Entity(generate.Options{Dir: dir, Module: "user", Name: "Order"}); err != nil {
+			t.Fatalf("g entity: %v", err)
+		}
+		if _, err := generate.Repository(generate.Options{
+			Dir: dir, Module: "user", Name: "Order", Driver: driver,
+		}); err != nil {
+			t.Fatalf("g repository --driver %s: %v", driver, err)
+		}
+		src := read(t, dir, "internal/modules/user/infrastructure/order_repository.go")
+		var found []string
+		for _, m := range []string{"FindByID", "Save", "Delete"} {
+			if strings.Contains(src, ") "+m+"(ctx context.Context") {
+				found = append(found, m)
+			}
+		}
+		return found
+	}
+
+	mem, pg := methods("memory"), methods("postgres")
+	if strings.Join(mem, ",") != strings.Join(pg, ",") {
+		t.Errorf("the drivers differ: memory has %v, postgres has %v", mem, pg)
+	}
+	if len(mem) != 3 {
+		t.Errorf("methods = %v, want FindByID, Save and Delete", mem)
+	}
+}

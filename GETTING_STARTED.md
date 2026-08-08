@@ -502,7 +502,7 @@ correct behaviour but worth knowing.
 | File upload, download, SSE, WebSocket | `transport.Raw(r, transport.ProtocolHTTP, "POST /uploads", h)` from your controller — note the pattern carries the method here |
 | `pprof`, static assets, a webhook receiver | `whttp.Handle("GET /debug/pprof/", h)` — for handlers needing no module dependency |
 | **Refusing a misspelled field** | `whttp.Codec(transport.StrictJSON())`. The default codec IGNORES unknown members, so a client sending `reorderPoint` for `reorder_point` gets a 201 and a record with the field it asked for left at zero. That default is deliberate — one codec decodes HTTP *and* events, and an INVALID on a consumer dead-letters without retry, so a producer adding a field would DLQ 100% of a consumer's traffic — but on an HTTP-only service strict is usually what you want |
-| A test that boots the app | `warren/testing` — `NewModuleTest`, `Replace`, `Invoke` |
+| A test that boots the app | `warren/testing` — `NewModuleTest`, `Replace`, `Invoke` for a handler, and `Resolve[T]` for anything else the boot built (a repository, the publisher, a sweeper). `Resolve` returns the instance the boot made, not a second construction |
 | A fast test suite | `whttp.DrainDelay(0)` — the 5s default is correct in production and costs 5s per test |
 | Scaffolding the next feature | `warren new` and `warren g` — see the CLI's skills |
 

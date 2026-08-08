@@ -203,6 +203,37 @@ func InvokeIn[Req, Res any](ctx context.Context, a *App, module string, req Req)
 	return res, handleErr
 }
 
+// Resolve returns the T the module under test provides, as the boot built
+// it — not a second construction.
+//
+// warrentest.Invoke reaches app.Handler types and nothing else, so a test
+// that wants the repository, the publisher or a sweeper had to drop to
+// App.Warren().Invoke(module, fn) and pass a CONTAINER SCOPE NAME, which is
+// documented nowhere a test author would look. A field test did exactly
+// that, and reported it.
+//
+//	pub := warrentest.Resolve[broker.Publisher](t, a)
+//
+// A type the module does not provide fails the test with Warren's own
+// resolution diagnostic, rather than returning a zero value the test then
+// asserts against.
+func Resolve[T any](t testing.TB, a *App) T {
+	t.Helper()
+	return ResolveIn[T](t, a, a.module)
+}
+
+// ResolveIn is Resolve against a NAMED module, for a test spanning several —
+// the same escape hatch InvokeIn gives handlers.
+func ResolveIn[T any](t testing.TB, a *App, module string) T {
+	t.Helper()
+	var got T
+	if err := a.app.Invoke(module, func(v T) { got = v }); err != nil {
+		var zero T
+		t.Fatalf("warrentest: resolving %T from module %q: %v", zero, module, err)
+	}
+	return got
+}
+
 // Recorder wraps a Publisher and Subscriber, remembering what was
 // published. WithMemoryBroker installs one.
 type Recorder struct {
