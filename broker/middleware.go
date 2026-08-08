@@ -284,15 +284,29 @@ func (d *drainState) wait(ctx context.Context) error {
 	}
 }
 
-// TraceExtract seeds the delivery's headers on the context, so downstream
-// instrumentation — and the observability adapter's span extraction — can
-// continue the producer's trace without this package knowing a telemetry
-// SDK exists.
+// TraceExtract continues the producer's trace from the delivery's headers,
+// and seeds those headers on the context for anything else that wants them.
+// It is the exact mirror of InjectTrace, and like it, it reaches the telemetry
+// through app.TelemetryFromContext — so this package continues a distributed
+// trace without knowing a telemetry SDK exists.
+//
+// It used to do only the seeding half. broker.DeliveryHeaders had no
+// non-test reader anywhere in the repository and app.Telemetry.Extract had
+// exactly one caller, transport/http's edge — so trace context travelled INTO
+// a message and never came back out. Every consumer span began a new root
+// trace, silently, and a service that imported observability looked fully
+// instrumented while answering none of the questions it was bought for.
+//
+// It is a no-op when no telemetry is bound, so an uninstrumented service pays
+// one nil check per delivery.
 func TraceExtract() Middleware {
 	return func(next MessageHandler) MessageHandler {
 		return func(ctx context.Context, msg Message) error {
 			if msg.Headers != nil {
 				ctx = WithDeliveryHeaders(ctx, msg.Headers)
+				if tel := app.TelemetryFromContext(ctx); tel != nil {
+					ctx = tel.Extract(ctx, func(k string) string { return msg.Headers[k] })
+				}
 			}
 			return next(ctx, msg)
 		}
@@ -322,7 +336,9 @@ func DeliveryHeaders(ctx context.Context) map[string]string {
 // not count as its own duplicate. A store error fails CLOSED: UNAVAILABLE
 // nack, duplicates over loss, but never silently. A MarkSeen failure after
 // success is acked — the work is done; refusing the ack would guarantee the
-// duplicate it failed to prevent.
+// duplicate it failed to prevent — but it is logged at WARN, naming the
+// subscription, because idempotency silently switching off is worse than the
+// redelivery it was protecting against. A suppressed duplicate logs at DEBUG.
 func Deduplicate(subscription string, store inbox.Store, ttl time.Duration) Middleware {
 	if store == nil {
 		panic("broker: Deduplicate composed with a nil inbox store")
@@ -362,14 +378,32 @@ func Deduplicate(subscription string, store inbox.Store, ttl time.Duration) Midd
 				return errors.Unavailable("inbox store", err)
 			}
 			if seen {
+				// DEBUG because on a redelivering broker this is routine —
+				// but it is not nothing. Without it, "my consumer never ran"
+				// and "my consumer ran once and the rest were suppressed"
+				// are indistinguishable from outside the process.
+				log.FromContext(ctx).DebugContext(ctx, "duplicate suppressed",
+					"subscription", subscription, "message_id", msg.ID)
 				return nil
 			}
 			if err := next(ctx, msg); err != nil {
 				return err
 			}
-			// Marking failure is logged by the store's own instrumentation;
-			// the disposition stands.
-			_ = store.MarkSeen(ctx, key, ttl)
+			// The disposition stands — the work is done, and refusing the ack
+			// would guarantee the duplicate this failed to prevent. But it is
+			// reported HERE, because no shipped store logs: this comment used
+			// to claim "the store's own instrumentation" does it, and a field
+			// test found neither the memory store nor the Postgres one has
+			// any. A broken inbox degraded to no deduplication at all, in
+			// silence, and only an idempotent handler hid the consequence.
+			if err := store.MarkSeen(ctx, key, ttl); err != nil {
+				log.FromContext(ctx).WarnContext(ctx, "inbox mark failed",
+					"subscription", subscription,
+					"message_id", msg.ID,
+					"error", err.Error(),
+					"risk", "this message is no longer deduplicated; a redelivery will run the handler again",
+					"fix", "check the inbox store — for postgres.WithInbox that is the warren_inbox table and the connection pool")
+			}
 			return nil
 		}
 	}

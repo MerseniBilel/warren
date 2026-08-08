@@ -10,6 +10,28 @@ being true, that is a bug: [warren.md](warren.md) is the design and
 > **Pre-release.** Warren is not tagged yet, so your `go.mod` needs a `replace`
 > pointing at a local checkout. That goes away at v0.1.
 
+> **Getting the `warren` binary.** Untagged means `go install
+> github.com/MerseniBilel/warren/cli/cmd/warren@latest` has nothing to fetch,
+> so build it from your checkout:
+>
+> ```
+> cd cli && go build -o ~/.local/bin/warren ./cmd/warren
+> ```
+>
+> The `cd cli` is required, not tidiness: the CLI is **its own module**, so
+> from the repository root `go build ./cli/cmd/warren` answers `main module
+> (github.com/MerseniBilel/warren) does not contain package …/cli/cmd/warren`.
+> It appears to work in a tree where `make` has run, because the generated
+> `go.work` joins the modules — and `go.work` is never committed, so it does
+> not exist in a fresh clone.
+>
+> For the same reason `go run ./cmd/warren …` works only from inside `cli/`:
+> `go run` resolves its package argument against the *current* module, so
+> running it from the directory you want to scaffold into fails with `go:
+> go.mod file not found in current directory or any parent directory`. A field
+> test hit that on the literal first command. This page itself needs no CLI —
+> it is written by hand throughout — but §"Scaffolding the next feature" does.
+
 ---
 
 ## What you are building
@@ -504,7 +526,7 @@ correct behaviour but worth knowing.
 | **Refusing a misspelled field** | `whttp.Codec(transport.StrictJSON())`. The default codec IGNORES unknown members, so a client sending `reorderPoint` for `reorder_point` gets a 201 and a record with the field it asked for left at zero. That default is deliberate — one codec decodes HTTP *and* events, and an INVALID on a consumer dead-letters without retry, so a producer adding a field would DLQ 100% of a consumer's traffic — but on an HTTP-only service strict is usually what you want |
 | A test that boots the app | `warren/testing` — `NewModuleTest`, `Replace`, `Invoke` for a handler, and `Resolve[T]` for anything else the boot built (a repository, the publisher, a sweeper). `Resolve` returns the instance the boot made, not a second construction |
 | A fast test suite | `whttp.DrainDelay(0)` — the 5s default is correct in production and costs 5s per test |
-| Scaffolding the next feature | `warren new` and `warren g` — see the CLI's skills |
+| Scaffolding the next feature | `warren new` and `warren g` — see the CLI's skills, and **build the binary first** (below) |
 
 > **`app.Chain`'s first middleware is the OUTERMOST one.** So
 > `app.Chain(h, app.Retrying(p), app.Transactional(uow))` gives each retry

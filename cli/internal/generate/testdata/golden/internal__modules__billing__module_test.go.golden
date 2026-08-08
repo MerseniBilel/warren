@@ -18,5 +18,14 @@ import (
 func TestModuleBoots(t *testing.T) {
 	t.Setenv("MYAPP_NAME", "test")
 
+	// The moment a request in this module carries a tag the standard-library
+	// validator cannot enforce — `email`, `min=1`, `dive` — this boots in
+	// production and fails HERE, because NewModuleTest compiles the routes
+	// itself and never touches App.Validator. Install the playground module
+	// as the boot diagnostic tells you, then add it here too:
+	//
+	//	warrentest.NewModuleTest(t, billing.Module(),
+	//		warrentest.WithMemoryBroker(),
+	//		warrentest.WithValidator(playground.New()))
 	warrentest.NewModuleTest(t, billing.Module(), warrentest.WithMemoryBroker())
 }

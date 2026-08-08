@@ -263,6 +263,100 @@ func (failingStore) MarkSeen(context.Context, string, time.Duration) error {
 	return stderrors.New("store down")
 }
 
+// markOnlyFailingStore answers Seen fine and fails only the MARK, which is the
+// asymmetry that made the failure invisible: the handler runs, the disposition
+// is correct, and idempotency is silently off.
+type markOnlyFailingStore struct{}
+
+func (markOnlyFailingStore) Seen(context.Context, string) (bool, error) { return false, nil }
+
+func (markOnlyFailingStore) MarkSeen(context.Context, string, time.Duration) error {
+	return stderrors.New("relation \"warren_inbox\" does not exist")
+}
+
+// TestAMarkSeenFailureIsReported — field test #11, defect 4. Deduplicate
+// discards a MarkSeen error under a comment claiming "the store's own
+// instrumentation" logs it. Neither shipped store logs anything, so a broken
+// inbox degraded to no deduplication at all with no signal anywhere: the
+// handler ran on every redelivery, and only an idempotent aggregate hid it.
+func TestAMarkSeenFailureIsReported(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	ctx := log.WithLogger(context.Background(),
+		slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+
+	calls := 0
+	h := broker.Deduplicate("fulfillment/on-order-placed", markOnlyFailingStore{}, time.Hour)(
+		func(context.Context, broker.Message) error {
+			calls++
+			return nil
+		})
+
+	// The disposition still stands: the work is done, so the message acks.
+	if err := h(ctx, broker.Message{ID: "msg-A", Type: "order.placed"}); err != nil {
+		t.Fatalf("a MarkSeen failure must not nack work that succeeded: %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("handler ran %d times, want 1", calls)
+	}
+
+	out := buf.String()
+	if !strings.Contains(out, "inbox mark failed") {
+		t.Errorf("a MarkSeen failure was swallowed — nothing was logged:\n%s", out)
+	}
+	// Naming both is the whole point: without them an operator cannot tell
+	// WHICH subscription lost idempotency, and every subscription shares a
+	// store.
+	for _, want := range []string{"fulfillment/on-order-placed", "msg-A"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the report does not name %q:\n%s", want, out)
+		}
+	}
+}
+
+// TestASuppressedDuplicateSaysSo — the other half of defect 4's silence. A
+// duplicate is acked without invoking the handler and, until now, without a
+// word, so "my consumer never ran" and "my consumer ran and was suppressed"
+// looked identical from the outside. DEBUG, not INFO: on a redelivering
+// broker this is routine.
+func TestASuppressedDuplicateSaysSo(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	ctx := log.WithLogger(context.Background(),
+		slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+
+	store := inbox.NewMemoryStore()
+	calls := 0
+	h := broker.Deduplicate("fulfillment/on-order-placed", store, time.Hour)(
+		func(context.Context, broker.Message) error {
+			calls++
+			return nil
+		})
+
+	msg := broker.Message{ID: "msg-B", Type: "order.placed"}
+	if err := h(ctx, msg); err != nil {
+		t.Fatalf("first delivery: %v", err)
+	}
+	if err := h(ctx, msg); err != nil {
+		t.Fatalf("redelivery must ack: %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("handler ran %d times, want 1 — dedupe did not suppress", calls)
+	}
+
+	out := buf.String()
+	if !strings.Contains(out, "duplicate suppressed") {
+		t.Errorf("the suppression was silent:\n%s", out)
+	}
+	for _, want := range []string{"fulfillment/on-order-placed", "msg-B"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the report does not name %q:\n%s", want, out)
+		}
+	}
+}
+
 func TestRetryObservesCancellationDuringWaits(t *testing.T) {
 	t.Parallel()
 

@@ -154,3 +154,85 @@ func TestAnAlreadyStampedTraceIsNotOverwritten(t *testing.T) {
 		t.Fatal("the message never arrived")
 	}
 }
+
+// extractingTracer records what Extract was asked for and marks the context,
+// so a test can tell whether the consumer chain ever CONSULTED it — the
+// question the whole propagation story turns on.
+type extractingTracer struct {
+	tracer
+	asked     []string
+	extracted bool
+}
+
+type extractedKey struct{}
+
+func (t *extractingTracer) Extract(ctx context.Context, get func(key string) string) context.Context {
+	tp := get("traceparent")
+	t.asked = append(t.asked, tp)
+	if tp == "" {
+		return ctx
+	}
+	t.extracted = true
+	return context.WithValue(ctx, extractedKey{}, tp)
+}
+
+// TestTheConsumerChainContinuesTheProducersTrace — field test #11, defect 3.
+//
+// InjectTrace had a caller and worked; TraceExtract only stashed the headers
+// with broker.WithDeliveryHeaders, and DeliveryHeaders had ZERO non-test
+// readers in the repository. app.Telemetry.Extract was called from exactly one
+// place, transport/http's edge. So trace context travelled INTO a message and
+// never came back out: every consumer span began a new root, and the one
+// question tracing is bought for — what did this request cause — had no
+// answer past the first broker hop.
+//
+// README: "OTel wiring: handlers, HTTP and broker propagation instrumented by
+// one import."
+func TestTheConsumerChainContinuesTheProducersTrace(t *testing.T) {
+	t.Parallel()
+
+	tel := &extractingTracer{}
+	var seen any
+	h := broker.TraceExtract()(func(ctx context.Context, _ broker.Message) error {
+		seen = ctx.Value(extractedKey{})
+		return nil
+	})
+
+	ctx := app.WithTelemetry(context.Background(), tel)
+	msg := broker.Message{ID: "m-1", Headers: map[string]string{"traceparent": "00-place-order"}}
+	if err := h(ctx, msg); err != nil {
+		t.Fatalf("handle: %v", err)
+	}
+
+	if !tel.extracted {
+		t.Fatalf("the chain never called Telemetry.Extract — asked for %v", tel.asked)
+	}
+	if seen != "00-place-order" {
+		t.Errorf("the handler ran on a context that does not continue the producer's trace: got %v", seen)
+	}
+}
+
+// TestTraceExtractWithoutTelemetryIsAPassThrough — an uninstrumented service
+// pays one nil check, the same bargain InjectTrace makes on the publish side.
+func TestTraceExtractWithoutTelemetryIsAPassThrough(t *testing.T) {
+	t.Parallel()
+
+	called := false
+	h := broker.TraceExtract()(func(ctx context.Context, _ broker.Message) error {
+		called = true
+		if got := broker.DeliveryHeaders(ctx); got["traceparent"] != "00-x" {
+			t.Errorf("the delivery headers were not seeded: %v", got)
+		}
+		return nil
+	})
+	err := h(context.Background(), broker.Message{
+		ID:      "m-1",
+		Headers: map[string]string{"traceparent": "00-x"},
+	})
+	if err != nil {
+		t.Fatalf("handle: %v", err)
+	}
+	if !called {
+		t.Fatal("the handler never ran")
+	}
+}
