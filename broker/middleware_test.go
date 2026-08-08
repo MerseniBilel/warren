@@ -1150,3 +1150,65 @@ func TestADiscardedMessageIsLogged(t *testing.T) {
 		})
 	}
 }
+
+// TestReplayingADeadLetterNeedsANewMessageID — field test #10, defect 2.
+// GETTING_STARTED says a DLQ topic is ordinary and "that is how you inspect
+// and replay". Republishing the preserved envelope to its ORIGIN topic with
+// its original id is silently discarded: Deduplicate sits outside DeadLetter
+// and DeadLetter returns nil once it has published, so the id is marked seen
+// for a message whose work never happened.
+//
+// That suppression is CORRECT for a broker redelivery — the message is
+// already preserved in the DLQ, and handling it twice is what the inbox
+// exists to prevent. It is wrong only for a deliberate replay, and the
+// difference is the id. So the contract is: replay under a NEW message id.
+func TestReplayingADeadLetterNeedsANewMessageID(t *testing.T) {
+	t.Parallel()
+
+	handled := 0
+	fail := true
+	store := inbox.NewMemoryStore()
+	// A publisher that cannot redeliver — broker/memory's shape, and the
+	// scaffold's default. On one that CAN, an exhausted CONTENTION nacks
+	// instead and never reaches the DLQ.
+	dlq := &droppingPublisher{capturePublisher: &capturePublisher{}}
+	h, _ := broker.Pipeline("sub-user-events", "user.events",
+		func(context.Context, broker.Message) error {
+			if fail {
+				return werrors.Contention("lost the race")
+			}
+			handled++
+			return nil
+		}, store, dlq, broker.WithRetry(zeroDelay{max: 2}))
+
+	// Dead-letter it.
+	if err := h(context.Background(), msg("m-1")); err != nil {
+		t.Fatalf("the message was not preserved: %v", err)
+	}
+	if n := len(dlq.dlq("user.events.dlq")); n != 1 {
+		t.Fatalf("dead-lettered %d, want 1", n)
+	}
+
+	// The cause is fixed. Replaying the SAME id does nothing, silently.
+	fail = false
+	if err := h(context.Background(), msg("m-1")); err != nil {
+		t.Fatalf("replay: %v", err)
+	}
+	if handled != 0 {
+		t.Errorf("a same-id replay ran the handler %d time(s) — the inbox is supposed to suppress it", handled)
+	}
+
+	// A NEW id is the replay that works, and it is what the docs must say.
+	if err := h(context.Background(), msg("m-1-replay")); err != nil {
+		t.Fatalf("replay under a new id: %v", err)
+	}
+	if handled != 1 {
+		t.Errorf("replay under a new id ran the handler %d time(s), want 1", handled)
+	}
+}
+
+// droppingPublisher declares that a nack is a drop, so DeadLetter preserves
+// instead of returning the message to a broker that would lose it.
+type droppingPublisher struct{ *capturePublisher }
+
+func (droppingPublisher) Redelivers() bool { return false }

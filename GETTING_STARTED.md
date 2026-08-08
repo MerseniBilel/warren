@@ -675,7 +675,7 @@ A consumer's error decides its own fate, by its `warren/errors` code —
 | Code | What happens |
 |---|---|
 | `NOT_FOUND`, `CONFLICT` | acked. The work is already done, or was never possible. |
-| `CONTENTION` | nacked and redelivered. The work was **not** done — a conditional write matched no row — so acking it would destroy a message whose effect never happened. This row is why a repository must return `errors.Contention` and not `errors.Conflict` for a lost version race. |
+| `CONTENTION` | nacked and redelivered — or dead-lettered once the retries are spent, if the broker cannot redeliver, which `broker/memory` cannot and the scaffold defaults to. The work was **not** done — a conditional write matched no row — so acking it would destroy a message whose effect never happened. This row is why a repository must return `errors.Contention` and not `errors.Conflict` for a lost version race. |
 | `UNAVAILABLE` | retried with backoff, then nacked so the broker redelivers — **or dead-lettered, if the broker cannot redeliver**. See below. |
 | everything else | retried, then **dead-lettered**. |
 
@@ -686,13 +686,31 @@ happened: `warren-origin-topic`, `warren-error-code`, `warren-error`,
 the alert, and it is the one consumer event that should wake someone up.
 
 **A DLQ topic is an ordinary topic.** There is no special API — you consume it
-the way you consume anything else, which is how you inspect and replay:
+the way you consume anything else, which is how you inspect it:
 
 ```go
 broker.Pipeline("notes.dlq_watch", "note.written.dlq", handle, store, pub,
     broker.WithoutDedupe(),   // the inbox already saw these ids
 )
 ```
+
+**Replaying onto the ORIGIN topic needs a new message id.** That comment
+above is the whole reason: the inbox marked the id seen when the message was
+dead-lettered, so republishing the preserved envelope unchanged is
+**silently discarded** — `Publish` returns nil, the handler never runs, and
+nothing says so. A field test hit exactly that.
+
+The suppression is right for a *redelivery* — the message is already
+preserved, and handling it twice is what the inbox exists to prevent. It is
+wrong only for a deliberate replay, and the difference is the id:
+
+```go
+m := dead                       // the envelope off the .dlq topic
+m.ID = dead.ID + "-replay-1"    // a NEW id, or the inbox drops it
+_ = pub.Publish(ctx, m.Headers["warren-origin-topic"], m)
+```
+
+Keep the original id in a header if you want to trace the two together.
 
 **On the in-process broker, `<topic>.dlq` has no subscriber unless you write
 one** — so the ERROR log is your only record. That is the honest limit of a
