@@ -222,9 +222,11 @@ contract now.
 - [x] `warren new` — a scaffold that compiles and tests against today's
       framework, with the CI gate that builds it (the anti-rot mechanism)
 - [x] `warren version`; core tagged v0.1.0 so a scaffold's go.mod resolves
-- [ ] `warren g module|entity|command|repository|consumer` — golden-file
+- [x] `warren g module|entity|command|repository|consumer` — golden-file
       tested, idempotent, stdlib AST editing (no `dst`: it has published no
-      releases and sat untouched through Go 1.19–1.27)
+      releases and sat untouched through Go 1.19–1.27), and everything the
+      five write compiles, vets and passes its own tests in a real project
+      on every CI run
 - [x] `warren lint arch` — the layer rule and the cross-module rule, read
       from the import graph; works on a project that does not compile; runs
       in Warren's own CI over Warren, same binary *(`--rules=rings` next)*

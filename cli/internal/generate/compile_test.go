@@ -65,6 +65,29 @@ func TestGeneratedCodeCompilesAndPasses(t *testing.T) {
 		{"g consumer notification InvoiceVoided", func() (string, error) {
 			return generate.Consumer(generate.Options{Dir: dir, Module: "notification", Name: "InvoiceVoided"})
 		}},
+		// A route whose wildcards are NOT named "id". Those become fields
+		// called TenantID and LineID, and the generated TEST used to say
+		// `application.VoidLine{ID: …}` regardless — so this exact command
+		// produced a package that did not compile:
+		//
+		//   vet: void_line_test.go:22:66: unknown field ID in struct
+		//        literal of type application.VoidLine
+		//
+		// Every other case here uses the derived route, which has no
+		// wildcard at all, so nothing noticed.
+		{"g command user VoidLine --route /tenants/{tenantId}/lines/{lineId}", func() (string, error) {
+			return generate.Command(generate.Options{
+				Dir: dir, Module: "user", Name: "VoidLine",
+				Route: "/tenants/{tenantId}/lines/{lineId}",
+			})
+		}},
+		// And a --method, since the verb reaches controller.go.
+		{"g command user ArchiveUser --route /users/{id}/archive --method put", func() (string, error) {
+			return generate.Command(generate.Options{
+				Dir: dir, Module: "user", Name: "ArchiveUser",
+				Route: "/users/{id}/archive", Method: "put",
+			})
+		}},
 		// The Postgres repository, which is the whole reason this test
 		// exists: its three rules — RequireTx, db(ctx), persistence.Track —
 		// are enforced by no compiler, so the only thing standing between a
