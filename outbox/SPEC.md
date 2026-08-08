@@ -358,10 +358,24 @@ names none.
     default leader-election mechanism implies a default database, which
     question 1 says core cannot know about.
 11. ~~**Two leader-election mechanisms exist with no shared abstraction.**~~
-    **RESOLVED (2026-08-05):** there is only one. `warren/jobs` was DROPPED —
-    a scheduler is an ordinary `lifecycle.Hook` — so `jobs.LeaderOnly()` does
-    not exist and never will. `outbox.Elector` is the single port, and a
-    scheduler that wants leader-only injects the same one.
+    **RESOLVED (2026-08-05), and the resolution was WRONG — corrected
+    2026-08-08.** `warren/jobs` stays dropped: a scheduler is an ordinary
+    `lifecycle.Hook`. But "a scheduler that wants leader-only injects the
+    same one" is the sentence that produced a blocking defect. One
+    `Elector` is ONE lock: a field test injected it into an SLA sweeper
+    alongside the relay, and whichever goroutine woke first took the lock
+    while the other did nothing for the process lifetime — four runs, two
+    each way, both reporting `/readyz` 200.
+
+    An architect ruling (2026-08-08) settled it: `outbox.Electors` is a
+    second core port that MINTS leaderships by name, implemented by the same
+    advisory lock, with zero new exported identifiers in
+    `persistence/postgres`. A name is a leadership; components with
+    different names lead simultaneously, components sharing one contend, and
+    the relay's own name is reserved so asking for it is a boot failure.
+    `di.Named` could not have helped — it renames what diagnostics print,
+    not what the container resolves — so two of something has to be two
+    types, or one type that mints many.
 12. **Is the relay's flush bounded?** §2.3 step 6 sets a 30s force-exit
     deadline; whether a flush with a large backlog is capped by a per-hook
     timeout (`lifecycle.Hook.Timeout`, §2.3) or by that deadline is unstated.

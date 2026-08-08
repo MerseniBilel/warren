@@ -471,7 +471,7 @@ func TestASecondLeadOnOneElectorIsRefused(t *testing.T) {
 	if err == nil {
 		t.Fatal("a second Lead on one elector was accepted — one of the two would silently never run")
 	}
-	for _, want := range []string{"competing for one leadership", "warren/outbox", "lock of its own"} {
+	for _, want := range []string{"competing for one leadership", "warren/outbox", "outbox.Electors"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("the diagnostic does not mention %q:\n%s", want, err)
 		}
@@ -533,5 +533,151 @@ func TestLeadershipTransitionsAreLoggedOnce(t *testing.T) {
 	el.sayOnce(ctx, false, "leadership released")
 	if !strings.Contains(buf.String(), "leadership released") {
 		t.Errorf("losing leadership was not logged: %s", buf.String())
+	}
+}
+
+// --- named leaderships ----------------------------------------------------
+
+func newTestElectors() *electors {
+	return newElectors(nil, lockConfig{key: "warren/outbox", retry: time.Hour})
+}
+
+// TestTheRelaysLeadershipIsReserved — asking for it by name would mean
+// competing with the relay for one lock, and the loser publishes nothing for
+// the life of the process. That is the defect Electors exists to answer, so
+// reaching it through the new API has to be a boot failure.
+func TestTheRelaysLeadershipIsReserved(t *testing.T) {
+	t.Parallel()
+
+	_, err := newTestElectors().Elector("warren/outbox")
+	if err == nil {
+		t.Fatal("the relay's own leadership was handed out")
+	}
+	for _, want := range []string{"warren/outbox", "relay", "LockKey"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the diagnostic does not mention %q:\n%v", want, err)
+		}
+	}
+}
+
+// TestRenamingTheRelaysLockMovesTheReservation — LockKey names the RELAY's
+// leadership. A registry that reserved the literal default instead would let
+// a renamed relay be shadowed.
+func TestRenamingTheRelaysLockMovesTheReservation(t *testing.T) {
+	t.Parallel()
+
+	e := newElectors(nil, lockConfig{key: "svc/relay", retry: time.Hour})
+	if _, err := e.Elector("svc/relay"); err == nil {
+		t.Error("the renamed relay leadership was handed out")
+	}
+	if _, err := e.Elector("warren/outbox"); err != nil {
+		t.Errorf("the DEFAULT name is not reserved once the relay was renamed: %v", err)
+	}
+}
+
+func TestTwoComponentsCannotClaimOneLeadership(t *testing.T) {
+	t.Parallel()
+
+	e := newTestElectors()
+	if _, err := e.Elector("sla-sweeper"); err != nil {
+		t.Fatalf("first claim: %v", err)
+	}
+	if _, err := e.Elector("sla-sweeper"); err == nil {
+		t.Fatal("one leadership was claimed twice — one of the two would never run")
+	}
+}
+
+func TestDistinctLeadershipsGetDistinctLocks(t *testing.T) {
+	t.Parallel()
+
+	e := newTestElectors()
+	a, err := e.Elector("sweeper")
+	if err != nil {
+		t.Fatalf("Elector: %v", err)
+	}
+	b, err := e.Elector("reconciler")
+	if err != nil {
+		t.Fatalf("Elector: %v", err)
+	}
+	ka := a.(advisoryLock).cfg.key
+	kb := b.(advisoryLock).cfg.key
+	if ka == kb {
+		t.Fatalf("both leaderships took the key %q", ka)
+	}
+	if lockKey(ka) == lockKey(kb) {
+		t.Errorf("distinct names hashed to one lock: %d", lockKey(ka))
+	}
+	// Independent flags, or one elector reports the other's transitions and
+	// the busy guard fires across unrelated components.
+	if a.(advisoryLock).busy == b.(advisoryLock).busy {
+		t.Error("two leaderships share one busy flag")
+	}
+	if a.(advisoryLock).state == b.(advisoryLock).state {
+		t.Error("two leaderships share one transition state")
+	}
+}
+
+// TestTwoNamesThatHashToOneLockAreRefused — Postgres locks an int64, so the
+// name is hashed. Two names colliding would share a single leadership without
+// either knowing, which is the exact failure naming them prevents. It is
+// vanishingly unlikely over 64 bits and costs one map lookup to refuse.
+func TestTwoNamesThatHashToOneLockAreRefused(t *testing.T) {
+	t.Parallel()
+
+	e := newTestElectors()
+	if _, err := e.Elector("first"); err != nil {
+		t.Fatalf("Elector: %v", err)
+	}
+	// Forge the collision rather than search for one: the check is what is
+	// under test, not FNV's distribution.
+	e.byKey[lockKey("second")] = "first"
+
+	_, err := e.Elector("second")
+	if err == nil {
+		t.Fatal("two names hashing to one lock were both accepted")
+	}
+	if !strings.Contains(err.Error(), "hash to one lock") {
+		t.Errorf("the diagnostic does not explain:\n%v", err)
+	}
+}
+
+func TestAnUnnamedLeadershipIsRefusedByThePostgresRegistry(t *testing.T) {
+	t.Parallel()
+
+	if _, err := newTestElectors().Elector(""); err == nil {
+		t.Fatal("an empty leadership name was accepted")
+	}
+}
+
+// TestContentionIsLoggedNotOnlyReturned — field test #8, defect 3. Lead
+// BLOCKS for the duration of leadership, so the obvious spelling is
+// `go el.Lead(ctx, fn)`, and `go f()` has nowhere to put a return value. The
+// tester wrote exactly that: nine log lines, none about leadership, the
+// component never ran, /readyz 200. The best diagnostic in the package was
+// reachable only from code that did not need it.
+func TestContentionIsLoggedNotOnlyReturned(t *testing.T) {
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	el := advisoryLock{
+		cfg:   lockConfig{key: "warren/outbox", retry: time.Hour},
+		busy:  &atomic.Bool{},
+		state: &atomic.Int32{},
+	}
+	el.busy.Store(true) // as a live Lead would leave it
+
+	// The return value is DISCARDED, exactly as `go el.Lead(...)` discards it.
+	_ = el.Lead(context.Background(), func(context.Context) error { return nil })
+
+	if !strings.Contains(buf.String(), "leadership contended") {
+		t.Errorf("a discarded refusal left no trace in the log: %s", buf.String())
+	}
+	if !strings.Contains(buf.String(), `"lock_key":"warren/outbox"`) {
+		t.Errorf("the line does not name the lock: %s", buf.String())
+	}
+	if !strings.Contains(buf.String(), "ERROR") {
+		t.Errorf("a component that will never run was not logged at ERROR: %s", buf.String())
 	}
 }

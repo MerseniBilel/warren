@@ -194,6 +194,17 @@ func newBroker() brokerPorts {
 // at boot naming both — which is the framework telling you step 2 is missing.
 func elector() outbox.Elector { return outbox.Standalone() }
 
+// Leader-only work of your OWN — a sweeper, a reconciler — does not take the
+// elector above. That one is the relay's, and an elector is one lock: sharing
+// it means whichever of the two wakes first runs and the other never does.
+// Inject outbox.Electors (postgres.WithAdvisoryLock provides it) and name
+// your own leadership:
+//
+//	el, err := electors.Elector("billing/sweeper")
+//
+// Mark the component warren.Eager: nothing consumes a sweeper, and an
+// unconsumed provider is never built.
+
 // newRelay drains the outbox to the broker. It registers its own lifecycle
 // hook — the documented pattern for anything created at boot, since
 // warren.OnStart takes a closure fixed at declaration time.

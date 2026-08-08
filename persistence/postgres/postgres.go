@@ -27,7 +27,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -178,15 +177,22 @@ func Module(opts ...Option) warren.Module {
 	}
 	if cfg.lock != nil {
 		lk := *cfg.lock
+		maxConns := cfg.maxConns
 		opts2 = append(opts2,
-			warren.Providers(func(p *pool) outbox.Elector {
-				return advisoryLock{
-					pool: p, cfg: lk,
-					busy:  &atomic.Bool{},
-					state: &atomic.Int32{},
-				}
-			}),
+			warren.Providers(
+				func(p *pool, lc lifecycle.Lifecycle) *electors {
+					e := newElectors(p, lk)
+					e.warnOnPoolPressure(lc, maxConns)
+					return e
+				},
+				// Two types from one registry. The relay keeps taking an
+				// outbox.Elector — it needs one leadership and knows nothing
+				// about names — while anything else asks for its own.
+				func(e *electors) outbox.Electors { return e },
+				func(e *electors) outbox.Elector { return e.relay() },
+			),
 			warren.Exports[outbox.Elector](),
+			warren.Exports[outbox.Electors](),
 		)
 	}
 	return warren.NewModule(ModuleName, opts2...)

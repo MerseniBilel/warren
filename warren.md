@@ -1796,6 +1796,13 @@ type Waiter interface { Wait(ctx context.Context) }  // optional: appending is t
 func JSONEncoder(opts ...EncodeOption) Encoder       // Key = AggregateID
 type Elector interface { Lead(ctx, fn func(context.Context) error) error }
 func Standalone() Elector                            // always leads; warns with replicas
+
+// A NAME is a leadership. Different names lead at the same time on one
+// replica; the same name contends. One Elector is ONE lock, so anything that
+// must run leader-only ALONGSIDE the relay mints its own — claimed from a
+// CONSTRUCTOR, so a clash is a boot failure naming both claimants.
+type Electors interface { Elector(name string) (Elector, error) }
+func StandaloneElectors() Electors                   // always leads; each one says so, once
 func NewRelay(store Store, pub broker.Publisher, opts ...RelayOption) *Relay
 func (r *Relay) DrainOnce(ctx context.Context) (int, error)
 func NewMemoryStore(opts ...MemoryOption) Store      // test / modular-monolith only
@@ -1944,7 +1951,15 @@ The outbox, inbox and elector are OPTIONS of `Module` — `WithOutbox()`, `WithI
 
 `WithAdvisoryLock()` is HALF of multi-replica correctness, and the half that
 does nothing alone: it makes the adapter PROVIDE an `outbox.Elector`, and the
-relay uses it only if that is the elector it receives. Measured on two
+relay uses it only if that is the elector it receives.
+
+It provides and exports **two** types. `outbox.Elector` is the relay's own
+leadership; `outbox.Electors` mints any others by name, so leader-only work
+runs ALONGSIDE the relay rather than fighting it for one lock. The relay's
+name is reserved — `Elector("warren/outbox")` is a boot failure — and two
+names that hash to one lock are refused rather than silently shared. Each
+LEADING elector holds one pooled connection for as long as it leads, so the
+module warns at boot when the leaderships claimed exceed half of `MaxConns`. Measured on two
 replicas over one database — 20 events published **40 times** without it, 20
 times with it, and a killed leader recovered in under five seconds with the
 lock moving to the survivor's backend.
@@ -2256,11 +2271,36 @@ The outbox relay, every consumer subscription, the HTTP server and the
 Postgres pool all register exactly this way, and §1.3 step 6 was never amended
 for any of them. `TestABackgroundLoopNeedsNoOrderingAmendment` pins it.
 
-**Leader election ships and is already shared.** `outbox.Elector` is a core
-port — `Lead(ctx, fn) error`, precisely a scheduler's shape — and
+**Leader election ships, and it is NAMED.** `outbox.Elector` is a core port —
+`Lead(ctx, fn) error`, precisely a scheduler's shape — and
 `postgres.WithAdvisoryLock()` provides AND exports an implementation into the
-container. Inject it and wrap the loop; that is `LeaderOnly()`, with no second
-mechanism.
+container.
+
+This paragraph used to end "inject it and wrap the loop; that is
+`LeaderOnly()`, with no second mechanism", and that sentence produced a
+blocking defect. **One `Elector` is ONE lock.** A field test injected the
+relay's into an SLA sweeper, exactly as instructed; whichever goroutine woke
+first took the lock and the other did nothing for the life of the process —
+four runs, two each way, both reporting `/readyz` 200.
+
+So a scheduler mints its own:
+
+```go
+func newSLASweeper(electors outbox.Electors, lc lifecycle.Lifecycle) (*SLASweeper, error) {
+    el, err := electors.Elector("ticket/sla-sweeper")   // its OWN leadership
+    if err != nil { return nil, err }
+    ...
+}
+```
+
+Claim it from a CONSTRUCTOR: a clash is then a boot failure naming both
+claimants, and the relay's own name is reserved, so asking for it fails
+rather than quietly competing. Injecting `outbox.Elector` for anything other
+than the relay is the mistake.
+
+**And mark it `warren.Eager`.** Nothing consumes a sweeper, and an
+unconsumed provider is never built — a green boot that never sweeps is the
+same silence by another route.
 
 **A job is a trigger, not a handler type.** There is no `Job` type and no
 `Handler[struct{}, struct{}]` — a tick has neither request nor response. The
@@ -2437,7 +2477,7 @@ All generators support `--dry-run` and `--force`.
 | Auth | `golang-jwt/jwt/v5`, `coreos/go-oidc` | Wrap | **v0.2, audits outstanding.** The identity type is NOT here: `app.Identity` ships in v0.1 core, stdlib only, zero third-party (§3.2) |
 | Resilience | **none — module DROPPED 2026-08-05** | Build | Retry and timeout are core-ring and ship in `app`/`broker`, stdlib only. The breaker and limiter guard OUTBOUND calls and live in the user's `infrastructure/` adapter. **Audited 2026-08-05, none adopted:** `sony/gobreaker/v2` v2.4.0 (2026-01-01), MIT, not archived, 3674★, zero runtime deps, generic, **two lines to use** — fewer than any wrapper. `golang.org/x/time/rate` v0.15.0 (2026-02-11), BSD-3, **no require block at all** — `http.Middleware`'s stdlib shape takes it unmodified. **`cenkalti/backoff/v4` REJECTED**: three majors stale (default branch is v7; v4.3.0 dates to 2024-01-02) *and* redundant — `broker.ExponentialBackoff` is 20 lines of core with full jitter and an overflow guard. **`failsafe-go` REJECTED** (v0.9.6, 2026-02-09): richest policy set and the only both-directions API, but one module requiring `google.golang.org/grpc` + `protobuf`, so those enter the graph whether or not you import them — disqualifying against §1.7. **`go-kratos/aegis` REJECTED** (v0.2.0, **2023-05-08**, 7 direct requires): kratos v3 dropped it too |
 | Mongo | **none adopted** | — | The design round CLOSED 2026-08-05: the port needs no change and a driver is additive, certified by the exported `RunContract`/`RunVersionedContract`. **Audited 2026-08-05:** `go.mongodb.org/mongo-driver/v2` v2.8.0 (2026-07-10), **Apache-2.0** — the SSPL question is about the SERVER, not the driver — not archived, 8535★, pushed 2026-08-05, 19 open issues. Healthy, and not the reason to wait: v2's session rides on `context.Context`, so no driver type reaches a signature |
-| Cron / jobs | **none — module DROPPED 2026-08-05** | Build | A scheduler is an ordinary `lifecycle.Hook`; `outbox.Elector` + `postgres.WithAdvisoryLock()` already give leader-only, provided and exported. **`robfig/cron/v3` REJECTED**: MIT, 14165★, **not archived** — and that is the trap. Its last release `v3.0.1` is tagged at a commit dated **2020-01-04**, its last commit on master is **2021-01-06**, `/releases/latest` returns **404** (no release object exists at all), and its `go.mod` declares **`go 1.12`**. `pushed_at: 2024-07-08` is repo metadata, not code. That is §9's httprouter rejection, three years worse, under a framework targeting Go 1.27. **`go-co-op/gocron/v2` REJECTED** (v2.22.0, 2026-07-09, 7126★, MIT, genuinely healthy): it **requires `robfig/cron/v3 v3.0.1`** transitively, and ships its own scheduler lifecycle, `Elector` and `Locker` — a second lifecycle beside `warren/lifecycle`, which is the one line this ledger rejected `fx` on. **`river` (MPL-2.0) / `asynq` (MIT) not adopted**: queues, not schedulers, and outbound — the user's `infrastructure/` |
+| Cron / jobs | **none — module DROPPED 2026-08-05** | Build | A scheduler is an ordinary `lifecycle.Hook`; `outbox.Electors` + `postgres.WithAdvisoryLock()` give leader-only BY NAME, provided and exported. (Until 2026-08-08 this row said `outbox.Elector` singular, and that was the defect: one elector is one lock, so a scheduler injecting it starved either itself or the relay.) **`robfig/cron/v3` REJECTED**: MIT, 14165★, **not archived** — and that is the trap. Its last release `v3.0.1` is tagged at a commit dated **2020-01-04**, its last commit on master is **2021-01-06**, `/releases/latest` returns **404** (no release object exists at all), and its `go.mod` declares **`go 1.12`**. `pushed_at: 2024-07-08` is repo metadata, not code. That is §9's httprouter rejection, three years worse, under a framework targeting Go 1.27. **`go-co-op/gocron/v2` REJECTED** (v2.22.0, 2026-07-09, 7126★, MIT, genuinely healthy): it **requires `robfig/cron/v3 v3.0.1`** transitively, and ships its own scheduler lifecycle, `Elector` and `Locker` — a second lifecycle beside `warren/lifecycle`, which is the one line this ledger rejected `fx` on. **`river` (MPL-2.0) / `asynq` (MIT) not adopted**: queues, not schedulers, and outbound — the user's `infrastructure/` |
 | Testing | none — stdlib + core | Build | `testify` and `testcontainers-go` were both budgeted and neither adopted: assertions are `if got != want`, and Docker fixtures wait for `warren/testing/containers`, its own module. |
 | CLI | `cobra` | Vendor | build-time only |
 

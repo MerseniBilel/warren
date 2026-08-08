@@ -4,9 +4,13 @@ import (
 	"context"
 	"fmt"
 	"hash/fnv"
+	"sort"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/MerseniBilel/warren/lifecycle"
 	wlog "github.com/MerseniBilel/warren/log"
 	"github.com/MerseniBilel/warren/outbox"
 )
@@ -96,11 +100,10 @@ func errLeadershipContended(key string) error {
 			"    advisory lock — %q. Only one of them can ever hold it, so the\n"+
 			"    other does nothing for the lifetime of the process, and which\n"+
 			"    one loses is decided by whichever goroutine woke first.\n\n"+
-			"  Leader-only work that must run ALONGSIDE the outbox relay needs\n"+
-			"  its own lock, not a share of the relay's. Until Warren exports a\n"+
-			"  second elector, run that work on the leader you already have —\n"+
-			"  inside the function you pass to the relay's Lead — or give it a\n"+
-			"  lock of its own with pg_try_advisory_lock on a key you choose.",
+			"  Leader-only work that runs ALONGSIDE the outbox relay needs its own\n"+
+			"  leadership. Inject outbox.Electors and name one:\n\n"+
+			"      el, err := electors.Elector(\"ticket/sla-sweeper\")\n\n"+
+			"  Two leaderships lead at the same time, on the same replica.",
 		key))
 }
 
@@ -115,7 +118,17 @@ var _ outbox.Elector = advisoryLock{}
 // most replicas.
 func (l advisoryLock) Lead(ctx context.Context, fn func(context.Context) error) error {
 	if l.busy != nil && !l.busy.CompareAndSwap(false, true) {
-		return errLeadershipContended(l.cfg.key)
+		err := errLeadershipContended(l.cfg.key)
+		// LOGGED as well as returned. Lead BLOCKS for the duration of
+		// leadership, so the obvious spelling is `go el.Lead(ctx, fn)` — and
+		// `go f()` has nowhere to put a return value. A field test wrote
+		// exactly that and got nine log lines, none of them about
+		// leadership, while the component never ran and /readyz said 200.
+		// The best diagnostic in this package was reachable only by code
+		// that did not need it.
+		wlog.FromContext(ctx).ErrorContext(ctx, "leadership contended",
+			"module", ModuleName, "lock_key", l.cfg.key, "error", err.Error())
+		return err
 	}
 	if l.busy != nil {
 		defer l.busy.Store(false)
@@ -222,4 +235,173 @@ func lockKey(name string) int64 {
 	h := fnv.New64a()
 	_, _ = h.Write([]byte(name))
 	return int64(h.Sum64())
+}
+
+// --- named leaderships ----------------------------------------------------
+
+// electors is the registry behind outbox.Electors: one advisory lock per
+// NAME, all on the same connection pool.
+//
+// It claims names at construction rather than at Lead, so two components
+// asking for the same leadership is a boot failure naming both, instead of
+// one of them silently never running — which is the defect this whole type
+// exists to answer.
+type electors struct {
+	pool  *pool
+	cfg   lockConfig
+	mu    sync.Mutex
+	byKey map[int64]string // for the collision check, not for lookup
+	names map[string]bool
+}
+
+func newElectors(p *pool, cfg lockConfig) *electors {
+	e := &electors{
+		pool:  p,
+		cfg:   cfg,
+		byKey: map[int64]string{},
+		names: map[string]bool{},
+	}
+	// The relay's own leadership is claimed here, unconditionally, so that
+	// Elector("warren/outbox") is a boot failure rather than a component
+	// quietly fighting the relay for its lock.
+	e.names[cfg.key] = true
+	e.byKey[lockKey(cfg.key)] = cfg.key
+	return e
+}
+
+// relay returns the elector the outbox relay receives — the one holding the
+// key WithAdvisoryLock was configured with.
+func (e *electors) relay() outbox.Elector { return e.elector(e.cfg.key) }
+
+func (e *electors) Elector(name string) (outbox.Elector, error) {
+	if name == "" {
+		return nil, errUnnamedLeadership()
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if name == e.cfg.key {
+		return nil, errReservedLeadership(name)
+	}
+	if e.names[name] {
+		return nil, errLeadershipClaimed(name)
+	}
+	// FNV-1a is 64 bits, so a collision is vanishingly unlikely and
+	// catastrophic: two leaderships would silently share one lock, which is
+	// the original defect with no name to blame. It costs one map lookup to
+	// refuse instead.
+	k := lockKey(name)
+	if other, clash := e.byKey[k]; clash {
+		return nil, errLeadershipKeyCollision(name, other, k)
+	}
+	e.names[name] = true
+	e.byKey[k] = name
+	return e.elector(name), nil
+}
+
+// elector builds one, with its own busy and state flags: leaderships are
+// independent, so sharing either would make one report the other's
+// transitions.
+func (e *electors) elector(name string) outbox.Elector {
+	cfg := e.cfg
+	cfg.key = name
+	return advisoryLock{
+		pool: e.pool, cfg: cfg,
+		busy:  &atomic.Bool{},
+		state: &atomic.Int32{},
+	}
+}
+
+// claimed reports how many leaderships this registry has handed out,
+// including the relay's. Each one that LEADS holds a pooled connection for
+// as long as it leads.
+func (e *electors) claimed() int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return len(e.names)
+}
+
+func errUnnamedLeadership() error {
+	return diagnostic(
+		"✗ a leadership needs a name\n\n" +
+			"    Elector(\"\") was called. An unnamed leadership is one that every\n" +
+			"    unnamed claimant shares, so two components would contend for it\n" +
+			"    and one of them would silently never run.\n\n" +
+			"  Name it for the component that leads:\n\n" +
+			"      electors.Elector(\"ticket/sla-sweeper\")")
+}
+
+func errLeadershipClaimed(name string) error {
+	return diagnostic(fmt.Sprintf(
+		"✗ the leadership %q is already claimed\n\n"+
+			"    Two components in this process asked for the same leadership,\n"+
+			"    and a leadership has one holder — so one of them would never\n"+
+			"    run, and which one would be decided by whichever constructor\n"+
+			"    the container reached first.\n\n"+
+			"  Give them separate names. Leaderships are independent: two names\n"+
+			"  lead at the same time, on the same replica.",
+		name))
+}
+
+func errReservedLeadership(name string) error {
+	return diagnostic(fmt.Sprintf(
+		"✗ %q is the outbox relay's leadership\n\n"+
+			"    Taking it would mean competing with the relay for one lock, and\n"+
+			"    the loser publishes nothing for the life of the process.\n\n"+
+			"  Name your own:\n\n"+
+			"      electors.Elector(\"ticket/sla-sweeper\")\n\n"+
+			"  Two leaderships run at the same time on the same replica — that\n"+
+			"  is what makes them worth naming. If you meant to rename the\n"+
+			"  RELAY's, use postgres.LockKey(...).",
+		name))
+}
+
+func errLeadershipKeyCollision(name, other string, key int64) error {
+	return diagnostic(fmt.Sprintf(
+		"✗ two leaderships hash to one lock\n\n"+
+			"    %q and %q both become advisory lock %d.\n\n"+
+			"    Postgres locks an int64, so the name is hashed — and these two\n"+
+			"    would share a single leadership without either knowing, which\n"+
+			"    is the exact failure naming them was meant to prevent.\n\n"+
+			"  Rename one of them.",
+		name, other, key))
+}
+
+// warnOnPoolPressure says so at boot when the leaderships claimed could take
+// a serious share of the pool.
+//
+// Each LEADING elector holds one pooled connection for as long as it leads —
+// the session lock lives on that connection, which is what makes a crashed
+// leader's lock free itself with no lease and no clock. On the leader
+// replica that is one connection per leadership, permanently, and this file
+// has already produced one connection-exhaustion incident: relay waiters
+// held pooled connections until an idle service died MaxConns ticks after
+// boot, serving nothing, with one INFO line in the log.
+//
+// It warns rather than refuses, because the right number depends on how many
+// of these lead at once and only the operator knows that.
+func (e *electors) warnOnPoolPressure(lc lifecycle.Lifecycle, maxConns int32) {
+	lc.Append(lifecycle.Hook{
+		Name: ModuleName + "/electors",
+		OnStart: func(ctx context.Context) error {
+			n := e.claimed()
+			if maxConns <= 0 || int32(n)*2 <= maxConns {
+				return nil
+			}
+			e.mu.Lock()
+			names := make([]string, 0, len(e.names))
+			for name := range e.names {
+				names = append(names, name)
+			}
+			e.mu.Unlock()
+			sort.Strings(names)
+			wlog.FromContext(ctx).WarnContext(ctx, "leaderships could exhaust the connection pool",
+				"module", ModuleName,
+				"leaderships", n,
+				"max_conns", maxConns,
+				"names", strings.Join(names, ", "),
+				"risk", "each one holds a pooled connection for as long as it LEADS, so on the leader replica they are unavailable to every request",
+				"fix", "raise postgres.MaxConns, or run fewer leader-only components")
+			return nil
+		},
+	})
 }
