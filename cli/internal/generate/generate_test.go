@@ -799,6 +799,21 @@ func pgApp(t *testing.T) string {
 	return dir
 }
 
+// kafkaApp scaffolds a project whose broker is a MODULE rather than a set of
+// providers platform re-exports — the shape that made the generator's
+// adapter import wrong.
+func kafkaApp(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	if err := scaffold.New(scaffold.Options{
+		Dir: dir, Name: "myapp", ModulePath: "example.com/myapp", Version: "v0.1.0",
+		DB: "postgres", Broker: "kafka",
+	}); err != nil {
+		t.Fatalf("scaffold: %v", err)
+	}
+	return dir
+}
+
 // snakeOf mirrors the generator's own file naming for the test's file lookup.
 func snakeOf(s string) string {
 	var b strings.Builder
@@ -974,5 +989,59 @@ func TestAnUnknownMethodIsRefusedWithTheList(t *testing.T) {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("the diagnostic does not mention %q:\n%v", want, err)
 		}
+	}
+}
+
+// TestConsumerImportsTheBrokerAdapterModule — field test #8, defect 1. The
+// SAME defect as TestConsumerImportsTheAdapterModule above, on the broker
+// side, and the fix for the postgres side was never carried across.
+//
+// With --broker kafka the driver is a MODULE (platform.Broker()) rather than
+// providers platform re-exports, because a module may export only what its
+// own providers return. The scaffold's own notification/module.go gets this
+// right; the generator did not, so every generated consumer built cleanly
+// and then failed its boot:
+//
+//	✗ cannot resolve dependency
+//	    broker.Publisher └─ required by *orders.orderPlacedSubscription
+//
+// It happened on every consumer the tester generated.
+func TestConsumerImportsTheBrokerAdapterModule(t *testing.T) {
+	t.Parallel()
+
+	dir := kafkaApp(t)
+	if _, err := generate.Module(generate.Options{Dir: dir, Name: "orders"}); err != nil {
+		t.Fatalf("g module: %v", err)
+	}
+	if _, err := generate.Consumer(generate.Options{Dir: dir, Module: "orders", Name: "OrderPlaced"}); err != nil {
+		t.Fatalf("g consumer: %v", err)
+	}
+	src := read(t, dir, "internal/modules/orders/module.go")
+	if !strings.Contains(src, "platform.Broker()") {
+		t.Errorf("the consumer's module does not import the adapter that exports broker.Publisher:\n%s", src)
+	}
+	// And the scaffold's own consumer module is the reference for what this
+	// should look like — the two must not disagree in one project.
+	ref := read(t, dir, "internal/modules/notification/module.go")
+	if !strings.Contains(ref, "platform.Broker()") {
+		t.Fatalf("the scaffold's own consumer module changed shape; this test's premise is stale:\n%s", ref)
+	}
+}
+
+// TestMemoryBrokerProjectDoesNotImportBroker — with --broker memory the
+// driver is providers on platform, re-exported, so there is no platform.Broker
+// to import and adding one would not compile.
+func TestMemoryBrokerProjectDoesNotImportBroker(t *testing.T) {
+	t.Parallel()
+
+	dir := app(t)
+	if _, err := generate.Module(generate.Options{Dir: dir, Name: "orders"}); err != nil {
+		t.Fatalf("g module: %v", err)
+	}
+	if _, err := generate.Consumer(generate.Options{Dir: dir, Module: "orders", Name: "OrderPlaced"}); err != nil {
+		t.Fatalf("g consumer: %v", err)
+	}
+	if src := read(t, dir, "internal/modules/orders/module.go"); strings.Contains(src, "platform.Broker()") {
+		t.Errorf("a memory-broker project imported a platform.Broker that does not exist:\n%s", src)
 	}
 }

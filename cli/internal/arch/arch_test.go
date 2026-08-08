@@ -538,3 +538,145 @@ func Open() string { return auth.TenantOf(auth.Identity{}) }
 		t.Errorf("the documented fix does not satisfy the linter:\n%s", report.String())
 	}
 }
+
+// TestLayerViolationThroughAHelperIsAViolation — field test #8, defect 2.
+// The transitive check shipped for the TRANSPORT rule only, so the layer
+// rule stayed depth-1 and a package outside internal/modules/ laundered it:
+//
+//	$ warren lint arch
+//	No violations in 25 packages.
+//	LINT_EXIT=0
+//	$ go list -deps .../stock/application | grep -c stock/infrastructure
+//	1                      # it really does depend on it
+//
+// findTransportChains' own doc states the reasoning that applies verbatim
+// here: "the direct rule reads one file and is easy to satisfy by accident:
+// move the import into a helper and the check goes quiet."
+func TestLayerViolationThroughAHelperIsAViolation(t *testing.T) {
+	t.Parallel()
+
+	dir := fixture(t, map[string]string{
+		"internal/bridge/bridge.go": `package bridge
+
+import "example.com/fix/internal/modules/stock/infrastructure"
+
+func Repo() any { return infrastructure.New() }
+`,
+		"internal/modules/stock/infrastructure/repo.go": "package infrastructure\n\nfunc New() any { return nil }\n",
+		"internal/modules/stock/application/receive.go": `package application
+
+import "example.com/fix/internal/bridge"
+
+var _ = bridge.Repo
+`,
+	})
+
+	report, err := arch.Check(dir, arch.Options{Rules: arch.Layers})
+	if err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	if len(report.Violations) != 1 {
+		t.Fatalf("violations = %d, want 1:\n%s", len(report.Violations), report.String())
+	}
+	out := report.String()
+	for _, want := range []string{"internal/bridge", "stock/infrastructure", "stock/application"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the report does not name %q:\n%s", want, out)
+		}
+	}
+}
+
+// TestCrossModuleThroughAHelperIsAViolation — the same laundering, on the
+// rule that makes extracting a module a rewiring rather than a rewrite. The
+// field test used a TYPE ALIAS in the shared package, so the two modules
+// share literally the same Go type and the coupling is total.
+func TestCrossModuleThroughAHelperIsAViolation(t *testing.T) {
+	t.Parallel()
+
+	dir := fixture(t, map[string]string{
+		"internal/modules/stock/domain/item.go": "package domain\n\ntype Item struct{}\n",
+		"internal/shared/types.go": `package shared
+
+import "example.com/fix/internal/modules/stock/domain"
+
+type Item = domain.Item
+`,
+		"internal/modules/replenishment/application/demand.go": `package application
+
+import "example.com/fix/internal/shared"
+
+var _ shared.Item
+`,
+	})
+
+	report, err := arch.Check(dir, arch.Options{Rules: arch.Layers})
+	if err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	if len(report.Violations) != 1 {
+		t.Fatalf("violations = %d, want 1:\n%s", len(report.Violations), report.String())
+	}
+	if out := report.String(); !strings.Contains(out, "internal/shared") || !strings.Contains(out, "stock/domain") {
+		t.Errorf("the report does not name the chain:\n%s", out)
+	}
+}
+
+// TestAHelperUsedByOneModuleOnlyIsFine — a shared package that reaches into
+// NO other feature is ordinary code, and reporting it would make the rule
+// noise. This is the control: without it the check could pass by reporting
+// every helper.
+func TestAHelperUsedByOneModuleOnlyIsFine(t *testing.T) {
+	t.Parallel()
+
+	dir := fixture(t, map[string]string{
+		"internal/idgen/idgen.go": "package idgen\n\nfunc New() string { return \"\" }\n",
+		"internal/modules/stock/application/receive.go": `package application
+
+import "example.com/fix/internal/idgen"
+
+var _ = idgen.New
+`,
+		"internal/modules/stock/domain/item.go": "package domain\n\ntype Item struct{}\n",
+	})
+
+	report, err := arch.Check(dir, arch.Options{Rules: arch.Layers})
+	if err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	if len(report.Violations) != 0 {
+		t.Errorf("an innocent helper was reported:\n%s", report.String())
+	}
+}
+
+// TestALayeredIntermediateIsNotReportedTwice — a chain through a package
+// that is ITSELF layered is that package's own violation, reported at its
+// own import. Reporting it again at every package downstream turns one
+// mistake into a wall of findings.
+func TestALayeredIntermediateIsNotReportedTwice(t *testing.T) {
+	t.Parallel()
+
+	dir := fixture(t, map[string]string{
+		"internal/modules/stock/infrastructure/repo.go": "package infrastructure\n\nfunc New() any { return nil }\n",
+		"internal/modules/stock/domain/item.go": `package domain
+
+import "example.com/fix/internal/modules/stock/infrastructure"
+
+var _ = infrastructure.New
+`,
+		"internal/modules/stock/application/receive.go": `package application
+
+import "example.com/fix/internal/modules/stock/domain"
+
+var _ = domain.New
+`,
+	})
+
+	report, err := arch.Check(dir, arch.Options{Rules: arch.Layers})
+	if err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	// Exactly one: domain -> infrastructure. Not a second one at application.
+	if len(report.Violations) != 1 {
+		t.Errorf("violations = %d, want exactly 1 (domain's own):\n%s", len(report.Violations), report.String())
+	}
+}

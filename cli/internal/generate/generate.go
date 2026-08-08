@@ -220,8 +220,8 @@ func Repository(opts Options) (string, error) {
 	if driver == "postgres" {
 		// The generated repository injects postgres.DB, which only the
 		// adapter module exports.
-		if hasPlatformPostgres(opts.Dir) {
-			p.edits = append(p.edits, importAdapter(data, base))
+		if adapters := platformAdapters(opts.Dir, "Postgres"); len(adapters) > 0 {
+			p.edits = append(p.edits, importAdapter(data, base, adapters))
 		}
 		// The table is the user's to own, so it goes in the project's own
 		// migration directory rather than being invented at boot — Warren
@@ -470,10 +470,12 @@ func Consumer(opts Options) (string, error) {
 			{base, []string{data["Lower"] + "Subscription", "new" + opts.Name + "Subscription"}},
 		},
 	}
-	// The generated subscription injects inbox.Store, which in a --db postgres
-	// project only the adapter module exports.
-	if hasPlatformPostgres(opts.Dir) {
-		p.edits = append(p.edits, importAdapter(data, base))
+	// The generated subscription injects inbox.Store AND broker.Publisher.
+	// In a --db postgres project only the adapter module exports the first;
+	// in a --broker kafka project only the broker MODULE exports the second,
+	// because platform cannot pass on a port it merely imports.
+	if adapters := platformAdapters(opts.Dir, "Postgres", "Broker"); len(adapters) > 0 {
+		p.edits = append(p.edits, importAdapter(data, base, adapters))
 	}
 	return p.apply()
 }
@@ -493,18 +495,60 @@ func Consumer(opts Options) (string, error) {
 // Whether to add it is decided by what the PROJECT HAS, never by the
 // generator guessing: the symbol has to exist for the edit to compile, so
 // hasPlatformPostgres looks for its declaration.
-func importAdapter(data map[string]string, base string) edit {
+// The BROKER half was the same defect found again by field test #8, on a
+// project scaffolded with --broker kafka. There the driver is a MODULE
+// (platform.Broker()) rather than providers platform re-exports, because a
+// module may export only what its own providers return — so every generated
+// consumer built cleanly and then failed its boot on broker.Publisher. The
+// scaffold's own notification/module.go had it right the whole time; the
+// generator knew about one of the two shapes.
+func importAdapter(data map[string]string, base string, adapters []string) edit {
+	calls := make([]string, 0, len(adapters))
+	for _, a := range adapters {
+		calls = append(calls, "platform."+a+"()")
+	}
 	return edit{
 		path: base + "/module.go",
-		what: "import platform.Postgres()",
+		what: "import " + strings.Join(calls, " and "),
 		fn: func(src []byte) ([]byte, error) {
 			out, err := astedit.AddImport(src, data["Module"]+"/internal/platform")
 			if err != nil {
 				return nil, err
 			}
-			return astedit.AddArgument(out, "warren.Imports", "platform.Postgres()")
+			for _, call := range calls {
+				out, err = astedit.AddArgument(out, "warren.Imports", call)
+				if err != nil {
+					return nil, err
+				}
+			}
+			return out, nil
 		},
 	}
+}
+
+// platformAdapters returns which of the platform sub-modules a generated
+// module must import: the intersection of what it NEEDS and what the project
+// HAS. Never a guess — the symbol must exist for the edit to compile.
+func platformAdapters(dir string, need ...string) []string {
+	var have []string
+	for _, n := range need {
+		if declaresPlatform(dir, n) {
+			have = append(have, n)
+		}
+	}
+	return have
+}
+
+// declaresPlatform reports whether the project's platform module declares the
+// named sub-module — i.e. whether it was scaffolded with the driver that
+// makes one. A project without it must not have the import added: the
+// identifier would not resolve.
+func declaresPlatform(dir, name string) bool {
+	src, err := os.ReadFile(filepath.Join(dir, "internal/platform/module.go"))
+	if err != nil {
+		return false
+	}
+	return strings.Contains(string(src), "var "+name+" ")
 }
 
 // hasPlatformPostgres reports whether the project declares platform.Postgres

@@ -217,6 +217,7 @@ func Check(dir string, opts Options) (*Report, error) {
 
 	if opts.Rules&Layers != 0 {
 		findTransportChains(report, graph, site, modPath)
+		findLaunderedImports(report, graph, site, modPath)
 	}
 
 	sort.Slice(report.Violations, func(i, j int) bool {
@@ -227,6 +228,109 @@ func Check(dir string, opts Options) (*Report, error) {
 		return a.Line < b.Line
 	})
 	return report, nil
+}
+
+// findLaunderedImports reports a layer or cross-module violation committed
+// THROUGH a helper package rather than directly.
+//
+// The direct rules read one file each, which makes them easy to satisfy by
+// accident: move the import into a package outside internal/modules/ and the
+// check goes quiet while the dependency is exactly as real. A field test
+// proved both — an application layer reaching stock/infrastructure through
+// internal/bridge, and one feature reaching another's domain through a type
+// ALIAS in internal/shared, so the two modules share literally the same Go
+// type. `go list -deps` saw both; `warren lint arch` said "No violations"
+// and exited 0.
+//
+// Traversal goes through HELPERS ONLY — in-module packages that are neither
+// layered nor inside a feature. That is not a shortcut, it is the rule: a
+// layered intermediate breaks the rule at its own import and is reported
+// there, and reporting it again at every package downstream turns one
+// mistake into a wall of findings.
+func findLaunderedImports(report *Report, graph map[string][]string, site map[string]Violation, modPath string) {
+	// A package already reported directly needs no chain: the reader has the
+	// import.
+	direct := map[string]bool{}
+	for _, v := range report.Violations {
+		direct[v.Package+" "+v.Rule] = true
+	}
+
+	pkgs := make([]string, 0, len(graph))
+	for p := range graph {
+		pkgs = append(pkgs, p)
+	}
+	sort.Strings(pkgs)
+
+	for _, pkg := range pkgs {
+		layer, feature := layerOf(pkg), featureOf(pkg)
+		if isHelper(pkg, modPath) {
+			continue // a helper has no layer and no feature to violate
+		}
+		chain, reached := reachesThroughHelpers(graph, pkg, modPath, func(imported string) bool {
+			if l := layerOf(imported); layer != "" && l != "" && slices.Contains(forbidden[layer], l) {
+				return true
+			}
+			other := featureOf(imported)
+			return feature != "" && other != "" && other != feature
+		})
+		if reached == "" {
+			continue
+		}
+		rule := "cross-module-chain"
+		if l := layerOf(reached); layer != "" && l != "" && slices.Contains(forbidden[layer], l) {
+			rule = "layer-chain"
+		}
+		if direct[pkg+" "+strings.TrimSuffix(rule, "-chain")] {
+			continue
+		}
+		v := site[pkg+" "+chain[1]]
+		v.Rule = rule
+		v.Imported = reached
+		v.ImportedLayer = layerOf(reached)
+		v.Via = chain
+		report.Violations = append(report.Violations, v)
+	}
+}
+
+// isHelper reports whether a package is one of the project's own and belongs
+// to no layer and no feature — the shape a violation gets laundered through.
+func isHelper(pkg, modPath string) bool {
+	return strings.HasPrefix(pkg, modPath) && layerOf(pkg) == "" && featureOf(pkg) == ""
+}
+
+// reachesThroughHelpers returns the shortest chain from pkg to a package
+// bad() accepts, passing only through helpers. Breadth-first, so the printed
+// chain is the shortest one.
+func reachesThroughHelpers(graph map[string][]string, pkg, modPath string, bad func(string) bool) ([]string, string) {
+	type node struct {
+		pkg  string
+		path []string
+	}
+	seen := map[string]bool{pkg: true}
+	// The first hop must be a helper: a direct bad import is the direct
+	// rule's finding, not this one's.
+	var queue []node
+	for _, imp := range graph[pkg] {
+		if isHelper(imp, modPath) && !seen[imp] {
+			seen[imp] = true
+			queue = append(queue, node{pkg: imp, path: []string{pkg, imp}})
+		}
+	}
+	for len(queue) > 0 {
+		cur := queue[0]
+		queue = queue[1:]
+		for _, imp := range graph[cur.pkg] {
+			if bad(imp) {
+				return cur.path, imp
+			}
+			if !isHelper(imp, modPath) || seen[imp] {
+				continue
+			}
+			seen[imp] = true
+			queue = append(queue, node{pkg: imp, path: append(append([]string{}, cur.path...), imp)})
+		}
+	}
+	return nil, ""
 }
 
 // findTransportChains reports a handler-layer package that reaches a
@@ -377,6 +481,12 @@ func (r *Report) String() string {
 		case "cross-module":
 			fmt.Fprintf(&b, "✗ cross-module import\n\n    %s:%d\n      package %s\n        imports %s\n\n%s\n\n",
 				v.File, v.Line, v.Package, v.Imported, explain(v))
+		case "layer-chain":
+			fmt.Fprintf(&b, "✗ layer violation, through a helper\n\n    %s:%d\n      package %s          (layer: %s)\n%s        imports %s (layer: %s)\n\n%s\n\n",
+				v.File, v.Line, v.Package, v.Layer, chainOf(v), v.Imported, v.ImportedLayer, explain(v))
+		case "cross-module-chain":
+			fmt.Fprintf(&b, "✗ cross-module import, through a helper\n\n    %s:%d\n      package %s\n%s        imports %s\n\n%s\n\n",
+				v.File, v.Line, v.Package, chainOf(v), v.Imported, explain(v))
 		case "transport-chain":
 			what := "handler"
 			if v.Layer == "domain" {
@@ -453,6 +563,27 @@ func explain(v Violation) string {
 			"    • If the handler CALLS an external service, declare a port in the\n" +
 			"      domain and put the HTTP client in infrastructure, where net/http\n" +
 			"      is allowed."
+	}
+	if v.Rule == "layer-chain" || v.Rule == "cross-module-chain" {
+		last := v.Via[len(v.Via)-1]
+		what := "another feature module's internals"
+		if v.Rule == "layer-chain" {
+			what = "the " + v.ImportedLayer + " layer"
+		}
+		return "  This package does not import " + v.Imported + " itself, and it depends\n" +
+			"  on it all the same: everything a package imports comes with it. The\n" +
+			"  dependency is as real as a direct one — `go list -deps` shows it —\n" +
+			"  and only the LINE is somewhere else.\n\n" +
+			"  The import is in " + last + ", which belongs to no layer and no\n" +
+			"  feature, so nothing else objected on the way through.\n\n" +
+			"  Fix one of:\n" +
+			"    • Move what this package actually needs out of " + last + "\n" +
+			"      and into somewhere it may legally live — usually a port in the\n" +
+			"      domain, implemented in infrastructure and wired in module.go.\n" +
+			"    • Split " + last + ", so the half this imports no longer\n" +
+			"      reaches " + what + ".\n\n" +
+			"  A type ALIAS counts: `type Item = other.Item` makes it the same Go\n" +
+			"  type, which is total coupling with a local name."
 	}
 	if v.Rule == "cross-module" {
 		return "  This reaches into another feature module's internals. Modules talk\n" +
