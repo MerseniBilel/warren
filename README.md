@@ -99,10 +99,15 @@ Progress is spec-first: ☑ means *done and verified*, not *started*.
 - [x] Design contradictions found and catalogued (25 specs blocked on them)
 - [x] Core decisions taken: config `Source` split, auth-code DLQ rows,
       `Root[K]` constraint, concrete registrars on Go 1.27
-- [ ] Remaining decisions folded into their specs and re-approved
+- [x] Remaining decisions folded into their specs and re-approved *(every
+      spec decided 2026-08-02: 12 approved and implemented, 10 deferred to
+      v0.2 with the reason recorded in each, zero drafts left)*
 - [x] Tooling rebuilt: Makefile, CI workflow, `golangci` config, module-rules
       check (`scripts/invariants.sh`)
-- [ ] Dependency audits run (`dig` first) — no library enters a `go.mod` without one
+- [x] Dependency audits run (`dig` first) — no library enters a `go.mod`
+      without one *(dated audits in the [warren.md](warren.md) §9 ledger: dig
+      v1.19.0, cobra v1.10.2, franz-go v1.21.5, playground v10.30.3, and the
+      rejections — `dave/dst`, `robfig/cron`, `x/tools` — with their reasons)*
 
 ### Phase 1 — kernel (buildable on Go 1.26, in dependency order)
 
@@ -174,12 +179,20 @@ contract now.
       plain structs was prototyped, measured (faster than JSON) and rejected:
       no reflection descriptor, and field numbers in Go struct tags. The round
       found **zero required changes to core `transport`**
-- [ ] Fallback if 1.27 slips: generic free functions (compiles on 1.26; call
-      sites change shape)
+- [x] Fallback if 1.27 slips: generic free functions (compiles on 1.26; call
+      sites change shape) *(this is not a contingency any more — it is what
+      SHIPPED. `transport.Get[Req, Res](r, pattern, h)` is a generic free
+      function running on 1.26 today, and warren.md §3.5 fixes the names and
+      argument order the 1.27 methods will take, so the bump above is a
+      refactor of call sites rather than of the design)*
 
 ### Phase 3 — messaging
 
-- [ ] Outbox/inbox ownership decisions (writer split, leader election, module map)
+- [x] Outbox/inbox ownership decisions (writer split, leader election, module
+      map) *(`Store.Append` is the writer and runs in the caller's
+      transaction; leadership is `outbox.Elector` plus `outbox.Electors` for
+      named ones; outbox and inbox are OPTIONS on the persistence module
+      rather than siblings, because they need its pool)*
 - [x] `broker/memory` — in-process driver, default in tests *(implemented;
       passes the exported `broker/brokertest` contract suite)*
 - [x] `outbox` — writer port, relay, elector, memory store *(implemented;
@@ -216,7 +229,9 @@ contract now.
       nothing *(implemented; DB spans need one explicit `postgres.Configure`
       line. 24 third-party modules, confined here by an invariant — a service
       that does not import it pays nothing)*
-- [ ] `validate` — port in core, implementation in a submodule
+- [x] `validate` — port in core, implementation in a submodule *(the port is
+      `validate/validate.go`; `validate/playground` implements it, and core
+      refuses the tags it cannot check rather than ignoring them)*
 - [x] `health` — check registry, liveness/readiness verdicts, root-scope
       binding *(implemented; the routes land with the transport adapters)*
 - [x] `warren/testing` (`warrentest`) — boot a module with fakes, Invoke by
