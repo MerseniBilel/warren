@@ -148,6 +148,7 @@ func Command(opts Options) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	data["RequestFields"], data["FirstField"] = requestFields(data["Route"])
 	handler, err := render("command.go.tmpl", data)
 	if err != nil {
 		return "", err
@@ -798,6 +799,68 @@ func featureData(opts Options) (map[string]string, string, error) {
 		// shape.
 		"Route": routeOr(opts.Route, opts.Name, snake(opts.Name)),
 	}, base, nil
+}
+
+// requestFields renders the command struct's fields from the route the
+// generator is about to register it at.
+//
+// Every wildcard becomes a `param:` field. It used to write one `json:"id"`
+// whatever the route said, so `--route "/tickets/{id}/assign"` produced a
+// command that read the id from the BODY: the URL named one resource and the
+// handler mutated another, with a 201 either way. The generator is the one
+// party that knows both halves, so it is the one that has to agree with
+// itself.
+func requestFields(route string) (fields, first string) {
+	params := wildcardsOf(route)
+	if len(params) == 0 {
+		return "\tID string `json:\"id\" validate:\"required\"`", "ID"
+	}
+	var b strings.Builder
+	b.WriteString("\t// Each of these binds a wildcard in the route this command is\n")
+	b.WriteString("\t// registered at. A `json:` tag would read the BODY instead, and the\n")
+	b.WriteString("\t// URL would name one resource while the handler acted on another.\n")
+	for i, p := range params {
+		if i > 0 {
+			b.WriteString("\n")
+		}
+		fmt.Fprintf(&b, "\t%s string `param:%q validate:\"required\"`", fieldName(p), p)
+	}
+	return b.String(), fieldName(params[0])
+}
+
+// wildcardsOf returns the names of a pattern's wildcards, in order. A
+// trailing "..." is part of net/http's syntax, not of the name.
+func wildcardsOf(route string) []string {
+	var out []string
+	for rest := route; ; {
+		open := strings.Index(rest, "{")
+		if open < 0 {
+			return out
+		}
+		close := strings.Index(rest[open:], "}")
+		if close < 0 {
+			return out
+		}
+		name := strings.TrimSuffix(rest[open+1:open+close], "...")
+		if name != "" {
+			out = append(out, name)
+		}
+		rest = rest[open+close+1:]
+	}
+}
+
+// fieldName turns a wildcard name into the Go field that binds it, keeping
+// Go's capitalisation of ID — `tenantId` is TenantID, not TenantId, and a
+// generator that writes the second teaches it.
+func fieldName(param string) string {
+	name := upperFirst(param)
+	switch {
+	case name == "Id":
+		return "ID"
+	case strings.HasSuffix(name, "Id"):
+		return strings.TrimSuffix(name, "Id") + "ID"
+	}
+	return name
 }
 
 // routeOr prefers the explicit path, normalising a leading slash so

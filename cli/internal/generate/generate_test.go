@@ -817,3 +817,103 @@ func snakeOf(s string) string {
 	}
 	return strings.ToLower(b.String())
 }
+
+// TestARouteWildcardBecomesAParamField — the generator was handed the route
+// and still wrote `json:"id"`, so the path segment bound nothing and the
+// handler acted on the BODY. Field test #7, against real Postgres:
+//
+//	POST /tickets/A/assign  body {"id":B}  →  201 Created, and B was assigned.
+//
+// The URL is what a reverse proxy, an audit log and a rate limiter see; the
+// body is what acted. Any authorization keyed on the path — including
+// GETTING_STARTED's own sameTenant policy, which reads p.Path("tenant") —
+// authorizes one resource and mutates another. Compiles, runs, 201, wrong.
+func TestARouteWildcardBecomesAParamField(t *testing.T) {
+	t.Parallel()
+
+	dir := app(t)
+	if _, err := generate.Module(generate.Options{Dir: dir, Name: "ticket"}); err != nil {
+		t.Fatalf("g module: %v", err)
+	}
+	if _, err := generate.Command(generate.Options{
+		Dir: dir, Module: "ticket", Name: "AssignTicket",
+		Route: "/tickets/{id}/assign",
+	}); err != nil {
+		t.Fatalf("g command: %v", err)
+	}
+
+	got := read(t, dir, "internal/modules/ticket/application/assign_ticket.go")
+	if !strings.Contains(got, "`param:\"id\"") {
+		t.Errorf("the {id} wildcard did not become a param field:\n%s", got)
+	}
+	// Only the REQUEST type: the result's `json:"id"` is a response body and
+	// belongs there.
+	req := structBody(t, got, "type AssignTicket struct {")
+	if strings.Contains(req, "json:\"") {
+		t.Errorf("the command still reads a field from the BODY:\n%s", req)
+	}
+}
+
+// structBody returns the text between a struct header and its closing brace.
+func structBody(t *testing.T, src, header string) string {
+	t.Helper()
+	i := strings.Index(src, header)
+	if i < 0 {
+		t.Fatalf("no %q in:\n%s", header, src)
+	}
+	rest := src[i+len(header):]
+	end := strings.Index(rest, "\n}")
+	if end < 0 {
+		t.Fatalf("unterminated struct after %q", header)
+	}
+	return rest[:end]
+}
+
+// TestEveryWildcardIsBound — a route may carry more than one, and an unbound
+// one is exactly as silent as the first.
+func TestEveryWildcardIsBound(t *testing.T) {
+	t.Parallel()
+
+	dir := app(t)
+	if _, err := generate.Module(generate.Options{Dir: dir, Name: "billing"}); err != nil {
+		t.Fatalf("g module: %v", err)
+	}
+	if _, err := generate.Command(generate.Options{
+		Dir: dir, Module: "billing", Name: "VoidLine",
+		Route: "/tenants/{tenantId}/invoices/{invoiceId}/lines/{lineId}",
+	}); err != nil {
+		t.Fatalf("g command: %v", err)
+	}
+
+	got := read(t, dir, "internal/modules/billing/application/void_line.go")
+	for _, want := range []string{
+		"TenantID string `param:\"tenantId\"",
+		"InvoiceID string `param:\"invoiceId\"",
+		"LineID string `param:\"lineId\"",
+	} {
+		if !strings.Contains(strings.Join(strings.Fields(got), " "), strings.Join(strings.Fields(want), " ")) {
+			t.Errorf("missing %q:\n%s", want, got)
+		}
+	}
+}
+
+// TestARouteWithNoWildcardStillTakesABody — the common case must not regress
+// into a command with no fields at all.
+func TestARouteWithNoWildcardStillTakesABody(t *testing.T) {
+	t.Parallel()
+
+	dir := app(t)
+	if _, err := generate.Module(generate.Options{Dir: dir, Name: "catalog"}); err != nil {
+		t.Fatalf("g module: %v", err)
+	}
+	if _, err := generate.Command(generate.Options{
+		Dir: dir, Module: "catalog", Name: "CreateProduct",
+	}); err != nil {
+		t.Fatalf("g command: %v", err)
+	}
+
+	got := read(t, dir, "internal/modules/catalog/application/create_product.go")
+	if !strings.Contains(got, "`json:\"id\"") {
+		t.Errorf("a body-only command lost its json field:\n%s", got)
+	}
+}

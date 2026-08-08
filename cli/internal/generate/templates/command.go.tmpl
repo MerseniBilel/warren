@@ -10,7 +10,7 @@ import (
 // fields that must be present — the transport adapter validates before the
 // handler ever runs.
 type {{.Name}} struct {
-	ID string `json:"id" validate:"required"`
+{{.RequestFields}}
 }
 
 // {{.Name}}Result is what the caller gets back. Never the aggregate itself:
@@ -40,5 +40,5 @@ func (h *{{.Lower}}) Handle(ctx context.Context, cmd {{.Name}}) ({{.Name}}Result
 	// save it. Injecting the repository here is the next step: add it to
 	// New{{.Name}}Handler's parameters and the container will supply it.
 	_ = ctx
-	return {{.Name}}Result{ID: cmd.ID}, nil
+	return {{.Name}}Result{ID: cmd.{{.FirstField}}}, nil
 }
