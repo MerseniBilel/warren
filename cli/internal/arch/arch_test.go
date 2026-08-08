@@ -409,3 +409,132 @@ func TestApplicationImportingTransportStillReadsAsAHandler(t *testing.T) {
 		t.Errorf("an application-layer violation lost the fix that applies to it:\n%s", out)
 	}
 }
+
+// TestHandlerReachingTransportThroughAHelperIsAViolation — the rule was
+// enforced against DIRECT imports only, and one level of indirection defeated
+// it entirely. Worse, the indirection is the one GETTING_STARTED walks you
+// into: it tells you to write your own edge middleware with whttp.WriteError,
+// and the obvious factoring puts that beside the tenant reader and the
+// policies in one internal/auth package — which the application layer then
+// imports for the tenant.
+//
+// Field test #7, on a project the linter called clean:
+//
+//	$ warren lint arch
+//	No violations in 19 packages.
+//	$ go list -deps .../ticket/application | grep -E 'net/http|transport'
+//	github.com/MerseniBilel/warren/transport
+//	net/http
+//	github.com/MerseniBilel/warren/transport/http
+//
+// README calls "a handler imports no transport package" the entire point.
+func TestHandlerReachingTransportThroughAHelperIsAViolation(t *testing.T) {
+	t.Parallel()
+
+	dir := fixture(t, map[string]string{
+		"internal/auth/auth.go": `package auth
+
+import "net/http"
+
+func TenantOf(r *http.Request) string { return "" }
+`,
+		"internal/modules/ticket/application/open.go": `package application
+
+import "example.com/fix/internal/auth"
+
+func Open() string { return auth.TenantOf(nil) }
+`,
+	})
+
+	report, err := arch.Check(dir, arch.Options{Rules: arch.Layers})
+	if err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	if len(report.Violations) != 1 {
+		t.Fatalf("violations = %d, want 1:\n%s", len(report.Violations), report.String())
+	}
+	out := report.String()
+	// The chain is the whole value: the offending import is in a package the
+	// reader did not suspect, and naming only the endpoints sends them
+	// looking in the wrong file.
+	for _, want := range []string{
+		"internal/modules/ticket/application",
+		"internal/auth",
+		"net/http",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the report does not name %q:\n%s", want, out)
+		}
+	}
+}
+
+// TestInfrastructureMayReachTransportThroughAHelper — an adapter calling a
+// third-party API over net/http is the ordinary reason it exists, and that
+// exemption must survive indirection too or the linter becomes noise.
+func TestInfrastructureMayReachTransportThroughAHelper(t *testing.T) {
+	t.Parallel()
+
+	dir := fixture(t, map[string]string{
+		"internal/httpclient/client.go": `package httpclient
+
+import "net/http"
+
+func Get(url string) (*http.Response, error) { return nil, nil }
+`,
+		"internal/modules/ticket/infrastructure/pager.go": `package infrastructure
+
+import "example.com/fix/internal/httpclient"
+
+func Page() { _, _ = httpclient.Get("") }
+`,
+	})
+
+	report, err := arch.Check(dir, arch.Options{Rules: arch.Layers})
+	if err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	if len(report.Violations) != 0 {
+		t.Errorf("infrastructure was refused a transport dependency:\n%s", report.String())
+	}
+}
+
+// TestATransportFreeHelperIsFine — the fix the field test applied by hand
+// (split internal/auth into a transport-free half and an authhttp half) must
+// come back clean, or the linter is telling people to do something that does
+// not satisfy it.
+func TestATransportFreeHelperIsFine(t *testing.T) {
+	t.Parallel()
+
+	dir := fixture(t, map[string]string{
+		"internal/auth/auth.go": `package auth
+
+type Identity struct{ Tenant string }
+
+func TenantOf(id Identity) string { return id.Tenant }
+`,
+		"internal/authhttp/edge.go": `package authhttp
+
+import (
+	"net/http"
+
+	"example.com/fix/internal/auth"
+)
+
+func Middleware(next http.Handler) http.Handler { _ = auth.Identity{}; return next }
+`,
+		"internal/modules/ticket/application/open.go": `package application
+
+import "example.com/fix/internal/auth"
+
+func Open() string { return auth.TenantOf(auth.Identity{}) }
+`,
+	})
+
+	report, err := arch.Check(dir, arch.Options{Rules: arch.Layers})
+	if err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	if len(report.Violations) != 0 {
+		t.Errorf("the documented fix does not satisfy the linter:\n%s", report.String())
+	}
+}
