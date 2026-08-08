@@ -1219,18 +1219,29 @@ lines belonged to no request at all. Two halves close it:
 
 **Driver-agnostic middleware** — written once, applies to Kafka, Rabbit, NATS, and memory identically:
 
-`Recover` → `TraceExtract` → `Deduplicate(inbox)` → `Retry(backoff)` → `DeadLetter` → `ConcurrencyLimit` → `Drain`
+`Recover` → `Drain` → `correlate` → `TraceExtract` → `Deduplicate(inbox)` → `DeadLetter` → `RequireMessageID` → `Retry(backoff)` → `ConcurrencyLimit` → `Recover` → handler
 
 That property is the entire messaging pitch. It evaporates the moment a consumer touches `kgo.Record` directly — which is why the port is mandatory and the raw client is an explicit escape hatch, not the default path.
 
-That list is the *outcome* order a failing message experiences. The wrapping
-order `broker.Pipeline` composes (settled 2026-08-02 with the implementation)
-is: `Recover` (safety net) → `Drain` → `TraceExtract` → `Deduplicate` →
+That is the wrapping order `broker.Pipeline` composes, outermost first
+(settled 2026-08-02 with the implementation, corrected 2026-08-08 after a
+field test read it against the code): `Recover` (safety net) → `Drain` →
+`correlate` (so everything downstream — the retry's logging, the
+dead-letter's, the handler's own — writes under the correlation ID of the
+request that PUBLISHED the message) → `TraceExtract` → `Deduplicate` →
 `DeadLetter` (the disposition stage, mapping the §2.6 consumer column by the
-error's outermost code) → `Retry` (`UNAVAILABLE` and `INTERNAL` only; waits
-observe cancellation) → `ConcurrencyLimit` (semaphore held per attempt — a
-message in backoff holds no slot) → `Recover` (innermost: a handler panic is
-`INTERNAL`, retried, then dead-lettered) → handler. The chain lives in
+error's outermost code) → `RequireMessageID` (inside `DeadLetter`, so a
+message with no id is preserved rather than returned to the broker for ever)
+→ `Retry` (`UNAVAILABLE` and `INTERNAL` only; waits observe cancellation) →
+`ConcurrencyLimit` (semaphore held per attempt — a message in backoff holds
+no slot) → `Recover` (innermost: a handler panic is `INTERNAL`, retried,
+then dead-lettered) → handler.
+
+Three of those stages are CONDITIONAL, which matters when you turn one off:
+`Deduplicate` and `RequireMessageID` are installed only when deduplication
+is on, so `broker.WithoutDedupe()` — recommended in GETTING_STARTED for
+consuming a DLQ — removes the empty-id check with it. `ConcurrencyLimit` is
+installed only when a limit is set. The chain lives in
 `broker` itself — pure functions over the port's own types, the same shape
 `app`'s middleware take one ring over:
 
@@ -1874,7 +1885,7 @@ func WithClock(now func() time.Time) MemoryOption
 func WithMaxRecords(n int) MemoryOption
 ```
 
-**The key is scoped by subscription**, `"<subscription>\x00<Message.ID>"`,
+**The key is scoped by subscription**, `"<subscription>\x1f<Message.ID>"`,
 built by `broker.Pipeline` from the name it is given. Keyed on the message ID
 alone, two features consuming one topic through one store would suppress each
 other: whichever handler ran first marks it seen and the second never sees the

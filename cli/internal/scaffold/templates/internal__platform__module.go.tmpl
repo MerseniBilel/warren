@@ -1,5 +1,5 @@
 // Package platform wires the infrastructure every feature module shares:
-// the broker, the unit of work, the outbox and its relay, and health.
+// the broker, the unit of work, the outbox and its relay.
 //
 // Swapping an in-process driver for a real one is a change to this file and
 // nothing else — which is the point of the ports the rest of the app is
@@ -24,7 +24,6 @@ import (
 {{- else }}
 	"github.com/MerseniBilel/warren/broker/memory"
 {{- end }}
-	"github.com/MerseniBilel/warren/health"
 	"github.com/MerseniBilel/warren/inbox"
 	"github.com/MerseniBilel/warren/lifecycle"
 	"github.com/MerseniBilel/warren/outbox"
@@ -151,15 +150,13 @@ func newUnitOfWork(store outbox.Store) *persistence.MemoryUnitOfWork {
 }
 
 // newRelay drains the outbox to the broker. It registers its own lifecycle
-// hook and its own health check — the documented pattern for anything
-// created at boot, since warren.OnStart takes a closure fixed at
-// declaration time.
+// hook — the documented pattern for anything created at boot, since
+// warren.OnStart takes a closure fixed at declaration time.
 func newRelay(
 	store outbox.Store,
 	pub broker.Publisher,
 	cfg appconfig.Config,
 	lc lifecycle.Lifecycle,
-	hr health.Registry,
 ) (*outbox.Relay, error) {
 	// It takes the PORT, not platform's own broker value: a test that
 	// substitutes a recording publisher must see what the relay publishes.
@@ -192,9 +189,13 @@ func newRelay(
 		},
 	})
 
-	if err := hr.Register(health.NewCheck("outbox", func(context.Context) error { return nil })); err != nil {
-		return nil, err
-	}
+	// There is deliberately no health.NewCheck("outbox", ...) here. The one
+	// that used to be was `func(context.Context) error { return nil }` — it
+	// could not fail, and it was registered as CRITICAL, so /readyz named the
+	// outbox an up critical dependency while a relay that never drained a
+	// single row sat next to it. A check that cannot fail is worse than no
+	// check: it turns "we do not monitor this" into "we monitor this and it
+	// is fine". Register one here when you have something real to ask.
 	return relay, nil
 }
 

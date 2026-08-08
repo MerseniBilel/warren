@@ -269,7 +269,7 @@ INFO http server listening addr=[::]:8080 module=warren/transport/http tls=false
 ```
 
 ```
-$ curl -i -X POST localhost:8080/notes -d '{"id":"n1","text":"hello"}'
+$ curl -i -X POST localhost:8080/notes -H 'Content-Type: application/json' -d '{"id":"n1","text":"hello"}'
 HTTP/1.1 201 Created
 Content-Type: application/json; charset=utf-8
 X-Correlation-Id: 1c0da3cfa6f9-1
@@ -278,17 +278,26 @@ $ curl localhost:8080/notes/n1
 {"id":"n1","text":"hello"}
 ```
 
+**The `Content-Type` header is not decoration.** `curl -d` sends
+`application/x-www-form-urlencoded`, which a JSON route cannot decode, so
+Warren answers `415` naming both media types rather than guessing at your
+body. `curl --json` is the shorter spelling if your curl is 7.82 or newer.
+This page printed the `-d` form without the header for a while, and every
+block below it was wrong in the same way — the framework's own
+`TestFormEncodedPostIsRefused` had been asserting the 415 the whole time.
+
 The failure paths, none of which you wrote:
 
 ```
-$ curl -X POST localhost:8080/notes -d '{"id":"n2"}'
+$ curl -X POST localhost:8080/notes -H 'Content-Type: application/json' -d '{"id":"n2"}'
 {"error":{"code":"INVALID","message":"field text is invalid",
           "details":{"text":"is required"},"correlation_id":"…-5"}}
 
 $ curl localhost:8080/notes/nope
 {"error":{"code":"NOT_FOUND","message":"note nope not found","correlation_id":"…-6"}}
 
-$ curl -o /dev/null -w '%{http_code}\n' -X POST localhost:8080/notes -d '{"id":"n1","text":"again"}'
+$ curl -o /dev/null -w '%{http_code}\n' -X POST localhost:8080/notes \
+       -H 'Content-Type: application/json' -d '{"id":"n1","text":"again"}'
 409
 
 $ curl -o /dev/null -w '%{http_code}\n' localhost:8080/readyz
