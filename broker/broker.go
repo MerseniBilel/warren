@@ -80,6 +80,22 @@ type Subscriber interface {
 	// A driver that cannot register synchronously must block until it can:
 	// failing the boot because a broker is unreachable is the correct
 	// outcome, and it is the reason this returns an error.
+	//
+	// THE CONTEXT HANDED TO h FOR EVERY DELIVERY MUST CARRY ctx's VALUES.
+	// Cancellation is the driver's own — a shared poll loop may not stop
+	// fetching for one subscription because another was cancelled — but the
+	// values are the application's, and a driver that manufactures a delivery
+	// context from context.Background() severs them.
+	//
+	// This is not a formality. app.Telemetry rides the context, and
+	// TraceExtract and InjectTrace both reach it through
+	// app.TelemetryFromContext: a driver that drops the values makes every
+	// consumer span a new root and strips traceparent from every event the
+	// consumer raises, with nothing failing anywhere. The two shipped drivers
+	// disagreed about this until it was written down — memory passed the
+	// context through, kafka rebuilt it from Background — so brokertest now
+	// checks it, and a fix seeded through the context would otherwise have
+	// passed on the in-process broker and done nothing in production.
 	Subscribe(ctx context.Context, topic string, h MessageHandler) error
 }
 

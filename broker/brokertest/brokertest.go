@@ -50,6 +50,57 @@ func Run(t *testing.T, newBroker NewBroker) {
 	t.Run("the subscription is live when Subscribe returns", func(t *testing.T) {
 		TestSubscribeIsLiveWhenItReturns(t, newBroker)
 	})
+	t.Run("the delivery context carries the subscribe context's values", func(t *testing.T) {
+		testDeliveryContextValues(t, newBroker)
+	})
+}
+
+type probeKey struct{}
+
+// testDeliveryContextValues pins the contract Subscribe's doc states: a
+// delivery's context must carry the VALUES of the context Subscribe was
+// given, whatever the driver does about cancellation.
+//
+// The two shipped drivers disagreed about this until it was written down.
+// memory passed the Subscribe context straight through; kafka built its
+// delivery context from context.Background(), because one poll loop serves
+// every subscription and the loop's lifetime is the client's. Nothing
+// failed — and app.Telemetry rides the context, so on Kafka every consumer
+// span began a new root and every event a consumer raised lost its
+// traceparent, silently. A fix seeded through the context would have passed
+// its own tests on the memory broker and done nothing in production.
+func testDeliveryContextValues(t *testing.T, newBroker NewBroker) {
+	pub, sub := newBroker(t)
+	c := newCollector()
+
+	seen := make(chan any, 8)
+	ctx, cancel := context.WithCancel(context.WithValue(context.Background(), probeKey{}, "from-subscribe"))
+	t.Cleanup(cancel)
+	if err := sub.Subscribe(ctx, "orders", func(dctx context.Context, m broker.Message) error {
+		if !strings.HasPrefix(m.ID, probeID) {
+			seen <- dctx.Value(probeKey{})
+		}
+		return c.handle(dctx, m)
+	}); err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+	ready(t, pub, c, "orders")
+
+	if err := pub.Publish(context.Background(), "orders", broker.Message{ID: "ctx-1", Type: "t"}); err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
+
+	select {
+	case got := <-seen:
+		if got != "from-subscribe" {
+			t.Errorf("the delivery context does not carry the Subscribe context's values: got %v, want %q.\n"+
+				"A driver that builds a delivery context from context.Background() severs app.Telemetry, "+
+				"so every consumer span becomes a new root and every event the consumer raises "+
+				"loses its traceparent — with nothing failing anywhere.", got, "from-subscribe")
+		}
+	case <-time.After(awaitTimeout):
+		t.Fatal("the message never arrived")
+	}
 }
 
 // collector receives messages and lets a test await a count without sleeps.

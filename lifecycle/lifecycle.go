@@ -28,6 +28,18 @@ type Hook struct {
 	Name string
 
 	// OnStart runs during startup, in registration order.
+	//
+	// Its context carries the application's boot-time context VALUES —
+	// app.Telemetry among them — and it is CANCELLED as soon as boot
+	// finishes. A hook that starts a long-running loop must therefore keep
+	// the values and drop the cancellation:
+	//
+	//	ctx, cancel := context.WithCancel(context.WithoutCancel(bootCtx))
+	//
+	// Deriving that loop's context from context.Background() instead loses
+	// the values SILENTLY: nothing fails, and a consumer built that way
+	// begins a new root trace per message and strips traceparent from every
+	// event it raises.
 	OnStart func(context.Context) error
 
 	// OnStop runs during shutdown, in reverse registration order.

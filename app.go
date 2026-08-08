@@ -327,6 +327,12 @@ func (a *App) Start(ctx context.Context) error {
 				break
 			}
 		}
+		// Remembered, so Stop can put it on the shutdown context too — the
+		// flush hook unwinds last by design and a shutdown-time span needs
+		// the same wire.
+		a.mu.Lock()
+		a.telemetry = telemetry
+		a.mu.Unlock()
 	}
 
 	// Step 4 — instantiate each module's entry points in dependency order
@@ -473,7 +479,16 @@ func (a *App) Start(ctx context.Context) error {
 	if stopping {
 		return errBootAbandoned()
 	}
-	if err := lc.Start(ctx); err != nil {
+	// The telemetry resolved at step 3b rides the hook context. It is the
+	// only wire it can travel on for a consumer: a delivery loop is built
+	// inside an OnStart hook, and a subscription is constructed by USER code
+	// the bootstrapper cannot hand arguments to. Until this, TraceExtract and
+	// InjectTrace — which reach telemetry through app.TelemetryFromContext
+	// and nowhere else — were permanent no-ops outside the HTTP edge.
+	//
+	// app.WithTelemetry drops a nil, so an uninstrumented app's context is
+	// returned unchanged and pays nothing.
+	if err := lc.Start(app.WithTelemetry(ctx, telemetry)); err != nil {
 		a.mu.Lock()
 		stopping = a.stopping
 		a.mu.Unlock()
@@ -521,8 +536,9 @@ func (a *App) Stop(ctx context.Context) error {
 	a.mu.Lock()
 	a.stopping = true
 	lc := a.lc
+	telemetry := a.telemetry
 	a.mu.Unlock()
-	return lc.Stop(ctx)
+	return lc.Stop(app.WithTelemetry(ctx, telemetry))
 }
 
 // name renders a substitution the way diagnostics should print it — never

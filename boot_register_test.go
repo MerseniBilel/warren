@@ -957,3 +957,101 @@ func TestTheLifecycleCheckHasFourEscapes(t *testing.T) {
 }
 
 type deadUser struct{}
+
+// --- telemetry on the lifecycle context ------------------------------------
+
+// stubTelemetry is the smallest app.Telemetry a boot test needs.
+type stubTelemetry struct{}
+
+func (stubTelemetry) Span(ctx context.Context, _ string) (context.Context, func(error)) {
+	return ctx, func(error) {}
+}
+func (stubTelemetry) Record(string, time.Duration, error)             {}
+func (stubTelemetry) Inject(context.Context, func(key, value string)) {}
+func (stubTelemetry) Extract(ctx context.Context, _ func(string) string) context.Context {
+	return ctx
+}
+
+// TestHooksSeeTheTelemetryOnTheirContext — architect ruling 5.2, 2026-08-08.
+//
+// A consumer's delivery loop is built inside an OnStart hook, and a
+// subscription is constructed by USER code the bootstrapper cannot hand
+// arguments to — so the context is the only wire telemetry can travel on.
+// Until this, boot passed telemetry to the transport builder alone, so
+// app.TelemetryFromContext was nil everywhere in the consumer ring and
+// broker.TraceExtract/InjectTrace — which reach it that way and only that
+// way — were permanent no-ops off the HTTP edge.
+func TestHooksSeeTheTelemetryOnTheirContext(t *testing.T) {
+	t.Parallel()
+
+	var onStart, onStop app.Telemetry
+	m := warren.NewModule("obs",
+		warren.Providers(func(lc lifecycle.Lifecycle) *deadUser {
+			lc.Append(lifecycle.Hook{
+				Name: "probe",
+				OnStart: func(ctx context.Context) error {
+					onStart = app.TelemetryFromContext(ctx)
+					return nil
+				},
+				OnStop: func(ctx context.Context) error {
+					onStop = app.TelemetryFromContext(ctx)
+					return nil
+				},
+			})
+			return &deadUser{}
+		}),
+		warren.Eager[*deadUser](),
+	)
+	a := warren.New(m)
+	if err := a.Telemetry(stubTelemetry{}); err != nil {
+		t.Fatalf("Telemetry: %v", err)
+	}
+	if err := a.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if err := a.Stop(context.Background()); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+
+	if onStart == nil {
+		t.Error("OnStart's context carried no telemetry — a consumer built here can never continue a trace")
+	}
+	// Stop too: the flush hook unwinds last by design, and a shutdown-time
+	// span needs the same wire.
+	if onStop == nil {
+		t.Error("OnStop's context carried no telemetry")
+	}
+}
+
+// The control. An app with no telemetry must be unchanged — WithTelemetry
+// drops a nil, so the uninstrumented path pays nothing and stays nil.
+func TestHooksSeeNoTelemetryWhenThereIsNone(t *testing.T) {
+	t.Parallel()
+
+	var got app.Telemetry
+	seen := false
+	m := warren.NewModule("obs",
+		warren.Providers(func(lc lifecycle.Lifecycle) *deadUser {
+			lc.Append(lifecycle.Hook{
+				Name: "probe",
+				OnStart: func(ctx context.Context) error {
+					got, seen = app.TelemetryFromContext(ctx), true
+					return nil
+				},
+			})
+			return &deadUser{}
+		}),
+		warren.Eager[*deadUser](),
+	)
+	a := warren.New(m)
+	if err := a.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = a.Stop(context.Background()) }()
+	if !seen {
+		t.Fatal("the hook never ran — the probe did not fire")
+	}
+	if got != nil {
+		t.Errorf("an app with no telemetry got %T on its hook context", got)
+	}
+}

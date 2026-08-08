@@ -51,9 +51,7 @@ func newPaymentReceivedSubscription(
 	// retry, limit.
 	pipeline, wait := broker.Pipeline(name, topic, handle, store, pub)
 
-	// The loop's context must not be OnStart's: that one is the boot
-	// context, cancelled as soon as boot finishes under Start/Stop.
-	ctx, cancel := context.WithCancel(context.Background())
+	var cancel context.CancelFunc
 	lc.Append(lifecycle.Hook{
 		Name: "billing payment.received consumer",
 		// Subscribe returns once the subscription is LIVE, so OnStart
@@ -61,9 +59,22 @@ func newPaymentReceivedSubscription(
 		// it in a goroutine: that reports "started" before the subscription
 		// exists, and anything published in the gap is discarded — by a
 		// Publish that reports success, so the outbox marks it published.
-		OnStart: func(context.Context) error { return sub.Subscribe(ctx, topic, pipeline) },
+		OnStart: func(bootCtx context.Context) error {
+			// The loop's context keeps the boot context's VALUES and drops
+			// its cancellation. Both halves matter. OnStart's context is
+			// cancelled as soon as boot finishes, so the loop cannot hold
+			// it — and it is what carries app.Telemetry, so building this
+			// from context.Background() severs trace continuation: every
+			// span this consumer opens becomes a new root and every event it
+			// raises loses its traceparent, silently, with nothing failing.
+			var ctx context.Context
+			ctx, cancel = context.WithCancel(context.WithoutCancel(bootCtx))
+			return sub.Subscribe(ctx, topic, pipeline)
+		},
 		OnStop: func(c context.Context) error {
-			cancel()
+			if cancel != nil {
+				cancel()
+			}
 			return wait(c)
 		},
 	})

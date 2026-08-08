@@ -32,6 +32,7 @@ type client struct {
 	started  bool
 
 	loopOnce sync.Once
+	loopCtx  context.Context
 	stopLoop context.CancelFunc
 	loopDone chan struct{}
 

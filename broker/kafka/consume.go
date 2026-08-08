@@ -62,6 +62,13 @@ func (c *client) Subscribe(ctx context.Context, topic string, h broker.MessageHa
 	// fetching for the first, and the loop ends when the client closes.
 	c.startLoop()
 
+	// Deliveries run under the loop's cancellation and the caller's values.
+	// WithoutCancel on the caller's context is deliberate: cancelling it
+	// already deregisters this subscription through the goroutine below, and
+	// letting it also cancel in-flight deliveries would abort work the drain
+	// exists to finish.
+	sub.ctx = deliveryContext{Context: c.loopCtx, values: context.WithoutCancel(ctx)}
+
 	// Deregister when this subscription's context ends. The loop is shared,
 	// so it must keep running for the other subscriptions; what has to stop
 	// is delivery to THIS handler.
@@ -92,11 +99,35 @@ func (c *client) Subscribe(ctx context.Context, topic string, h broker.MessageHa
 	return nil
 }
 
-// subscription is one Subscribe call: a handler plus whether it is still live.
+// deliveryContext grafts a subscription's VALUES onto the poll loop's
+// cancellation. Neither context can serve alone.
+//
+// The loop is shared by every subscription and bound to the client's
+// lifetime, so its cancellation is the one that must break a handler sitting
+// in a retry backoff at shutdown step 3. The values are the caller's, and the
+// port requires them: app.Telemetry rides the context, so a delivery context
+// built from context.Background() severs trace continuation and strips
+// traceparent from every event the consumer raises — silently, with nothing
+// failing. brokertest checks it now; this driver used to fail that check
+// while the in-process one passed.
+//
+// It is built ONCE PER SUBSCRIPTION, not per delivery, so the request path
+// keeps its allocation count (invariant 7). The standard library has no
+// context merge, and four fields is cheaper than inventing one.
+type deliveryContext struct {
+	context.Context                 // cancellation, deadline, Err — the loop's
+	values          context.Context // Value — the caller's
+}
+
+func (d deliveryContext) Value(k any) any { return d.values.Value(k) }
+
+// subscription is one Subscribe call: a handler, the context its deliveries
+// run under, and whether it is still live.
 //
 // The flag exists because deregistration has to take effect in the MIDDLE of
 // a dispatched batch, not merely by the next poll.
 type subscription struct {
+	ctx  context.Context
 	h    broker.MessageHandler
 	live atomic.Bool
 }
@@ -105,6 +136,7 @@ type subscription struct {
 func (c *client) startLoop() {
 	c.loopOnce.Do(func() {
 		ctx, cancel := context.WithCancel(context.Background())
+		c.loopCtx = ctx
 		c.stopLoop = cancel
 		c.loopDone = make(chan struct{})
 		go func() {
@@ -169,7 +201,7 @@ func (c *client) poll(ctx context.Context) {
 		wg.Add(1)
 		go func(fp kgo.FetchTopicPartition) {
 			defer wg.Done()
-			c.dispatch(ctx, fp)
+			c.dispatch(fp)
 		}(fp)
 	})
 	wg.Wait()
@@ -185,7 +217,11 @@ func (c *client) poll(ctx context.Context) {
 // is redelivered. Head-of-line blocking on that partition is not a bug — it
 // is what per-key ordering costs, and Retry has already exhausted its policy
 // before the driver ever sees the error.
-func (c *client) dispatch(ctx context.Context, fp kgo.FetchTopicPartition) {
+// dispatch takes no context: each subscription carries its own, because a
+// delivery's values are the ones its Subscribe caller passed and two
+// subscriptions on one partition must not see each other's. The loop's
+// cancellation still reaches every handler — sub.ctx embeds it.
+func (c *client) dispatch(fp kgo.FetchTopicPartition) {
 	c.mu.Lock()
 	subs := append([]*subscription(nil), c.handlers[fp.Topic]...)
 	c.mu.Unlock()
@@ -205,11 +241,16 @@ func (c *client) dispatch(ctx context.Context, fp kgo.FetchTopicPartition) {
 				continue
 			}
 			h := s.h
+			// s.ctx, not the loop's ctx: it carries the loop's cancellation
+			// AND the values the caller passed to Subscribe, which the port
+			// requires and app.Telemetry travels on. Two subscriptions on one
+			// partition therefore see their own values, not each other's.
+			//
 			// Every handler must dispose of the record before its offset can
 			// advance: with fan-out the offset is shared, so one failure
 			// redelivers to all of them. The chain's per-subscription dedupe
 			// is what keeps that from re-running the ones that succeeded.
-			if err := h(ctx, msg); err != nil {
+			if err := h(s.ctx, msg); err != nil {
 				ok = false
 				break
 			}
