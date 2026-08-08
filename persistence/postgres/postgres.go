@@ -27,6 +27,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -178,7 +179,13 @@ func Module(opts ...Option) warren.Module {
 	if cfg.lock != nil {
 		lk := *cfg.lock
 		opts2 = append(opts2,
-			warren.Providers(func(p *pool) outbox.Elector { return advisoryLock{pool: p, cfg: lk} }),
+			warren.Providers(func(p *pool) outbox.Elector {
+				return advisoryLock{
+					pool: p, cfg: lk,
+					busy:  &atomic.Bool{},
+					state: &atomic.Int32{},
+				}
+			}),
 			warren.Exports[outbox.Elector](),
 		)
 	}

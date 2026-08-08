@@ -1,12 +1,16 @@
 package postgres
 
 import (
+	"bytes"
 	"context"
 	"flag"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/MerseniBilel/warren/persistence"
 
@@ -434,4 +438,100 @@ func TestApplicationNameIdentifiesTheService(t *testing.T) {
 			t.Errorf("application_name = %q, want the DSN's %q", got, "from-dsn")
 		}
 	})
+}
+
+// --- leadership, and the silence a field test found in it -----------------
+
+// TestASecondLeadOnOneElectorIsRefused — an elector is ONE lock key. A field
+// test wired the outbox relay and an SLA sweeper to the same one, following
+// the README's own advice that a scheduler is "an ordinary lifecycle.Hook"
+// and "outbox.Elector already gives leader-only". Whichever goroutine woke
+// first took the lock; the other returned to a retry loop and did nothing for
+// the life of the process, emitting NOTHING, while /readyz reported 200 and
+// named the outbox an up critical dependency.
+//
+// Four runs of one binary: twice the relay won and no ticket ever escalated,
+// twice the sweeper won and no event was ever published. Both looked healthy.
+func TestASecondLeadOnOneElectorIsRefused(t *testing.T) {
+	t.Parallel()
+	el := advisoryLock{
+		cfg:   lockConfig{key: "warren/outbox", retry: time.Hour},
+		busy:  &atomic.Bool{},
+		state: &atomic.Int32{},
+	}
+
+	// A real first Lead cannot be held open here: with no pool, leadOnce
+	// returns errNotStarted at once and the flag is cleared before a second
+	// goroutine could observe it. So the state a live Lead leaves behind is
+	// set directly — the subject is the guard, not the scheduling that
+	// reaches it, and TestLeadIsReusableAfterItReturns covers the clearing.
+	el.busy.Store(true)
+
+	err := el.Lead(context.Background(), func(context.Context) error { return nil })
+	if err == nil {
+		t.Fatal("a second Lead on one elector was accepted — one of the two would silently never run")
+	}
+	for _, want := range []string{"competing for one leadership", "warren/outbox", "lock of its own"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the diagnostic does not mention %q:\n%s", want, err)
+		}
+	}
+}
+
+// TestLeadIsReusableAfterItReturns — the guard is against CONCURRENT callers,
+// not against a component that leads, stops, and stands again. A flag that
+// was never cleared would break every restart.
+func TestLeadIsReusableAfterItReturns(t *testing.T) {
+	t.Parallel()
+	el := advisoryLock{
+		cfg:   lockConfig{key: "warren/outbox", retry: time.Hour},
+		busy:  &atomic.Bool{},
+		state: &atomic.Int32{},
+	}
+	for i := range 2 {
+		if err := el.Lead(context.Background(), func(context.Context) error { return nil }); err == nil {
+			t.Fatalf("call %d: want errNotStarted from the nil pool", i)
+		} else if strings.Contains(err.Error(), "competing") {
+			t.Fatalf("call %d was refused as contended: %v", i, err)
+		}
+	}
+}
+
+// TestLeadershipTransitionsAreLoggedOnce — standing by is the CORRECT state
+// on most replicas, and it was reported nowhere at all. It is now, once per
+// transition rather than once per retry: a line every few seconds for the
+// life of the process is the same silence by a different route.
+func TestLeadershipTransitionsAreLoggedOnce(t *testing.T) {
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	el := advisoryLock{
+		cfg:   lockConfig{key: "sla/sweeper", retry: time.Hour},
+		busy:  &atomic.Bool{},
+		state: &atomic.Int32{},
+	}
+	ctx := context.Background()
+
+	el.sayOnce(ctx, false, "standing by: another holder has this leadership")
+	el.sayOnce(ctx, false, "standing by: another holder has this leadership")
+	el.sayOnce(ctx, false, "standing by: another holder has this leadership")
+	if n := strings.Count(buf.String(), "standing by"); n != 1 {
+		t.Errorf("standing by was logged %d times, want 1 — a retry loop must not narrate itself", n)
+	}
+	if !strings.Contains(buf.String(), `"lock_key":"sla/sweeper"`) {
+		t.Errorf("the line does not name the lock: %s", buf.String())
+	}
+
+	el.sayOnce(ctx, true, "leadership taken")
+	if !strings.Contains(buf.String(), "leadership taken") {
+		t.Errorf("taking leadership was not logged: %s", buf.String())
+	}
+	// And back again: a demotion is news even though standing by was said
+	// before, because what changed is that this process STOPPED working.
+	el.sayOnce(ctx, false, "leadership released")
+	if !strings.Contains(buf.String(), "leadership released") {
+		t.Errorf("losing leadership was not logged: %s", buf.String())
+	}
 }

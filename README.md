@@ -25,7 +25,12 @@
 > guards an outbound call Warren does not make. `jobs` was **dropped** too: a
 > scheduler is an ordinary `lifecycle.Hook`, which starts after its
 > dependencies and is joined before them by construction, and `outbox.Elector`
-> already gives leader-only.
+> already gives leader-only — **but note that one elector is one advisory
+> lock.** A field test wired a scheduler and the outbox relay to the same one;
+> whichever goroutine woke first took it and the other silently did nothing
+> for the life of the process. That is refused with a diagnostic now, and
+> leader-only work that must run alongside the relay belongs inside the
+> function the relay leads with, until Warren exports a second elector.
 > The repository is being rebuilt spec-first: every
 > package gets an approved `SPEC.md` before its first line of Go, retired once
 > the package is implemented and reviewed. [warren.md](warren.md) is the
