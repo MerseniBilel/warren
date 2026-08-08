@@ -153,11 +153,16 @@ func Load[T any](opts ...Option) (T, error) {
 
 	// Layer 3 — environment, only under an explicit prefix.
 	if s.useEnv {
+		known := make(map[string]string, len(fields))
 		for _, f := range fields {
 			name := f.envName(s.envPrefix)
+			known[squash(name)] = name
 			if v, ok := os.LookupEnv(name); ok {
 				entries[f.key()] = entry{value: v, origin: "environment variable " + name}
 			}
+		}
+		if err := checkMisspelledEnv(s.envPrefix, known); err != nil {
+			return out, err
 		}
 	}
 
@@ -223,6 +228,63 @@ type hint string
 func (h hint) Error() string { return string(h) }
 
 func (f field) key() string { return strings.Join(f.path, ".") }
+
+// squash removes every non-alphanumeric character and upper-cases the rest,
+// so WARREN_HTTPPORT and WARREN_HTTP_PORT become the same string.
+func squash(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z':
+			b.WriteRune(r - 32)
+		case (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9'):
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+// checkMisspelledEnv refuses a variable inside Warren's own namespace that
+// names a real field but for its separators.
+//
+// WithEnvPrefix means Warren owns PREFIX_*, and a field test set
+// ORDERS_OUTBOX_BATCHSIZE where the field was outbox.batch_size: the service
+// booted clean and quietly used the default. Nothing matched, so nothing was
+// said, which is the silent-misconfiguration shape this project refuses.
+//
+// The rule cannot guess, and that is deliberate. It fires ONLY on an exact
+// match once separators are removed — no edit distance, no prefix heuristic —
+// because the namespace is shared with the deployment. Kubernetes injects
+// PREFIX_PORT, PREFIX_SERVICE_HOST and PREFIX_PORT_8080_TCP_ADDR for a
+// Service whose name matches, and a looser rule would refuse the boot of
+// every deployment that has one. Those normalise onto nothing Warren
+// declares and pass untouched.
+func checkMisspelledEnv(prefix string, known map[string]string) error {
+	lead := prefix + "_"
+	var errs []error
+	for _, kv := range os.Environ() {
+		eq := strings.IndexByte(kv, '=')
+		if eq < 0 {
+			continue
+		}
+		name := kv[:eq]
+		if !strings.HasPrefix(name, lead) {
+			continue
+		}
+		want, ok := known[squash(name)]
+		if !ok || want == name {
+			continue
+		}
+		errs = append(errs, fmt.Errorf(
+			"config: %s is set, but the field is %s — the value is being ignored.\n"+
+				"  Warren reads only %s under WithEnvPrefix(%q); a name that differs\n"+
+				"  only by its underscores matches nothing and takes the default in silence.\n"+
+				"  Rename it to %s, or unset it",
+			name, want, want, prefix, want))
+	}
+	return errors.Join(errs...)
+}
 
 func (f field) envName(prefix string) string {
 	name := strings.ToUpper(strings.Join(f.path, "_"))

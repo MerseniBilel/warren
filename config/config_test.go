@@ -450,3 +450,45 @@ func TestModuleIsEager(t *testing.T) {
 		t.Errorf("error = %v, want the missing-required diagnostic", err)
 	}
 }
+
+// TestATypoedEnvironmentVariableIsRefused — field test #11, defect 8.
+//
+// The engineer set ORDERS_OUTBOX_BATCHSIZE where the field is
+// outbox.batch_size (ORDERS_OUTBOX_BATCH_SIZE). The service booted clean and
+// used the default of 100. Nothing matched, so nothing was said.
+//
+// WithEnvPrefix means Warren OWNS that namespace, and the rule here cannot
+// guess: a variable is refused only when it matches a real field EXACTLY once
+// separators are removed, which no coincidence produces. Kubernetes' injected
+// ORDERS_PORT / ORDERS_SERVICE_HOST normalise to nothing Warren declares, so
+// they pass untouched — that false positive is what a looser rule would have
+// cost, and it would have broken every deployment whose service shares the
+// prefix.
+func TestATypoedEnvironmentVariableIsRefused(t *testing.T) {
+	t.Setenv("WARREN_POSTGRES_DSN", "x")
+	t.Setenv("WARREN_HTTPPORT", "7070") // the field is http_port
+
+	_, err := config.Load[appConfig](config.WithEnvPrefix("WARREN"))
+	if err == nil {
+		t.Fatal("a variable in Warren's own namespace that matches a field but for its separators was ignored in silence")
+	}
+	for _, want := range []string{"WARREN_HTTPPORT", "WARREN_HTTP_PORT"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the diagnostic does not name %q:\n%s", want, err)
+		}
+	}
+}
+
+// The rule must not fire on the environment a real deployment carries.
+func TestUnrelatedVariablesInTheNamespaceArePassedOver(t *testing.T) {
+	t.Setenv("WARREN_POSTGRES_DSN", "x")
+	// Exactly what Kubernetes injects for a Service named "warren".
+	t.Setenv("WARREN_PORT", "tcp://10.0.0.1:8080")
+	t.Setenv("WARREN_SERVICE_HOST", "10.0.0.1")
+	t.Setenv("WARREN_SERVICE_PORT", "8080")
+	t.Setenv("WARREN_PORT_8080_TCP_ADDR", "10.0.0.1")
+
+	if _, err := config.Load[appConfig](config.WithEnvPrefix("WARREN")); err != nil {
+		t.Fatalf("a deployment's own variables in the namespace were refused: %v", err)
+	}
+}
