@@ -576,6 +576,21 @@ res, err := warrentest.Invoke[application.CreateDoc, application.DocView](
 	warrentest.AsCaller(ctx, "u-1", "docs:write"), app, cmd)
 ```
 
+`AsCaller` sets a **subject and scopes, and no claims** — so a handler
+reading `app.Claim[string](id, "tid")` gets `("", false)` from it, and a
+multi-tenant test needs the Identity built out:
+
+```go
+ctx := app.WithIdentity(ctx, app.Identity{
+	Subject: "u-1",
+	Scopes:  []string{"docs:write"},
+	Claims:  map[string]any{"tid": "acme"},
+})
+```
+
+This page used to show both in one section without saying so, and every
+tenant-aware test written from it had to find out the hard way.
+
 **A custom policy is an ordinary type** — this is a tenant check, and it can
 read path parameters because guards see them on every route shape:
 

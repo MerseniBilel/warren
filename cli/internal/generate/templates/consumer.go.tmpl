@@ -47,6 +47,12 @@ func (h *on{{.Name}}) Handle(ctx context.Context, e {{.Name}}) ({{.Name}}Handled
 	// error — so without this check a wire-format mismatch acks for ever and
 	// reports nothing anywhere. INVALID dead-letters without retrying, which
 	// is right: redelivering the same unreadable payload cannot help.
+	//
+	// It guards THIS FIELD ONLY. Every field you add above needs its own
+	// line here if the handler cannot do its job without it — a field test
+	// added a tenant, left the guard alone, and a message missing tenant_id
+	// created a tenant-less record that went on to escalate and page an
+	// empty address, with no error and no dead letter anywhere.
 	if e.{{.Aggregate}}ID == "" {
 		return {{.Name}}Handled{}, errors.Invalid("{{.AggregateSnake}}_id",
 			stderrors.New("the message carried no {{.AggregateSnake}}_id, so this payload is not the event this handler decodes from "+{{.TopicLiteral}}))

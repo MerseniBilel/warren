@@ -52,6 +52,13 @@ var ConfigModule = sync.OnceValue(func() warren.Module {
 //
 // It is the same variable cmd/migrate reads, so the app and its migrations
 // cannot disagree about which database they mean.
+//
+// It is not the ONLY way. config.Load at composition time — in main, before
+// warren.New — gives you the same value with defaults, validation and the
+// flag layer, and you pass it as postgres.DSN(cfg.Postgres.DSN). What is
+// ruled out is reading it from the CONTAINER, because this option is needed
+// while the graph is being declared. Take the env var to start; move to
+// config.Load when you want the validation.
 var Postgres = sync.OnceValue(func() warren.Module {
 	return postgres.Module(
 		postgres.DSN(os.Getenv("{{.EnvPrefix}}_DATABASE_URL")),
