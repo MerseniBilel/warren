@@ -41,3 +41,44 @@ jobs:
             | sh -s -- -b "$(go env GOPATH)/bin" v2.12.2
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
       - run: make lint
+
+  # The contract suites, against a real database.
+  #
+  # These are deliberately NOT in `make ci` — AGENT.md's unit-test rule is no
+  # Docker and no network — so nothing ran them automatically, and drift in
+  # them was invisible until someone remembered. It went unnoticed once: the
+  # CONTENTION split (2026-08-08) updated the memory driver and the CLI's
+  # repository template, and left this module's own contract FIXTURE
+  # returning the old code. `make ci` was green the whole time.
+  #
+  # Postgres only. Kafka's suite needs topic setup this job would have to
+  # duplicate, and `brokertest.Run` is still run by hand against a real
+  # broker — say so rather than imply coverage that is not here.
+  integration:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: warren
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+        ports:
+          - 5433:5432
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.x"
+      - name: persistence/postgres contract suites
+        env:
+          WARREN_TEST_POSTGRES_DSN: postgres://postgres:warren@localhost:5433/postgres?sslmode=disable
+        # `make workspace`, not a hand-copied module list: the Makefile's
+        # MODULES is the one place a new module gets registered, and this
+        # job duplicating it is the drift the lint job above already had.
+        run: |
+          make workspace
+          cd persistence/postgres && go test -tags integration -count=1 ./...

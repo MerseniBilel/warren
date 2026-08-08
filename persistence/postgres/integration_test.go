@@ -271,7 +271,14 @@ func (r invoiceRepo) Save(ctx context.Context, inv *invoice) error {
 		return err
 	}
 	if n == 0 {
-		return werrors.Conflict("invoice %s was changed by another request since it was loaded (expected version %d)", inv.ID(), expected)
+		// The same split the generated repository makes, and the contract
+		// suite requires: an insert that matched nothing is two requests
+		// minting one identity, which no retry can fix; an update that
+		// matched nothing is a race, which the next attempt usually wins.
+		if expected == 0 {
+			return werrors.Conflict("invoice %s already exists", inv.ID())
+		}
+		return werrors.Contention("invoice %s was changed by another request since it was loaded (it was at version %d)", inv.ID(), expected)
 	}
 	inv.SetVersion(expected + 1)
 	persistence.Track(ctx, inv)
