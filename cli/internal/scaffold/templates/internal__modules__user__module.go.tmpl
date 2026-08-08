@@ -33,8 +33,14 @@ var Module = sync.OnceValue(func() warren.Module {
 		// registered at boot step 5, and boot refuses a controller listed as
 		// a plain provider rather than let it serve nothing.
 		warren.Controllers(NewController),
-		// Only this leaves the module: another feature can depend on the
-		// port, never on this feature's internals.
+		// Only this leaves the module. Note what ANOTHER FEATURE needs in
+		// order to use it: domain.UserRepository is declared inside this
+		// feature, and `warren lint arch` refuses a sibling feature importing
+		// that package — so Exports alone does not make it reachable. A port
+		// genuinely shared between features moves to internal/contracts/user/
+		// first (self-contained, importing no feature), and this line exports
+		// THAT type. Within one service, most of what looks like a shared
+		// port is really an event.
 		warren.Exports[domain.UserRepository](),
 	)
 })

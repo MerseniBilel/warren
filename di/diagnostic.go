@@ -82,6 +82,26 @@ func errMissing(target string, chain []string, declared, scope string, candidate
 			} else {
 				fmt.Fprintf(&b, "    • %s is registered in scope %q but not exported.\n", c.provider, c.scope)
 				fmt.Fprintf(&b, "      Add to %s's module: warren.Exports[%s]()\n", c.scope, target)
+				// The block used to stop there, and that made two shipped
+				// tools contradict each other: a field test followed this
+				// advice between two feature modules and `warren lint arch`
+				// then refused the import the advice requires. Exports is
+				// necessary but not sufficient, and saying so is the fix
+				// (architect ruling, 2026-08-08).
+				//
+				// It prints unconditionally because di sees scope NAMES, not
+				// import paths — reflect.Type.String() drops the path — so it
+				// cannot tell a sibling feature from platform or from
+				// warren/persistence/postgres. Three lines that are true in
+				// every case beat a condition that guesses.
+				b.WriteString("      That is the first half. To NAME the type, this module must also\n" +
+					"      import the package declaring it — and `warren lint arch` refuses one\n" +
+					"      feature module importing another's packages. A port shared between\n" +
+					"      features belongs in a self-contained package outside\n" +
+					"      internal/modules/ (internal/contracts/<owner>/), declaring the\n" +
+					"      interface and its own types and importing no feature.\n" +
+					"      If this module is REACTING rather than asking, consume the owner's\n" +
+					"      event instead — warren g consumer — and neither half is needed.\n")
 			}
 		}
 		// "Or provide it locally" hands back a provider NAME derived from

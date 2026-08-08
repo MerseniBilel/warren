@@ -49,7 +49,13 @@ a DTO belongs in `application`; a value object or an invariant belongs in
 equivalent:
 
 - If A genuinely needs a *capability* B owns: B exports a port with
-  `warren.Exports[...]()`, and A depends on the port.
+  `warren.Exports[...]()`, and A depends on the port — **and the port's
+  interface must live in a self-contained package outside
+  `internal/modules/`** (`internal/contracts/<owner>/`, declaring the
+  interface and its own types and importing no feature). `Exports` alone is
+  not enough: to *name* the type A has to import the package declaring it,
+  and this rule refuses A importing B's packages. A port left inside B is a
+  port no other feature can legally reach.
 - If A is reacting to something that *happened* in B: A should consume B's
   **event**, not call into it. `warren g consumer` writes that. The event is
   a wire contract, so B stays extractable into its own service — which a

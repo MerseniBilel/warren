@@ -586,10 +586,34 @@ func explain(v Violation) string {
 			"  type, which is total coupling with a local name."
 	}
 	if v.Rule == "cross-module" {
+		// The remedy used to end at "or an exported port" — a route this rule
+		// makes structurally unreachable, because naming another feature's
+		// interface type requires importing the package that declares it. The
+		// DI diagnostic recommends warren.Exports for exactly this case, so
+		// the two tools instructed users in a circle. Architect ruling,
+		// 2026-08-08: the sanctioned home for a shared port is a
+		// self-contained package OUTSIDE internal/modules/, which featureOf
+		// already exempts and findLaunderedImports already polices.
 		return "  This reaches into another feature module's internals. Modules talk\n" +
 			"  through published events or an exported port, never by importing each\n" +
 			"  other's packages — that is what makes extracting one into its own\n" +
-			"  service a wiring change rather than a rewrite."
+			"  service a wiring change rather than a rewrite.\n\n" +
+			"  Fix one of:\n" +
+			"    • If this feature is REACTING to something that happened in the\n" +
+			"      other, consume its EVENT. `warren g consumer` writes the handler\n" +
+			"      and the subscription. The event is a wire contract, so the other\n" +
+			"      feature stays extractable. This is the preferred answer.\n" +
+			"    • If this feature needs to ASK the other something, the port has to\n" +
+			"      live where both may see it — which is NOT inside either feature.\n" +
+			"      Move the interface to a self-contained package outside\n" +
+			"      internal/modules/:\n\n" +
+			"          internal/contracts/<owner>/  — the interface and its own\n" +
+			"          request and result types, importing no feature package.\n\n" +
+			"      The owner's infrastructure implements it, the owner's module\n" +
+			"      exports it with warren.Exports[...](), and this feature imports\n" +
+			"      the contract package and the owner's module value in module.go.\n" +
+			"      A contract package that imports a feature is reported here too,\n" +
+			"      as a cross-module import through a helper."
 	}
 	switch v.Layer {
 	case "domain":

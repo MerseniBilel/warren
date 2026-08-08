@@ -680,3 +680,125 @@ var _ = domain.New
 		t.Errorf("violations = %d, want exactly 1 (domain's own):\n%s", len(report.Violations), report.String())
 	}
 }
+
+// TestTheSanctionedCrossFeaturePortLintsClean is the test that proves ruling
+// 4 of 2026-08-08 is actually reachable.
+//
+// Before it, the two shipped tools instructed users in a circle. Boot said
+// "Add to ordering's module: warren.Exports[domain.OrderRepository]()", and
+// `warren lint arch` then refused the import that naming the type requires —
+// so warren.Exports between two feature modules was structurally impossible.
+//
+// The sanctioned path: the port moves to a self-contained package OUTSIDE
+// internal/modules/, which featureOf already exempts. No rule changed; the
+// remedy text did.
+func TestTheSanctionedCrossFeaturePortLintsClean(t *testing.T) {
+	t.Parallel()
+
+	dir := fixture(t, map[string]string{
+		// The contract: an interface and its own types, importing no feature.
+		"internal/contracts/ordering/orders.go": `package ordering
+
+import "context"
+
+type Order struct{ ID string }
+
+type Orders interface {
+	Find(ctx context.Context, id string) (Order, error)
+}
+`,
+		// The owner implements it.
+		"internal/modules/ordering/infrastructure/repo.go": `package infrastructure
+
+import (
+	"context"
+
+	"example.com/fix/internal/contracts/ordering"
+)
+
+type Repo struct{}
+
+func (Repo) Find(context.Context, string) (ordering.Order, error) { return ordering.Order{}, nil }
+`,
+		// The other feature asks through the contract, never through ordering.
+		"internal/modules/fulfillment/application/ship.go": `package application
+
+import (
+	"context"
+
+	"example.com/fix/internal/contracts/ordering"
+)
+
+type Ship struct{ Orders ordering.Orders }
+
+func (s Ship) Do(ctx context.Context, id string) error {
+	_, err := s.Orders.Find(ctx, id)
+	return err
+}
+`,
+	})
+	report, err := arch.Check(dir, arch.Options{Rules: arch.Layers})
+	if err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	if len(report.Violations) != 0 {
+		t.Errorf("the sanctioned cross-feature port was refused — the ruling is unreachable:\n%s", report)
+	}
+}
+
+// A contract package that absorbs a feature's types is the drift this shape
+// invites, and findLaunderedImports already catches it: the contract is a
+// helper, the chain is traversed, and the asking feature is reported.
+func TestAContractPackageThatImportsAFeatureIsReported(t *testing.T) {
+	t.Parallel()
+
+	dir := fixture(t, map[string]string{
+		"internal/modules/ordering/domain/order.go": "package domain\n\ntype Order struct{}\n",
+		"internal/contracts/ordering/orders.go": `package ordering
+
+import "example.com/fix/internal/modules/ordering/domain"
+
+type Orders interface{ Find() domain.Order }
+`,
+		"internal/modules/fulfillment/application/ship.go": `package application
+
+import "example.com/fix/internal/contracts/ordering"
+
+type Ship struct{ Orders ordering.Orders }
+`,
+	})
+	report, _ := arch.Check(dir, arch.Options{Rules: arch.Layers})
+	if len(report.Violations) == 0 {
+		t.Fatalf("a contract package importing a feature was not reported:\n%s", report)
+	}
+	if !strings.Contains(report.String(), "fulfillment") {
+		t.Errorf("the report does not name the feature that reached through it:\n%s", report)
+	}
+	if report.Violations[0].Rule != "cross-module-chain" {
+		t.Errorf("reported as %q, want cross-module-chain — the laundering rule, not an incidental match:\n%s",
+			report.Violations[0].Rule, report)
+	}
+}
+
+// The remedy must name the sanctioned path, or the user is told what is wrong
+// and not what to do — which is how the contradiction shipped.
+func TestTheCrossModuleRemedyNamesTheContractPackage(t *testing.T) {
+	t.Parallel()
+
+	dir := fixture(t, map[string]string{
+		"internal/modules/billing/domain/invoice.go": "package domain\n\ntype Invoice struct{}\n",
+		"internal/modules/user/application/svc.go": `package application
+
+import "example.com/fix/internal/modules/billing/domain"
+
+type S struct{ I domain.Invoice }
+`,
+	})
+	report, _ := arch.Check(dir, arch.Options{Rules: arch.Layers})
+	got := report.String()
+	for _, want := range []string{"internal/contracts/", "warren g consumer", "warren.Exports"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("the remedy does not mention %q:\n%s", want, got)
+		}
+	}
+}

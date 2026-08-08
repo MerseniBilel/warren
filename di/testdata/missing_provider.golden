@@ -10,4 +10,12 @@
   Did you mean:
     • postgres.NewUserRepository is registered in scope "billing" but not exported.
       Add to billing's module: warren.Exports[domain.UserRepository]()
+      That is the first half. To NAME the type, this module must also
+      import the package declaring it — and `warren lint arch` refuses one
+      feature module importing another's packages. A port shared between
+      features belongs in a self-contained package outside
+      internal/modules/ (internal/contracts/<owner>/), declaring the
+      interface and its own types and importing no feature.
+      If this module is REACTING rather than asking, consume the owner's
+      event instead — warren g consumer — and neither half is needed.
     • Or provide it locally:  warren.Providers(postgres.NewUserRepository)

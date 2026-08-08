@@ -364,6 +364,24 @@ func Module() warren.Module {
 
 Anything not in `Exports` is private to the module. Another module importing `user` sees `domain.UserRepository` and **cannot** resolve `*RegisterUserHandler`.
 
+**`Exports` is necessary, not sufficient, when the consumer is another
+FEATURE.** To name `domain.UserRepository` a feature must import the package
+declaring it, and `warren lint arch` refuses one feature module importing
+another's packages — so a port left inside `internal/modules/user/domain/` is
+one no sibling feature can legally reach, and the two tools used to recommend
+each other's refusals in a circle. Architect ruling, 2026-08-08: a port
+genuinely shared between features lives in a **self-contained package outside
+`internal/modules/`** — `internal/contracts/<owner>/`, declaring the
+interface and its own request and result types and importing no feature
+package. The owner's `infrastructure` implements it, the owner's module
+exports it, and the asking feature imports the contract package plus the
+owner's module value in `module.go`. A contract package that starts importing
+a feature is reported as a cross-module import through a helper, which is what
+keeps the shape honest. Platform and adapter modules are unaffected: the rule
+is about feature-to-feature only. And within one service, most of what looks
+like a shared port is really an event — `warren g consumer` is the preferred
+answer.
+
 ---
 
 ### 2.2 `warren/di`
