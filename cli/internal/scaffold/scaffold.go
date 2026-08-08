@@ -125,33 +125,17 @@ func New(opts Options) error {
 		return errConflict(conflicts)
 	}
 
+	// frameworkModules is EVERY Warren module, in go.mod order. It is one
+	// list because it has two readers: the go.mod this writes, and the
+	// notice `warren new` prints when --framework was NOT given. Those two
+	// disagreed — the notice named two modules while a
+	// `--db postgres --broker kafka` project requires four, so following it
+	// verbatim left the project unable to resolve half the framework.
 	if opts.FrameworkPath != "" {
-		// One replace per module the go.mod REQUIRES. A missing one is not a
-		// warning: the module is untagged, so `go mod tidy` fails on it and
-		// the scaffold does not build at all — which is the whole reason the
-		// flag exists.
-		// EVERY submodule, not only the ones this scaffold requires today.
-		//
-		// A replace for a module the go.mod does not require is inert — but
-		// the moment a user runs `go get github.com/MerseniBilel/warren/...`
-		// for one that is missing, it resolves from GITHUB instead of the
-		// local checkout, silently, and they are running two different
-		// versions of the framework at once. A field test hit exactly that
-		// with validate/playground. All of this goes away when v0.1.0 is
-		// tagged and the flag stops being necessary.
-		mods := []string{
-			"",
-			"/transport/http",
-			"/persistence/postgres",
-			"/observability",
-			"/broker/kafka",
-			"/validate/playground",
-		}
-		var b strings.Builder
-		for _, m := range mods {
-			fmt.Fprintf(&b, "\nreplace github.com/MerseniBilel/warren%s => %s%s\n", m, opts.FrameworkPath, m)
-		}
-		files["go.mod"] = append(files["go.mod"], []byte(b.String())...)
+		// A missing replace is not a warning: the module is untagged, so
+		// `go mod tidy` fails on it and the scaffold does not build at all —
+		// which is the whole reason the flag exists.
+		files["go.mod"] = append(files["go.mod"], []byte(Replaces(opts.FrameworkPath, "\n"))...)
 	}
 
 	for path, content := range files {
@@ -328,4 +312,34 @@ func checkModulePath(path, name string) error {
 		}
 	}
 	return nil
+}
+
+// frameworkModules is every Warren module, as a path suffix. EVERY one, not
+// only those a given scaffold requires today: a replace for an unrequired
+// module is inert, but the moment a user runs `go get` for one that is
+// missing it resolves from GITHUB instead of the local checkout, silently,
+// and they are running two versions of the framework at once. A field test
+// hit exactly that with validate/playground.
+var frameworkModules = []string{
+	"",
+	"/transport/http",
+	"/persistence/postgres",
+	"/observability",
+	"/broker/kafka",
+	"/validate/playground",
+}
+
+// Replaces renders a replace directive per framework module, each prefixed
+// by lead. It is what `--framework` writes into go.mod and what the notice
+// prints when the flag was omitted, so the two cannot drift apart again.
+//
+// All of this goes away when v0.1.0 is tagged and the flag stops being
+// necessary.
+func Replaces(frameworkPath, lead string) string {
+	var b strings.Builder
+	for _, m := range frameworkModules {
+		fmt.Fprintf(&b, "%sreplace github.com/MerseniBilel/warren%s => %s%s\n",
+			lead, m, frameworkPath, m)
+	}
+	return b.String()
 }

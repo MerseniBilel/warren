@@ -507,3 +507,53 @@ func TestMemoryBrokerRemainsTheDefault(t *testing.T) {
 		t.Errorf("the default go.mod requires the kafka module:\n%s", gomod)
 	}
 }
+
+// TestEveryRequiredFrameworkModuleHasAReplace — Warren is unpublished, so a
+// require with no replace is not a warning: `go mod tidy` fails on it and the
+// project does not build at all.
+//
+// The list was written out by hand in TWO places — here and in the notice
+// `warren new` prints when --framework is omitted — and they disagreed. The
+// notice named two modules; a `--db postgres --broker kafka` project requires
+// four. Following the printed advice verbatim left half the framework
+// unresolvable, with a go.sum error naming neither cause nor fix, which is
+// precisely what that notice exists to prevent.
+func TestEveryRequiredFrameworkModuleHasAReplace(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct{ db, broker string }{
+		{"memory", "memory"},
+		{"postgres", "memory"},
+		{"memory", "kafka"},
+		{"postgres", "kafka"},
+	} {
+		t.Run(tc.db+"+"+tc.broker, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			if err := scaffold.New(scaffold.Options{
+				Dir: dir, Name: "app", ModulePath: "example.com/app", Version: "v0.1.0",
+				DB: tc.db, Broker: tc.broker, FrameworkPath: "/path/to/warren",
+			}); err != nil {
+				t.Fatalf("scaffold: %v", err)
+			}
+			gomod, err := os.ReadFile(filepath.Join(dir, "go.mod"))
+			if err != nil {
+				t.Fatalf("go.mod: %v", err)
+			}
+			replaces := scaffold.Replaces("/path/to/warren", "")
+
+			for line := range strings.SplitSeq(string(gomod), "\n") {
+				f := strings.Fields(line)
+				if len(f) != 2 || !strings.HasPrefix(f[0], "github.com/MerseniBilel/warren") {
+					continue
+				}
+				if !strings.Contains(replaces, "replace "+f[0]+" =>") {
+					t.Errorf("go.mod requires %s and nothing replaces it — the project will not build", f[0])
+				}
+				if !strings.Contains(string(gomod), "replace "+f[0]+" =>") {
+					t.Errorf("--framework did not write a replace for %s", f[0])
+				}
+			}
+		})
+	}
+}

@@ -155,7 +155,7 @@ func newCmd() *cobra.Command {
 	cmd.Flags().StringVar(&opts.ModulePath, "module", "", "the Go module path of the new app (required)")
 	cmd.Flags().StringVar(&opts.Dir, "dir", "", "where to write it (default: the app's name)")
 	cmd.Flags().StringVar(&opts.FrameworkPath, "framework", "", "path to a local Warren checkout, written as replace directives (needed until v0.1.0 is tagged)")
-	cmd.Flags().StringVar(&opts.Transport, "transport", "", "transport adapter (none released yet)")
+	cmd.Flags().StringVar(&opts.Transport, "transport", "", "transport adapter: http (grpc is not released yet)")
 	cmd.Flags().StringVar(&opts.DB, "db", "memory", "persistence driver: memory or postgres")
 	cmd.Flags().StringVar(&opts.Broker, "broker", "memory", "broker driver: memory or kafka")
 	return cmd
@@ -172,10 +172,14 @@ func unpublishedNotice(frameworkPath string) string {
 	if frameworkPath != "" {
 		return ""
 	}
+	// The same list --framework writes, from the same place. This used to
+	// name two modules by hand; a `--db postgres --broker kafka` project
+	// requires four, so following the notice verbatim left half the
+	// framework unresolvable — with the go.sum error naming neither the
+	// cause nor the fix, which is the thing this notice exists to prevent.
 	return "Warren is not published yet, so `go mod tidy` cannot resolve it. Either\n" +
 		"re-run with --framework <path-to-your-warren-checkout>, or add to go.mod:\n\n" +
-		"  replace github.com/MerseniBilel/warren => /path/to/warren\n" +
-		"  replace github.com/MerseniBilel/warren/transport/http => /path/to/warren/transport/http\n\n"
+		scaffold.Replaces("/path/to/warren", "  ") + "\n"
 }
 
 func envPrefix(name string) string {

@@ -18,6 +18,16 @@ jobs:
           go-version: "1.26.x"
       - run: make fmt vet invariants test
 
+  # golangci-lint-action runs in ONE directory. This is a multi-module
+  # repository and go.work is generated, never committed (invariant 8), so
+  # the action at the repo root linted the core module and nothing else —
+  # cli, transport/http, persistence/postgres, observability, broker/kafka
+  # and validate/playground were all unlinted in CI while `make lint` covered
+  # them locally. Exactly the trap CLAUDE.md names: "multi-module means
+  # `go test ./...` lies".
+  #
+  # So the binary is installed and the MAKEFILE drives it, because the
+  # Makefile's MODULES list is the one place a new module gets added.
   lint:
     runs-on: ubuntu-latest
     steps:
@@ -25,6 +35,9 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: "1.26.x"
-      - uses: golangci/golangci-lint-action@v8
-        with:
-          version: v2.12.2
+      - name: install golangci-lint
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/HEAD/install.sh \
+            | sh -s -- -b "$(go env GOPATH)/bin" v2.12.2
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+      - run: make lint
