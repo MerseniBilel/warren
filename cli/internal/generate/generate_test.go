@@ -1045,3 +1045,68 @@ func TestMemoryBrokerProjectDoesNotImportBroker(t *testing.T) {
 		t.Errorf("a memory-broker project imported a platform.Broker that does not exist:\n%s", src)
 	}
 }
+
+// TestAReadIsNotWrappedInATransaction — field test #8, defect 7. Every
+// generated command wrapped its handler in app.Transactional, including the
+// ones generated as reads. Measured against real Postgres with
+// log_statement=all, 20 GETs:
+//
+//	AS GENERATED (Transactional GET):   BEGIN statements: 22
+//	WITHOUT Transactional:              BEGIN statements: 1
+//
+// A real BEGIN/COMMIT per read, with no flag to opt out — and the generated
+// comment said "so the rows it writes ... commit together" on a handler that
+// writes nothing.
+func TestAReadIsNotWrappedInATransaction(t *testing.T) {
+	t.Parallel()
+
+	dir := app(t)
+	if _, err := generate.Module(generate.Options{Dir: dir, Name: "ticket"}); err != nil {
+		t.Fatalf("g module: %v", err)
+	}
+	if _, err := generate.Command(generate.Options{
+		Dir: dir, Module: "ticket", Name: "GetTicket",
+		Route: "/tickets/{id}", Method: "get",
+	}); err != nil {
+		t.Fatalf("g command: %v", err)
+	}
+
+	src := read(t, dir, "internal/modules/ticket/application/get_ticket.go")
+	// The CALL, not the word: the generated comment explains why there is no
+	// transaction, and naming it there is the point.
+	if strings.Contains(src, "app.Transactional[") {
+		t.Errorf("a read was wrapped in a transaction:\n%s", src)
+	}
+	if strings.Contains(src, "app.UnitOfWork") {
+		t.Errorf("a read still injects a unit of work it cannot need:\n%s", src)
+	}
+	// And its test must not reference the double that no longer exists.
+	tst := read(t, dir, "internal/modules/ticket/application/get_ticket_test.go")
+	if strings.Contains(tst, "UoW") {
+		t.Errorf("the generated test still builds a unit-of-work double:\n%s", tst)
+	}
+}
+
+// TestAWriteIsStillTransactional — the control. Every other verb writes, and
+// the transaction is what makes its rows and the outbox rows announcing them
+// commit together.
+func TestAWriteIsStillTransactional(t *testing.T) {
+	t.Parallel()
+
+	dir := app(t)
+	for _, method := range []string{"", "post", "put", "patch", "delete"} {
+		name := "Do" + strings.ToUpper(method) + "Thing"
+		if method == "" {
+			name = "DoDefaultThing"
+		}
+		if _, err := generate.Command(generate.Options{
+			Dir: dir, Module: "user", Name: name, Method: method,
+		}); err != nil {
+			t.Fatalf("g command --method %q: %v", method, err)
+		}
+		src := read(t, dir, "internal/modules/user/application/"+snakeOf(name)+".go")
+		if !strings.Contains(src, "app.Transactional") {
+			t.Errorf("--method %q lost its transaction:\n%s", method, src)
+		}
+	}
+}

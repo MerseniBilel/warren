@@ -102,7 +102,7 @@ The design rule: **every error the framework can detect surfaces at boot, never 
  1  flatten module graph resolve imports, detect cycles → fail
  2  build scopes         one child container per module, copy exported bindings
                           + an EMPTY *transport.Table in the root scope
- 3  VALIDATE GRAPH       every dep resolvable? ambiguous? unused? → fail
+ 3  VALIDATE GRAPH       every dep resolvable? ambiguous? → fail
  4  instantiate          controllers + consumers, topological order
  5  register             they build ONE route table, frozen into step 2's
  5b instantiate eager    adapters read the finished table and claim a protocol
@@ -402,9 +402,21 @@ func MustResolve[T any](c Container) T // panics with the diagnostic — the ker
 `Validate` runs entirely off Warren's own provider records — dig is asked to
 construct, never to explain — and constructs nothing: step 3 completes before
 step 4 instantiates a single singleton. `Scope(name)` is idempotent: a repeat
-call returns the same child. Whether an *unused* provider fails validation is
-still open — it needs the root package's entry-point model to be meaningful —
-so `Validate` currently checks resolvable and ambiguous.
+call returns the same child.
+
+**`Validate` checks resolvable and ambiguous. It does NOT check unused, and
+the boot diagram above said it did until 2026-08-08** — in this document and
+in AGENT.md, where a reader takes it for the contract. What actually happens
+is in `warren.Eager`'s own doc: "without it, an unconsumed provider is simply
+never built." So a component nothing injects — a sweeper, a reconciler, any
+loop that registers its own lifecycle hook — is never constructed, the boot
+is green, `/readyz` is 200, and the work never runs.
+
+`warren.Eager[T]()` is the answer today, and it has to be written by hand.
+Making it automatic is still open, and the shape is a `warren lint` rule
+rather than a boot failure: at boot, "nothing consumes this" and "this is
+dead code" are indistinguishable, and failing on the second would refuse
+projects that are merely mid-refactor.
 
 **Diagnostics are the product here.** Raw dig error:
 

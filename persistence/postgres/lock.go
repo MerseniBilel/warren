@@ -383,10 +383,6 @@ func (e *electors) warnOnPoolPressure(lc lifecycle.Lifecycle, maxConns int32) {
 	lc.Append(lifecycle.Hook{
 		Name: ModuleName + "/electors",
 		OnStart: func(ctx context.Context) error {
-			n := e.claimed()
-			if maxConns <= 0 || int32(n)*2 <= maxConns {
-				return nil
-			}
 			e.mu.Lock()
 			names := make([]string, 0, len(e.names))
 			for name := range e.names {
@@ -394,6 +390,20 @@ func (e *electors) warnOnPoolPressure(lc lifecycle.Lifecycle, maxConns int32) {
 			}
 			e.mu.Unlock()
 			sort.Strings(names)
+			n := len(names)
+
+			// One line naming every leadership this process claimed. It is
+			// what makes a MISSING one observable: a component that mints a
+			// leadership and is never constructed — because nothing injects
+			// it and nobody wrote warren.Eager — boots green, answers 200,
+			// and does nothing. Step 3 does not catch that (see warren.md
+			// §2.1), so the boot log is where its absence shows.
+			wlog.FromContext(ctx).InfoContext(ctx, "leaderships claimed",
+				"module", ModuleName, "count", n, "names", strings.Join(names, ", "))
+
+			if maxConns <= 0 || int32(n)*2 <= maxConns {
+				return nil
+			}
 			wlog.FromContext(ctx).WarnContext(ctx, "leaderships could exhaust the connection pool",
 				"module", ModuleName,
 				"leaderships", n,

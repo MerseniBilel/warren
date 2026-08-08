@@ -681,3 +681,66 @@ func TestContentionIsLoggedNotOnlyReturned(t *testing.T) {
 		t.Errorf("a component that will never run was not logged at ERROR: %s", buf.String())
 	}
 }
+
+// TestClaimedLeadershipsAreNamedAtBoot — step 3 does not check for an unused
+// provider (warren.md §2.1), so a component that mints a leadership and is
+// never constructed boots green and does nothing. The boot log is where its
+// absence is visible, which only works if the present ones are named.
+func TestClaimedLeadershipsAreNamedAtBoot(t *testing.T) {
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	e := newTestElectors()
+	if _, err := e.Elector("user/sweeper"); err != nil {
+		t.Fatalf("Elector: %v", err)
+	}
+	lc := lifecycle.New()
+	e.warnOnPoolPressure(lc, 10)
+	if err := lc.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = lc.Stop(context.Background()) })
+
+	out := buf.String()
+	if !strings.Contains(out, "leaderships claimed") {
+		t.Fatalf("the boot said nothing about leaderships: %s", out)
+	}
+	for _, want := range []string{"user/sweeper", "warren/outbox"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the line does not name %q: %s", want, out)
+		}
+	}
+	// Two leaderships against MaxConns 10 is not pressure.
+	if strings.Contains(out, "exhaust the connection pool") {
+		t.Errorf("warned about pool pressure at 2 of 10: %s", out)
+	}
+}
+
+// TestPoolPressureIsWarnedAbout — each LEADING elector holds a pooled
+// connection for as long as it leads, and this file has already produced one
+// connection-exhaustion incident.
+func TestPoolPressureIsWarnedAbout(t *testing.T) {
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	e := newTestElectors()
+	for _, n := range []string{"a", "b", "c"} {
+		if _, err := e.Elector(n); err != nil {
+			t.Fatalf("Elector(%q): %v", n, err)
+		}
+	}
+	lc := lifecycle.New()
+	e.warnOnPoolPressure(lc, 4) // 4 leaderships (incl. the relay's) against 4
+	if err := lc.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = lc.Stop(context.Background()) })
+
+	if !strings.Contains(buf.String(), "exhaust the connection pool") {
+		t.Errorf("4 leaderships against MaxConns 4 did not warn: %s", buf.String())
+	}
+}

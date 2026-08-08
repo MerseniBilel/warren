@@ -292,7 +292,7 @@ break.
  0  load config          layered: defaults → file → env → flags, validated
  1  flatten module graph resolve imports, detect cycles → fail
  2  build scopes         one child container per module, copy exported bindings
- 3  VALIDATE GRAPH       every dep resolvable? ambiguous? unused? → fail
+ 3  VALIDATE GRAPH       every dep resolvable? ambiguous? → fail
  4  instantiate          singletons, topological order
  5  register             controllers + consumers build route tables in memory
  6  OnStart              dependency order: pool → repos → consumers → servers

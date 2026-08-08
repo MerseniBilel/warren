@@ -157,6 +157,11 @@ func Command(opts Options) (string, error) {
 		return "", err
 	}
 	data["Verb"] = verb
+	// A read needs no transaction, and wrapping one costs a real BEGIN and
+	// COMMIT per request for a handler that writes nothing.
+	if verb == "Get" {
+		data["Read"] = "yes"
+	}
 	data["RequestFields"], data["FirstField"] = requestFields(data["Route"])
 	handler, err := render("command.go.tmpl", data)
 	if err != nil {
