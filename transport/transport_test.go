@@ -868,3 +868,42 @@ func TestHTTPStillRefusesAParamWithNoWildcard(t *testing.T) {
 		t.Errorf("wrong diagnostic: %v", err)
 	}
 }
+
+// TestATransactionalHandlerKeepsItsOwnName — the regression the 2026-08-08
+// ordering ruling predicted its own fix would cause, flagged before it was
+// written.
+//
+// concreteName falls through to reflect.TypeOf(h).Name() for any handler
+// that is not a HandlerFunc. Making app.Transactional return a NAMED type
+// (so Chain can see what it is stacking) means every transactional route
+// would answer "transactionalHandler[…]" — so every one of them would share
+// one span name and one metric label, silently. TestChainedHandlerGetsA-
+// MeaningfulName uses a USER middleware and cannot catch it.
+func TestATransactionalHandlerKeepsItsOwnName(t *testing.T) {
+	t.Parallel()
+
+	named := app.HandlerFunc[registerUser, userDTO](registerUser2)
+	chained := app.Chain[registerUser, userDTO](named,
+		app.Transactional[registerUser, userDTO](noopUoW{}))
+
+	b := transport.NewBuilder()
+	transport.Post(b.For("inventory"), "/x", chained)
+	tbl, err := b.Table()
+	if err != nil {
+		t.Fatalf("Table: %v", err)
+	}
+	got := tbl.HTTP()[0].Name
+	if strings.Contains(got, "transactionalHandler") {
+		t.Fatalf("name = %q — a framework wrapper's type name is not a use case, "+
+			"and every transactional route in the service would share it", got)
+	}
+	if got != "inventory.registerUser" {
+		t.Errorf("name = %q, want the request-type fallback inventory.registerUser", got)
+	}
+}
+
+func registerUser2(context.Context, registerUser) (userDTO, error) { return userDTO{}, nil }
+
+type noopUoW struct{}
+
+func (noopUoW) Do(ctx context.Context, fn func(context.Context) error) error { return fn(ctx) }

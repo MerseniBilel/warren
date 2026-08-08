@@ -511,12 +511,19 @@ correct behaviour but worth knowing.
 > its own transaction, and swapping those two arguments wraps one transaction
 > around the whole retry loop.
 >
-> That is worth spelling out because **both spellings compile, boot, pass
-> every generated test and serve 201s** — a field test wrote the wrong one
-> straight from an earlier version of this table and measured *eight handler
-> attempts for eight concurrent requests*: zero retries, and two callers got
-> a 409 for stock that existed. With the arguments the right way round, the
-> same test succeeded 8 of 8.
+> **The reverse is now REFUSED at boot**, with a panic naming the fix. It
+> used to compile, boot, pass every generated test and serve 201s — a field
+> test wrote it straight from an earlier version of this table and measured
+> *eight handler attempts for eight concurrent requests*: zero retries, and
+> two callers got a 409 for stock that existed. With the arguments the right
+> way round, the same test succeeded 8 of 8.
+>
+> An architect ruling settled that it is never legitimate. On Postgres it is
+> worse than wasteful: the version check runs inside the handler, so the
+> retry DOES run — in the same open transaction — and commits the failed
+> attempt's staged writes alongside the successful one's. To retry one flaky
+> outbound call rather than the whole handler, retry it in the adapter behind
+> its port (warren.md §7.3).
 >
 > Note the failure is not always the one you would predict. Against the
 > in-memory driver the version check runs at COMMIT, which is outside the

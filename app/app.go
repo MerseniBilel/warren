@@ -74,6 +74,10 @@ func Chain[Req, Res any](h Handler[Req, Res], mw ...Middleware[Req, Res]) Handle
 	if h == nil {
 		panic("app: Chain composed around a nil handler — the handler must exist before boot step 5 builds the route table")
 	}
+	// Seeded from the handler we were GIVEN, because
+	// Chain(Chain(h, Retrying(p)), Transactional(uow)) is the same mistake
+	// spelled in two calls.
+	sawRetry := containsRetrying[Req, Res](h)
 	for i := len(mw) - 1; i >= 0; i-- {
 		if mw[i] == nil {
 			panic(fmt.Sprintf("app: Chain middleware %d of %d is nil — append a conditional middleware only when it is enabled", i+1, len(mw)))
@@ -82,6 +86,71 @@ func Chain[Req, Res any](h Handler[Req, Res], mw ...Middleware[Req, Res]) Handle
 		if h == nil {
 			panic(fmt.Sprintf("app: middleware %d of %d returned a nil handler — a middleware must return a handler, usually by wrapping the one it was given", i+1, len(mw)))
 		}
+		switch h.(type) {
+		case retryingHandler[Req, Res]:
+			sawRetry = true
+		case transactionalHandler[Req, Res]:
+			// Transactional is being applied OUTSIDE a Retrying that is
+			// already in the stack, so one transaction would wrap every
+			// attempt. There is no correct reading of that — see the panic.
+			if sawRetry {
+				panic(errTransactionOutsideRetry(i+1, len(mw)))
+			}
+		}
 	}
 	return h
+}
+
+// containsRetrying walks a handler's wrappers looking for a Retrying. It sees
+// Warren's own middleware and stops at a user's, which is the stated limit of
+// the check.
+func containsRetrying[Req, Res any](h Handler[Req, Res]) bool {
+	for {
+		if _, ok := h.(retryingHandler[Req, Res]); ok {
+			return true
+		}
+		c, ok := h.(composed[Req, Res])
+		if !ok {
+			return false
+		}
+		h = c.inner()
+	}
+}
+
+// errTransactionOutsideRetry refuses the one composition in Chain that has no
+// correct reading.
+//
+// An architect ruling (2026-08-08) established that it is never legitimate,
+// overturning an earlier decision of mine to document it and move on. The
+// argument that changed it: Retrying re-invokes the whole HANDLER, not the
+// one flaky call, so the "retry a blipping dependency inside the transaction"
+// case only works when the handler has staged nothing yet — an unenforceable
+// property — and even then the correct ordering does the same work without
+// holding a transaction open across the backoff.
+func errTransactionOutsideRetry(pos, total int) string {
+	return fmt.Sprintf(`app: Transactional is composed OUTSIDE Retrying (middleware %d of %d), so ONE
+transaction wraps every retry attempt instead of each attempt getting its own.
+
+  Chain's FIRST middleware is the OUTERMOST one, so this:
+
+      app.Chain(h, app.Transactional(uow), app.Retrying(policy))
+
+  is written the other way round:
+
+      app.Chain(h, app.Retrying(policy), app.Transactional(uow))
+
+  As composed, a retry re-invokes the whole handler inside the transaction that
+  is already open, with the writes the failed attempt staged still in it. On a
+  driver that checks versions at COMMIT the conflict is raised outside the retry
+  loop, so Retrying never sees it and retries ZERO times — a field test measured
+  eight handler attempts for eight concurrent requests, and two callers refused
+  for stock that existed. On Postgres the version check runs inside the handler,
+  so the second attempt does run — in the same transaction, and it commits the
+  first attempt's writes along with its own.
+
+  To retry one flaky outbound call rather than the whole handler, retry it in the
+  adapter behind its port (warren.md §7.3), not here.
+
+  This check sees app.Transactional and app.Retrying. A hand-rolled transaction
+  middleware carries no such marker and is not checked.`, pos, total)
 }

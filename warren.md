@@ -1179,12 +1179,14 @@ error rather than a silent downgrade. A panic rolls back and **re-panics** —
 a leaked transaction holds locks, and swallowing the panic would convert a
 bug into a 503 and destroy the stack.
 
-Error codes: absent → `NOT_FOUND`; unique or optimistic-concurrency conflict
-→ `CONFLICT`; constraint violation → `INVALID`; connection lost, pool
-exhausted, serialization failure, statement timeout, **commit failure** →
-`UNAVAILABLE`, so
-`app.Retrying` composed OUTSIDE `app.Transactional` re-runs the whole
-transaction. An unsupported `Option` is `INVALID`, never a silent downgrade.
+Error codes: absent → `NOT_FOUND`; a unique violation on insert → `CONFLICT`;
+an **optimistic-concurrency conflict or a serialization failure** →
+`CONTENTION` (both were `CONFLICT`/`UNAVAILABLE` until `4a1d152` — §2.6 has
+the reasoning); constraint violation → `INVALID`; connection lost, pool
+exhausted, statement timeout, **commit failure** → `UNAVAILABLE`. `app.Retrying`
+covers `CONTENTION` and `UNAVAILABLE`, and it must be composed OUTSIDE
+`app.Transactional` so each attempt gets its own transaction — the reverse
+is refused at boot. An unsupported `Option` is `INVALID`, never a silent downgrade.
 
 
 ### 3.4 `warren/broker`

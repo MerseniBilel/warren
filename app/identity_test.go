@@ -817,43 +817,80 @@ func TestChainsFirstMiddlewareIsOutermost(t *testing.T) {
 }
 
 // TestRetryingOutsideTransactionalGetsAFreshTransactionEachAttempt — the
-// consequence that matters. The unit of work counts how many transactions
-// were opened; with Retrying outermost it is one per attempt, which is what
-// makes a re-read see another writer's commit.
+// consequence that makes the ordering matter. The unit of work counts how
+// many transactions were opened: one per attempt, which is what lets a
+// re-read see another writer's commit.
 func TestRetryingOutsideTransactionalGetsAFreshTransactionEachAttempt(t *testing.T) {
 	t.Parallel()
 
-	for _, tc := range []struct {
-		name         string
-		retryingWraps bool
-		wantTx       int
-	}{
-		{"Retrying outermost", true, 3},
-		{"Transactional outermost", false, 1},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			uow := &countingUoW{}
-			attempts := 0
-			h := app.HandlerFunc[string, string](func(context.Context, string) (string, error) {
-				attempts++
-				if attempts < 3 {
-					return "", werrors.Contention("version moved")
-				}
-				return "ok", nil
-			})
+	uow := &countingUoW{}
+	attempts := 0
+	h := app.HandlerFunc[string, string](func(context.Context, string) (string, error) {
+		attempts++
+		if attempts < 3 {
+			return "", werrors.Contention("version moved")
+		}
+		return "ok", nil
+	})
 
-			retry := app.Retrying[string, string](broker.ExponentialBackoff(5))
-			tx := app.Transactional[string, string](uow)
-			chained := app.Chain(h, retry, tx)
-			if !tc.retryingWraps {
-				chained = app.Chain(h, tx, retry)
-			}
-			_, _ = chained.Handle(context.Background(), "x")
-
-			if uow.opened != tc.wantTx {
-				t.Errorf("%s opened %d transaction(s), want %d", tc.name, uow.opened, tc.wantTx)
-			}
-		})
+	chained := app.Chain(h,
+		app.Retrying[string, string](broker.ExponentialBackoff(5)),
+		app.Transactional[string, string](uow))
+	if _, err := chained.Handle(context.Background(), "x"); err != nil {
+		t.Fatalf("Handle: %v", err)
 	}
+	if uow.opened != 3 {
+		t.Errorf("opened %d transaction(s), want 3 — one per attempt", uow.opened)
+	}
+}
+
+// TestTransactionalOutsideRetryingIsRefused — field test #10's defect 1, and
+// the architect ruling of 2026-08-08 that overturned documenting it. The
+// reverse ordering wraps ONE transaction around every attempt, and there is
+// no correct reading of that: a retry re-invokes the whole handler inside a
+// transaction already holding the failed attempt's staged writes.
+func TestTransactionalOutsideRetryingIsRefused(t *testing.T) {
+	t.Parallel()
+
+	h := app.HandlerFunc[string, string](func(context.Context, string) (string, error) {
+		return "", nil
+	})
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("Transactional outside Retrying was accepted")
+		}
+		msg, _ := r.(string)
+		for _, want := range []string{
+			"OUTSIDE Retrying",
+			"app.Chain(h, app.Retrying(policy), app.Transactional(uow))",
+			"hand-rolled transaction",
+		} {
+			if !strings.Contains(msg, want) {
+				t.Errorf("the panic does not contain %q:\n%s", want, msg)
+			}
+		}
+	}()
+	_ = app.Chain(h,
+		app.Transactional[string, string](&countingUoW{}),
+		app.Retrying[string, string](broker.ExponentialBackoff(3)))
+}
+
+// TestTheSameMistakeInTwoChainCallsIsRefused — Chain seeds its walk from the
+// handler it was GIVEN, so splitting the composition does not evade it.
+func TestTheSameMistakeInTwoChainCallsIsRefused(t *testing.T) {
+	t.Parallel()
+
+	h := app.HandlerFunc[string, string](func(context.Context, string) (string, error) {
+		return "", nil
+	})
+	inner := app.Chain(h, app.Retrying[string, string](broker.ExponentialBackoff(3)))
+
+	defer func() {
+		if recover() == nil {
+			t.Fatal("the mistake spelled in two Chain calls was accepted")
+		}
+	}()
+	_ = app.Chain(inner, app.Transactional[string, string](&countingUoW{}))
 }
 

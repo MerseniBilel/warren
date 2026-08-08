@@ -797,6 +797,20 @@ func concreteName[Req, Res any](h app.Handler[Req, Res]) string {
 	for t != nil && t.Kind() == reflect.Pointer {
 		t = t.Elem()
 	}
+	// A FRAMEWORK wrapper is not a use case. app.Transactional and
+	// app.Retrying return named handler types — that is what lets app.Chain
+	// refuse Transactional outside Retrying at boot — and without this guard
+	// every transactional route in a service would answer
+	// "transactionalHandler[…]" and share one span name and one metric
+	// label, silently. Falling through to the REQUEST TYPE below is both
+	// meaningful and stable across composition changes, which is what that
+	// fallback is for.
+	//
+	// The package path is computed, not written down, so moving the package
+	// cannot quietly disable this.
+	if t != nil && t.PkgPath() == reflect.TypeFor[app.HandlerFunc[Req, Res]]().PkgPath() {
+		return ""
+	}
 	if t != nil && t.Name() != "" {
 		return t.Name()
 	}

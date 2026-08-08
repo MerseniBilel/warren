@@ -537,7 +537,16 @@ recommended in blog posts, and neither README said so.
   their consumer-ring mirrors: `broker.Chain`, `broker.Pipeline`, and the
   stage constructors (`Deduplicate`, `DeadLetter`, `Retry`,
   `ConcurrencyLimit`) panic at composition, with named messages, on nil or
-  nonsensical arguments. Nothing else panics, and nothing is added to this
+  nonsensical arguments.
+
+  **Added 2026-08-08, by architect ruling, and this line is the amendment
+  that rule requires:** `app.Chain` also panics on `app.Transactional`
+  composed OUTSIDE `app.Retrying`, and `app.RetryingOn` panics on a terminal
+  error code. Both are compositions with no correct reading rather than
+  matters of taste — the first wraps one transaction around every retry
+  attempt, which on Postgres commits a failed attempt's staged writes
+  alongside the next one's, and a field test measured the in-memory driver
+  retrying ZERO times. Nothing else panics, and nothing is added to this
   list without amending this line.
 - Reflection belongs at boot, not in the request path (invariant 7).
 - Exported identifiers have doc comments starting with the identifier's name.

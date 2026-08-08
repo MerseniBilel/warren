@@ -294,29 +294,7 @@ func retrying[Req, Res any](policy RetryPolicy, shouldRetry func(error) bool) Mi
 		panic("app: Retrying composed with a nil policy — construct the policy before boot step 5 composes the route table")
 	}
 	return func(next Handler[Req, Res]) Handler[Req, Res] {
-		return HandlerFunc[Req, Res](func(ctx context.Context, req Req) (Res, error) {
-			for attempt := 1; ; attempt++ {
-				res, err := next.Handle(ctx, req)
-				if err == nil || !shouldRetry(err) {
-					return res, err
-				}
-				delay, retry := policy.Next(attempt)
-				if !retry {
-					return res, err
-				}
-				if delay > 0 {
-					timer := time.NewTimer(delay)
-					select {
-					case <-timer.C:
-					case <-ctx.Done():
-						timer.Stop()
-						return res, err
-					}
-				} else if ctx.Err() != nil {
-					return res, err
-				}
-			}
-		})
+		return retryingHandler[Req, Res]{policy: policy, shouldRetry: shouldRetry, next: next}
 	}
 }
 
@@ -435,28 +413,20 @@ type UnitOfWork interface {
 // nested: warren.md §10 shows both patterns, and the unit of work's own
 // contract makes the inner call join the transaction in scope. The
 // transaction's error passes through with its code intact, so a serialization
-// failure arrives as UNAVAILABLE and app.Retrying — composed OUTSIDE this
-// middleware — re-runs the whole transaction rather than retrying inside a
-// doomed one. A nil unit of work panics at composition time, like Chain's
-// guards.
+// failure arrives as CONTENTION (it was UNAVAILABLE until 4a1d152) and
+// app.Retrying — composed OUTSIDE this middleware — re-runs the whole
+// transaction rather than retrying inside a doomed one.
+//
+// Composing it the other way round is REFUSED by Chain, with a panic naming
+// the fix: one transaction around every attempt has no correct reading, and
+// on Postgres it commits a failed attempt's staged writes alongside the next
+// one's. A nil unit of work panics at composition time, like Chain's guards.
 func Transactional[Req, Res any](uow UnitOfWork) Middleware[Req, Res] {
 	if uow == nil {
 		panic("app: Transactional composed with a nil unit of work — construct it before boot step 5 composes the route table")
 	}
 	return func(next Handler[Req, Res]) Handler[Req, Res] {
-		return HandlerFunc[Req, Res](func(ctx context.Context, req Req) (Res, error) {
-			var res Res
-			err := uow.Do(ctx, func(ctx context.Context) error {
-				var err error
-				res, err = next.Handle(ctx, req)
-				return err
-			})
-			if err != nil {
-				var zero Res
-				return zero, err
-			}
-			return res, nil
-		})
+		return transactionalHandler[Req, Res]{uow: uow, next: next}
 	}
 }
 
@@ -517,4 +487,80 @@ func errTerminalRetry(code errors.Code) string {
 			"      app.Chain(h, app.Retrying(policy), app.Transactional(uow))\n\n"+
 			"  Retrying re-invokes the HANDLER, so your handler must re-read its "+
 			"aggregate on each attempt.", code, code)
+}
+
+// --- composition identity ---------------------------------------------------
+//
+// These middleware return NAMED handler types rather than anonymous
+// HandlerFunc closures, for one reason: a closure carries no identity, and
+// Chain has to be able to see what it is stacking. That is what lets it
+// refuse Transactional outside Retrying — a composition with no correct
+// reading — at boot instead of letting it corrupt data at run time.
+//
+// The alternative was matching runtime.FuncForPC names. It works today and
+// fails open tomorrow: the ".funcN" suffix is assigned by closure order
+// within the file, so adding an unrelated closure above renumbers it and the
+// check quietly stops firing.
+
+// composed is a handler that wraps another. Warren's own middleware
+// implement it so Chain can walk a stack it was handed rather than only the
+// one it is building — Chain(Chain(h, Retrying(p)), Transactional(uow)) is
+// the same mistake spelled in two calls. The walk stops at a user's own
+// middleware, which is a known limit, stated in the panic text.
+type composed[Req, Res any] interface {
+	Handler[Req, Res]
+	inner() Handler[Req, Res]
+}
+
+type retryingHandler[Req, Res any] struct {
+	policy      RetryPolicy
+	shouldRetry func(error) bool
+	next        Handler[Req, Res]
+}
+
+func (h retryingHandler[Req, Res]) inner() Handler[Req, Res] { return h.next }
+
+func (h retryingHandler[Req, Res]) Handle(ctx context.Context, req Req) (Res, error) {
+	for attempt := 1; ; attempt++ {
+		res, err := h.next.Handle(ctx, req)
+		if err == nil || !h.shouldRetry(err) {
+			return res, err
+		}
+		delay, retry := h.policy.Next(attempt)
+		if !retry {
+			return res, err
+		}
+		if delay > 0 {
+			timer := time.NewTimer(delay)
+			select {
+			case <-timer.C:
+			case <-ctx.Done():
+				timer.Stop()
+				return res, err
+			}
+		} else if ctx.Err() != nil {
+			return res, err
+		}
+	}
+}
+
+type transactionalHandler[Req, Res any] struct {
+	uow  UnitOfWork
+	next Handler[Req, Res]
+}
+
+func (h transactionalHandler[Req, Res]) inner() Handler[Req, Res] { return h.next }
+
+func (h transactionalHandler[Req, Res]) Handle(ctx context.Context, req Req) (Res, error) {
+	var res Res
+	err := h.uow.Do(ctx, func(ctx context.Context) error {
+		var err error
+		res, err = h.next.Handle(ctx, req)
+		return err
+	})
+	if err != nil {
+		var zero Res
+		return zero, err
+	}
+	return res, nil
 }
