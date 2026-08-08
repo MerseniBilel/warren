@@ -917,3 +917,62 @@ func TestARouteWithNoWildcardStillTakesABody(t *testing.T) {
 		t.Errorf("a body-only command lost its json field:\n%s", got)
 	}
 }
+
+// TestCommandMethodSelectsTheVerb — every route the generator wrote was a
+// POST returning 201, so `warren g command ticket GetTicket --route
+// "/tickets/{id}"` produced a READ served as POST/201. Field test #7 hand-
+// edited every route it generated.
+func TestCommandMethodSelectsTheVerb(t *testing.T) {
+	t.Parallel()
+
+	dir := app(t)
+	if _, err := generate.Module(generate.Options{Dir: dir, Name: "ticket"}); err != nil {
+		t.Fatalf("g module: %v", err)
+	}
+	if _, err := generate.Command(generate.Options{
+		Dir: dir, Module: "ticket", Name: "GetTicket",
+		Route: "/tickets/{id}", Method: "get",
+	}); err != nil {
+		t.Fatalf("g command: %v", err)
+	}
+
+	got := read(t, dir, "internal/modules/ticket/controller.go")
+	if !strings.Contains(got, `transport.Get(r, "/tickets/{id}", c.getTicket)`) {
+		t.Errorf("the route was not registered as a GET:\n%s", got)
+	}
+}
+
+// TestCommandMethodDefaultsToPost — a command is a write, and the flag is
+// for the exception.
+func TestCommandMethodDefaultsToPost(t *testing.T) {
+	t.Parallel()
+
+	dir := app(t)
+	if _, err := generate.Command(generate.Options{
+		Dir: dir, Module: "user", Name: "SuspendUser",
+	}); err != nil {
+		t.Fatalf("g command: %v", err)
+	}
+	if !strings.Contains(read(t, dir, "internal/modules/user/controller.go"), "transport.Post(r,") {
+		t.Error("the default verb is no longer POST")
+	}
+}
+
+// TestAnUnknownMethodIsRefusedWithTheList — a typo must not silently become
+// a POST, and it must not become transport.Delte(r, ...) either.
+func TestAnUnknownMethodIsRefusedWithTheList(t *testing.T) {
+	t.Parallel()
+
+	dir := app(t)
+	_, err := generate.Command(generate.Options{
+		Dir: dir, Module: "user", Name: "SuspendUser", Method: "fetch",
+	})
+	if err == nil {
+		t.Fatal("an unknown --method was accepted")
+	}
+	for _, want := range []string{"fetch", "get", "post", "put", "patch", "delete"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the diagnostic does not mention %q:\n%v", want, err)
+		}
+	}
+}

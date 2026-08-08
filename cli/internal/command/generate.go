@@ -93,6 +93,7 @@ func generateCmd() *cobra.Command {
 		RunE: run(generate.Command, true),
 	}
 	command.Flags().StringVar(&opts.Route, "route", "", "the path the controller serves (default: derived from the name)")
+	command.Flags().StringVar(&opts.Method, "method", "", "the HTTP method: get, post, put, patch, delete (default: post)")
 
 	repository := &cobra.Command{
 		Use:   "repository <module> <Name>",

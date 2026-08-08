@@ -49,6 +49,10 @@ type Options struct {
 	// Route overrides the path a command's controller serves. Empty derives
 	// one from Name.
 	Route string
+	// Method is the HTTP verb the command is registered with. Empty means
+	// POST, because a command is a write; the flag is for the exception a
+	// read makes.
+	Method string
 }
 
 // Module creates a feature module, its three layers, and wires it into main.
@@ -148,6 +152,11 @@ func Command(opts Options) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	verb, err := verbOf(opts.Method)
+	if err != nil {
+		return "", err
+	}
+	data["Verb"] = verb
 	data["RequestFields"], data["FirstField"] = requestFields(data["Route"])
 	handler, err := render("command.go.tmpl", data)
 	if err != nil {
@@ -540,7 +549,7 @@ func provide(data map[string]string, base, layer, ctor string) edit {
 func expose(data map[string]string, base string) edit {
 	field := data["Lower"]
 	handler := fmt.Sprintf("app.Handler[application.%s, application.%sResult]", data["Name"], data["Name"])
-	route := fmt.Sprintf("transport.Post(r, %q, c.%s)", data["Route"], field)
+	route := fmt.Sprintf("transport.%s(r, %q, c.%s)", data["Verb"], data["Route"], field)
 	appPkg := data["Module"] + "/internal/modules/" + data["Feature"] + "/application"
 
 	return edit{
@@ -548,7 +557,7 @@ func expose(data map[string]string, base string) edit {
 		// data["Route"], not data["Snake"]: the report used to name the
 		// derived path while the edit wrote the real one, so --dry-run —
 		// whose ONLY output is this line — could not tell you the route.
-		what: fmt.Sprintf("serve POST %s from Controller.Register", data["Route"]),
+		what: fmt.Sprintf("serve %s %s from Controller.Register", strings.ToUpper(data["Verb"]), data["Route"]),
 		fn: func(src []byte) ([]byte, error) {
 			for _, path := range []string{
 				"github.com/MerseniBilel/warren/app",
@@ -1159,4 +1168,38 @@ func errModuleExists(name, base string) error {
 
 func errMissingName(what string) error {
 	return diagnostic(fmt.Sprintf("✗ missing %s\n\n    `warren g` needs a name to generate.", what))
+}
+
+// verbs maps a --method value to the transport function that registers it.
+// The map is the whole validation: an unrecognised verb must not silently
+// become a POST, and it must not become transport.Fetch either — a
+// generator that interpolates unvalidated input into an identifier writes
+// code that does not compile and blames the template.
+var verbs = map[string]string{
+	"get": "Get", "post": "Post", "put": "Put", "patch": "Patch", "delete": "Delete",
+}
+
+// verbOf resolves --method. Empty is POST: a command is a write, and the
+// flag exists for the exception a read makes. Every route the generator
+// wrote used to be a POST returning 201, so `g command GetTicket --route
+// "/tickets/{id}"` produced a read served as POST/201 and a field test
+// hand-edited every route it generated.
+func verbOf(method string) (string, error) {
+	if method == "" {
+		return "Post", nil
+	}
+	verb, ok := verbs[strings.ToLower(method)]
+	if !ok {
+		known := make([]string, 0, len(verbs))
+		for v := range verbs {
+			known = append(known, v)
+		}
+		slices.Sort(known)
+		return "", diagnostic(fmt.Sprintf(
+			"✗ %q is not an HTTP method warren generates\n\n    --method takes one of: %s\n\n"+
+				"  A command defaults to POST. Use --method for a read, or for an\n"+
+				"  update that belongs at PUT or PATCH.",
+			method, strings.Join(known, ", ")))
+	}
+	return verb, nil
 }
