@@ -99,16 +99,21 @@ func TestAllocations(t *testing.T) {
 		s.mux.ServeHTTP(w, req)
 	}))
 
-	// The committed budget, and where every allocation goes — measured on
-	// go1.26.3, darwin/arm64:
+	// The committed budget. Measured on go1.26.3, darwin/arm64: this path
+	// currently allocates 17, so there is exactly ONE spare — which is why
+	// the framework installs no identity middleware by default, and why a
+	// new per-request step needs a measurement before it is added.
 	//
-	//	 2  net/http.ServeMux dispatch with one path wildcard
-	//	 6  edge ring: the ID string, the response header slice, the
-	//	    correlation context value, and the http.Request clone
-	//	    r.WithContext makes so user middleware sees the ID
-	//	10  the typed path, of which ~7 are encoding/json's decoder
-	//	--
-	//	18
+	// Roughly where they go, attributed 2026-08-02 and not re-attributed
+	// since — the TOTAL is what this test enforces, and the breakdown is a
+	// reader's aid that has already drifted once (it summed to 18 while the
+	// path measured 17):
+	//
+	//	 ~2  net/http.ServeMux dispatch with one path wildcard
+	//	 ~6  edge ring: the ID string, the response header slice, the
+	//	     correlation context value, and the http.Request clone
+	//	     r.WithContext makes so user middleware sees the ID
+	//	~10  the typed path, of which ~7 are encoding/json's decoder
 	//
 	// Raise it only with a measurement and a reason in the commit message. A
 	// silently drifting number is the thing this test exists to prevent —
@@ -178,7 +183,10 @@ func TestStrictCodecAllocations(t *testing.T) {
 		s.mux.ServeHTTP(w, req)
 	}))
 
-	// 18 for the default path, +3 for the unpoolable reader and decoder.
+	// 17 for the default path, +4 for the unpoolable reader and decoder —
+	// json.Decoder has no Reset in v1, so neither can be pooled. Measured at
+	// exactly 21, so this budget has NO headroom: a strict-path change that
+	// costs one allocation fails here, deliberately.
 	const budget = 21
 	if got > budget {
 		t.Errorf("strict codec allocates %d per request, budget %d", got, budget)
