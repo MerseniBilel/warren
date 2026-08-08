@@ -74,29 +74,46 @@ func TestIdleMemberIsAnnounced(t *testing.T) {
 	//
 	// So assert the pairing: exactly one member holds nothing, and the one
 	// that warned is that one.
-	idle, busy := 0, 0
-	for _, c := range []*client{first, second} {
-		c.heldMu.Lock()
-		total := 0
-		for _, ps := range c.held {
-			total += len(ps)
-		}
-		warned := c.idleWarned
-		c.heldMu.Unlock()
+	//
+	// POLLED, not sampled once. The warning fires as soon as one member has
+	// been empty for idleWarnAfter, and the group can still be settling at
+	// that instant — both members briefly hold nothing while the partition
+	// moves. Sampling there made this test fail roughly one full-suite run
+	// in three with "idle=1 busy=0", which is a flaky integration test, and
+	// a flaky test is worse than none: it teaches you to re-run until green.
+	// The property is that the pairing is reached, so wait for it.
+	var idle, busy int
+	stable := time.Now().Add(30 * time.Second)
+	for {
+		idle, busy = 0, 0
+		for _, c := range []*client{first, second} {
+			c.heldMu.Lock()
+			total := 0
+			for _, ps := range c.held {
+				total += len(ps)
+			}
+			warned := c.idleWarned
+			c.heldMu.Unlock()
 
-		switch {
-		case total == 0 && warned:
-			idle++
-		case total > 0 && !warned:
-			busy++
-		case total == 0:
-			t.Error("a member holds no partitions and said nothing")
-		default:
-			t.Errorf("a member holds %d partition(s) and warned it holds none", total)
+			switch {
+			case total == 0 && warned:
+				idle++
+			case total > 0 && !warned:
+				busy++
+			case total > 0 && warned:
+				t.Fatalf("a member holds %d partition(s) and warned it holds none", total)
+			}
 		}
-	}
-	if idle != 1 || busy != 1 {
-		t.Errorf("want exactly one idle member and one busy one, got idle=%d busy=%d", idle, busy)
+		if idle == 1 && busy == 1 {
+			break
+		}
+		if time.Now().After(stable) {
+			t.Errorf("want exactly one idle member and one busy one, got idle=%d busy=%d "+
+				"(a member holding nothing and saying nothing is the defect this test exists for; "+
+				"both holding nothing is a rebalance that never settled)", idle, busy)
+			break
+		}
+		time.Sleep(200 * time.Millisecond)
 	}
 }
 
