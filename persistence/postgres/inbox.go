@@ -25,10 +25,22 @@ func InboxRetention(d time.Duration) InboxOption {
 
 // WithInbox enables a durable inbox.Store over the warren_inbox table.
 //
-// The dedupe row is written in the handler's own UnitOfWork transaction,
-// which is the whole reason a durable store is worth having: handler-success
-// and mark-seen become one commit, closing the crash-after-success duplicate
-// window that an in-memory store cannot. Re-marking refreshes the window.
+// What durability buys is REACH, not atomicity. The seen set survives a
+// restart, a rolling deploy and a partition rebalance, and every replica
+// consults the same one — so a redelivery landing on a different process, or
+// after this one restarted, is still suppressed. The memory store forgets all
+// of that at exit, which is the whole difference. Re-marking refreshes the
+// window.
+//
+// The row is NOT written in the handler's transaction, and nothing here makes
+// it so. This comment used to claim it was, and a field test measured the two
+// rows landing at different xmins. broker.Deduplicate is a consumer-ring
+// stage: it calls MarkSeen after the handler has returned, by which time
+// app.Transactional has already committed and the transaction is off the
+// context. Handler success and mark-seen are two commits, and a crash between
+// them redelivers the message. That is at-least-once — warren.md §5.6's
+// guarantee for every store, this one included — and handlers must be
+// idempotent regardless.
 //
 // Its OnStart verifies the table exists and fails the boot naming the fix. It
 // does not create it: see Migrate.
@@ -80,9 +92,9 @@ func (s *inboxStore) verify(ctx context.Context) error {
 
 // Seen reports whether id has been recorded and not yet expired.
 //
-// It reads through DB, so inside a UnitOfWork it sees that transaction's own
-// uncommitted MarkSeen — which is what makes "check then mark" correct within
-// one handler.
+// It reads through the transaction on ctx when there is one, and through the
+// pool otherwise. broker.Deduplicate — the only caller in a Warren
+// application — calls it outside any unit of work.
 func (s *inboxStore) Seen(ctx context.Context, id string) (bool, error) {
 	var exists bool
 	err := s.pool.db(ctx).QueryRow(ctx, `

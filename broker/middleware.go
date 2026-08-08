@@ -336,9 +336,15 @@ func DeliveryHeaders(ctx context.Context) map[string]string {
 // not count as its own duplicate. A store error fails CLOSED: UNAVAILABLE
 // nack, duplicates over loss, but never silently. A MarkSeen failure after
 // success is acked — the work is done; refusing the ack would guarantee the
-// duplicate it failed to prevent — but it is logged at WARN, naming the
+// duplicate it failed to prevent — but it is logged at ERROR, naming the
 // subscription, because idempotency silently switching off is worse than the
 // redelivery it was protecting against. A suppressed duplicate logs at DEBUG.
+//
+// The mark does NOT join the handler's transaction, on any store: this stage
+// runs outside the handler, so app.Transactional has committed by the time
+// MarkSeen is called. warren.md §5.6 states the guarantee — at-least-once,
+// for every store — and persistence/postgres.WithInbox says what durability
+// does buy, which is reach, not atomicity.
 func Deduplicate(subscription string, store inbox.Store, ttl time.Duration) Middleware {
 	if store == nil {
 		panic("broker: Deduplicate composed with a nil inbox store")
@@ -397,7 +403,12 @@ func Deduplicate(subscription string, store inbox.Store, ttl time.Duration) Midd
 			// any. A broken inbox degraded to no deduplication at all, in
 			// silence, and only an idempotent handler hid the consequence.
 			if err := store.MarkSeen(ctx, key, ttl); err != nil {
-				log.FromContext(ctx).WarnContext(ctx, "inbox mark failed",
+				// ERROR, not WARN (architect ruling, 2026-08-08): an inbox
+				// whose table was dropped or whose grant was revoked
+				// deduplicates NOTHING, and every subscription sharing it is
+				// affected. It is the same severity as a dead letter, which
+				// also leaves the disposition standing.
+				log.FromContext(ctx).ErrorContext(ctx, "inbox mark failed",
 					"subscription", subscription,
 					"message_id", msg.ID,
 					"error", err.Error(),

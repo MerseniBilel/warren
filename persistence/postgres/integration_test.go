@@ -25,6 +25,7 @@ import (
 	"github.com/MerseniBilel/warren/broker"
 	"github.com/MerseniBilel/warren/domain"
 	werrors "github.com/MerseniBilel/warren/errors"
+	"github.com/MerseniBilel/warren/inbox"
 	"github.com/MerseniBilel/warren/outbox"
 	"github.com/MerseniBilel/warren/persistence"
 	"github.com/MerseniBilel/warren/persistence/postgres"
@@ -1006,4 +1007,91 @@ func settledGoroutines() int {
 		prev = n
 	}
 	return runtime.NumGoroutine()
+}
+
+// TestTheInboxMarkIsASeparateCommit pins the guarantee that the docs now
+// state, by measuring the thing that disproved the old one.
+//
+// persistence/postgres/inbox.go and warren.md §5.6 both used to claim the
+// dedupe row was written "in the handler's own UnitOfWork transaction",
+// closing the crash-after-success window. Field test #11 measured the
+// aggregate at xmin=751 and the inbox row at xmin=752 — two commits — and an
+// architect ruling of 2026-08-08 retracted the claim rather than restructure
+// the pipeline for it.
+//
+// This test is the retraction's guard. It asserts the CURRENT truth, so
+// anyone who reintroduces the claim has to reintroduce the mechanism first
+// and will find this test standing in the way.
+func TestTheInboxMarkIsASeparateCommit(t *testing.T) {
+	url := isolated(t)
+	ctx := context.Background()
+
+	pgModule := postgres.Module(
+		postgres.DSN(url),
+		postgres.WithOutbox(),
+		postgres.WithInbox(),
+	)
+	var (
+		db  postgres.DB
+		uow *postgres.UnitOfWork
+		box inbox.Store
+	)
+	probe := warren.NewModule("probe",
+		warren.Imports(pgModule),
+		warren.Providers(func(d postgres.DB, u *postgres.UnitOfWork, s inbox.Store) *captured {
+			db, uow, box = d, u, s
+			return &captured{}
+		}),
+		warren.Eager[*captured](),
+	)
+	a := warren.New(pgModule, probe)
+	if err := a.Start(ctx); err != nil {
+		t.Fatalf("boot: %v", err)
+	}
+	defer func() { _ = a.Stop(ctx) }()
+
+	if _, err := db(ctx).Exec(ctx,
+		`CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, email TEXT NOT NULL)`); err != nil {
+		t.Fatalf("create users: %v", err)
+	}
+	repo := userRepo{db: db}
+
+	// Exactly the shape broker.Deduplicate produces: the handler's work
+	// commits in its own unit of work, and the mark follows it, outside.
+	var handlerXID string
+	if err := uow.Do(ctx, func(ctx context.Context) error {
+		if err := db(ctx).QueryRow(ctx, `SELECT pg_current_xact_id()::text`).Scan(&handlerXID); err != nil {
+			return err
+		}
+		return repo.Save(ctx, newUser("u-dedupe", "dedupe@example.com"))
+	}); err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	if err := box.MarkSeen(ctx, "sub\x1fmsg-1", time.Hour); err != nil {
+		t.Fatalf("MarkSeen: %v", err)
+	}
+
+	// xmin is the inserting transaction. Different values prove two commits.
+	var userXmin, inboxXmin string
+	if err := db(ctx).QueryRow(ctx,
+		`SELECT xmin::text FROM users WHERE id = $1`, "u-dedupe").Scan(&userXmin); err != nil {
+		t.Fatalf("reading the aggregate's xmin: %v", err)
+	}
+	if err := db(ctx).QueryRow(ctx,
+		`SELECT xmin::text FROM warren_inbox WHERE id = $1`, "sub\x1fmsg-1").Scan(&inboxXmin); err != nil {
+		t.Fatalf("reading the inbox row's xmin: %v", err)
+	}
+
+	if userXmin != handlerXID {
+		t.Fatalf("the aggregate did not land in the handler's transaction: row xmin %s, handler xid %s "+
+			"— this test is measuring the wrong thing", userXmin, handlerXID)
+	}
+	if inboxXmin == userXmin {
+		t.Errorf("the inbox mark committed WITH the handler (xmin %s).\n"+
+			"That is stronger than the documented guarantee. If it is now genuine, "+
+			"restore the atomicity claim in persistence/postgres/inbox.go and warren.md §5.6 "+
+			"— but read the architect ruling of 2026-08-08 first, which explains why "+
+			"broker.Deduplicate cannot deliver it without losing dedupe for every "+
+			"consumer that has no unit of work.", inboxXmin)
+	}
 }

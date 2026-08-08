@@ -1,6 +1,7 @@
 package di
 
 import (
+	stderrors "errors"
 	"fmt"
 	"go/token"
 	"strings"
@@ -217,9 +218,17 @@ func errNonConstructor(got any) error {
 // errConstructorFailed presents a user constructor's own error, wrapped so
 // errors.Is and errors.As still reach it.
 func errConstructorFailed(scope string, cause error) error {
+	// Which constructor, when Provide could tag it. Naming it is the whole
+	// difference between a diagnostic and a scavenger hunt: the cause is
+	// often something as unplaceable as "EOF".
+	who := "A constructor"
+	var attr *attributedError
+	if stderrors.As(cause, &attr) {
+		who = attr.name + " (" + attr.site + ")"
+	}
 	return &diagnostic{
 		text: fmt.Sprintf(
-			"✗ constructor failed\n\n    %v\n\n  A constructor returned this error while the graph for scope %q was\n  being built. Fix the constructor, or the configuration it read.", cause, scope),
+			"✗ constructor failed\n\n    %v\n\n  %s returned this error while the graph for scope %q was\n  being built. Fix the constructor, or the configuration it read.", cause, who, scope),
 		cause: cause,
 	}
 }

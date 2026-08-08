@@ -129,7 +129,7 @@ func (c *container) Provide(constructor any, opts ...ProvideOption) error {
 		return errCycle(cycle)
 	}
 
-	if err := c.dig.Provide(constructor); err != nil {
+	if err := c.dig.Provide(attributed(v, p)); err != nil {
 		// Every anticipated failure is pre-checked above; whatever this is,
 		// dig's wording must not leak (invariant 2).
 		return errInternal(p.name)
@@ -500,6 +500,78 @@ func funcName(v reflect.Value) string {
 	}
 	return name
 }
+
+// attributed returns a constructor of the SAME TYPE that tags any error the
+// original returns with which provider it was.
+//
+// dig hands back only the root cause, so "✗ constructor failed / EOF" named
+// neither a symbol nor a file:line — the one Warren diagnostic that did not,
+// and a field test called it the worst of them. With a realistic opaque cause
+// (EOF, "permission denied", a context deadline) the reader is left grepping
+// a Providers list by hand.
+//
+// A constructor with no error return is handed back untouched, so the common
+// case pays nothing. This is boot-time reflection over a function invoked
+// once per scope; invariant 6 governs the REQUEST path, which never reaches
+// here.
+func attributed(v reflect.Value, p *provider) any {
+	if !namesSomething(p) {
+		return v.Interface()
+	}
+	t := v.Type()
+	errIdx := -1
+	for i := range t.NumOut() {
+		if t.Out(i) == errType {
+			errIdx = i
+		}
+	}
+	if errIdx < 0 {
+		return v.Interface()
+	}
+	call := v.Call
+	if t.IsVariadic() {
+		// MakeFunc delivers the variadic arguments already collected into the
+		// final slice, which is CallSlice's calling convention, not Call's.
+		call = v.CallSlice
+	}
+	return reflect.MakeFunc(t, func(args []reflect.Value) []reflect.Value {
+		out := call(args)
+		if e := out[errIdx]; !e.IsNil() {
+			if err, ok := e.Interface().(error); ok && err != nil {
+				out[errIdx] = reflect.ValueOf(&attributedError{
+					name:  p.name,
+					site:  p.site,
+					cause: err,
+				}).Convert(errType)
+			}
+		}
+		return out
+	}).Interface()
+}
+
+// namesSomething reports whether a provider's identity is worth printing.
+//
+// A closure — warren's own option-taking providers among them — prints as
+// "http.Server.func1" and resolves to a site inside the runtime's assembly
+// ("asm_arm64.s:29"), which is noise standing where a file:line belongs. The
+// generic "A constructor" wording is better than a confident wrong answer, so
+// the wrap is skipped entirely and the caller pays nothing.
+func namesSomething(p *provider) bool {
+	return !strings.Contains(p.name, ".func") && strings.Contains(p.site, ".go:")
+}
+
+// attributedError carries which constructor failed alongside its own error.
+// It is unwrapped by errConstructorFailed and never reaches a user as itself,
+// so its Error() is the cause verbatim — a stray print must not gain a prefix
+// nobody asked for.
+type attributedError struct {
+	name  string
+	site  string
+	cause error
+}
+
+func (e *attributedError) Error() string { return e.cause.Error() }
+func (e *attributedError) Unwrap() error { return e.cause }
 
 func funcSite(v reflect.Value) string {
 	f := runtime.FuncForPC(v.Pointer())

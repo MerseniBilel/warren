@@ -1929,9 +1929,17 @@ separate calls and nothing claims. That is deliberate — an atomic
 claim-and-release trades a rare duplicate for a rare *loss*, since a crash
 between claim and release suppresses the redelivery and the message is gone,
 and every other disposition rule here chooses duplicates over loss.
-**At-least-once remains the guarantee.** The Postgres store closes the
-crash-after-success window by writing its row inside the handler's own
-`UnitOfWork` transaction, which is why `ctx` is on both methods.
+**At-least-once remains the guarantee, for every store.** The
+crash-after-success window — a handler commit that lands and a mark that does
+not — is open on the Postgres store exactly as it is on the memory one,
+because `broker.Deduplicate` is a consumer-ring stage and marks *after*
+`app.Transactional` has committed. This paragraph used to claim the Postgres
+store closed that window inside the handler's transaction; a field test
+measured the aggregate row and the inbox row at different `xmin`s and
+disproved it. `ctx` is on both methods so a store can honour deadlines and
+cancellation, not because the mark joins a transaction. What the durable
+store buys is **reach**: the seen set survives a restart, a deploy and a
+rebalance, and every replica shares one.
 
 ```go
 type Store interface {

@@ -820,3 +820,54 @@ func TestAnUnprovidedTypeStillGetsAClosingSuggestion(t *testing.T) {
 	}
 	assertNoDigLeak(t, err)
 }
+
+// TestAFailedConstructorIsNamed — field test #11 called this Warren's worst
+// diagnostic, and it was the only one that named neither a symbol nor a
+// file:line:
+//
+//	✗ constructor failed
+//	    EOF
+//	  A constructor returned this error while the graph for scope "ordering"
+//	  was being built. Fix the constructor, or the configuration it read.
+//
+// With a realistic opaque cause — EOF, "permission denied", a context
+// deadline — that leaves you grepping a Providers list by hand. Every other
+// Warren diagnostic names the type, the scope, and the declaration site.
+func TestAFailedConstructorIsNamed(t *testing.T) {
+	t.Parallel()
+
+	root := di.New()
+	if err := root.Provide(newFailingService); err != nil {
+		t.Fatalf("providing: %v", err)
+	}
+
+	_, err := di.Resolve[*user.UserService](root)
+	if err == nil {
+		t.Fatal("Resolve through a failing constructor succeeded")
+	}
+	got := err.Error()
+	if !strings.Contains(got, "newFailingService") {
+		t.Errorf("the diagnostic does not name the constructor that failed:\n%s", got)
+	}
+	if !strings.Contains(got, "di_test.go:") {
+		t.Errorf("the diagnostic does not give the constructor's file:line:\n%s", got)
+	}
+	// The cause must survive intact, both as text and to errors.Is — the
+	// attribution wraps it, it does not replace it.
+	if !strings.Contains(got, "EOF") {
+		t.Errorf("the constructor's own error was lost:\n%s", got)
+	}
+	if !stderrors.Is(err, errFailingService) {
+		t.Error("errors.Is no longer reaches the constructor's error")
+	}
+	assertNoDigLeak(t, err)
+}
+
+// newFailingService is a package-level function so it has a name and a
+// file:line to report — a closure would print as "func1", which is the
+// unhelpful shape this test exists to rule out.
+func newFailingService() (*user.UserService, error) {
+	return nil, errFailingService
+}
+
+var errFailingService = stderrors.New("EOF")
