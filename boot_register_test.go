@@ -10,6 +10,7 @@ import (
 
 	"github.com/MerseniBilel/warren"
 	"github.com/MerseniBilel/warren/app"
+	"github.com/MerseniBilel/warren/health"
 	"github.com/MerseniBilel/warren/lifecycle"
 	"github.com/MerseniBilel/warren/transport"
 	"github.com/MerseniBilel/warren/validate"
@@ -838,3 +839,121 @@ func TestATypedNilConstructorIsADiagnosticToo(t *testing.T) {
 		t.Errorf("the diagnostic leaks dig:\n%s", err)
 	}
 }
+
+// --- a component that declared it would run, and never does -----------------
+
+// deadSubscription is the shape a hand-written consumer takes: it asks for the
+// lifecycle, which is a declaration that it has work to do at start and stop.
+type deadSubscription struct{}
+
+func newDeadSubscription(lc lifecycle.Lifecycle) *deadSubscription {
+	lc.Append(lifecycle.Hook{
+		Name:    "dead/subscription",
+		OnStart: func(context.Context) error { return nil },
+	})
+	return &deadSubscription{}
+}
+
+type deadCheck struct{}
+
+func newDeadCheck(health.Registry) *deadCheck { return &deadCheck{} }
+
+// TestAComponentThatTakesTheLifecycleAndIsNeverBuiltFailsTheBoot — field test
+// #11's worst finding, and an architect ruling of 2026-08-08.
+//
+// The engineer deleted one line — warren.Eager[*orderPlacedSubscription]() —
+// from a generated consumer module. The service booted green, POST /orders
+// answered 201, the outbox marked its rows published, /readyz reported up,
+// and NOT ONE MESSAGE was ever consumed. Nothing was logged. dig builds a
+// provider on demand, so a provider nothing consumes is never called, and its
+// lifecycle hook is never appended.
+//
+// README's headline: "Every error the framework can detect surfaces at boot —
+// never on request 1." This one was detectable by the reachability scan that
+// already sat in this file refusing unreachable CONTROLLERS.
+func TestAComponentThatTakesTheLifecycleAndIsNeverBuiltFailsTheBoot(t *testing.T) {
+	t.Parallel()
+
+	m := warren.NewModule("notification",
+		warren.Providers(newDeadSubscription),
+	)
+	err := warren.New(m).Start(context.Background())
+	if err == nil {
+		t.Fatal("a component that takes the lifecycle and that nothing builds booted clean — its hook never runs")
+	}
+	for _, want := range []string{
+		"component declared but never built",
+		"notification",
+		"newDeadSubscription",
+		"warren.Eager[*warren_test.deadSubscription]()",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("diagnostic does not mention %q:\n%s", want, err)
+		}
+	}
+	// The module's declaration site is a file:line in THIS file and moves
+	// whenever the test moves, so it is normalised out of the golden.
+	assertGolden(t, "component_never_built", declSite.ReplaceAllString(err.Error(), "warren_test.go:00"))
+}
+
+// The same rule for health: a check nobody builds registers nothing, and
+// /readyz reports green while a critical dependency is unmonitored.
+func TestAHealthCheckThatIsNeverBuiltFailsTheBoot(t *testing.T) {
+	t.Parallel()
+
+	m := warren.NewModule("notification", warren.Providers(newDeadCheck))
+	err := warren.New(m).Start(context.Background())
+	if err == nil {
+		t.Fatal("a health check nothing builds booted clean — /readyz is green and nothing is watching")
+	}
+	if !strings.Contains(err.Error(), "component declared but never built") {
+		t.Errorf("wrong diagnostic:\n%s", err)
+	}
+}
+
+// TestTheLifecycleCheckHasFourEscapes — the check must refuse only the case
+// with no correct reading. Each of these is a legitimate shape and must boot.
+func TestTheLifecycleCheckHasFourEscapes(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name string
+		mod  func() warren.Module
+	}{
+		{"eager", func() warren.Module {
+			return warren.NewModule("notification",
+				warren.Providers(newDeadSubscription),
+				warren.Eager[*deadSubscription](),
+			)
+		}},
+		{"consumed by a sibling", func() warren.Module {
+			return warren.NewModule("notification",
+				warren.Providers(
+					newDeadSubscription,
+					func(*deadSubscription) *deadUser { return &deadUser{} },
+				),
+				warren.Eager[*deadUser](),
+			)
+		}},
+		{"exported", func() warren.Module {
+			return warren.NewModule("notification",
+				warren.Providers(newDeadSubscription),
+				warren.Exports[*deadSubscription](),
+			)
+		}},
+		{"takes no lifecycle", func() warren.Module {
+			return warren.NewModule("notification",
+				warren.Providers(func() *deadUser { return &deadUser{} }),
+			)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if err := warren.New(tc.mod()).Start(context.Background()); err != nil {
+				t.Errorf("a legitimate shape was refused:\n%v", err)
+			}
+		})
+	}
+}
+
+type deadUser struct{}

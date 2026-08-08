@@ -1,0 +1,16 @@
+✗ component declared but never built
+
+    module "notification" (warren/boot_register_test.go:877)
+      └─ warren.Providers lists warren_test.newDeadSubscription, which takes the lifecycle —
+           and nothing in the module depends on *warren_test.deadSubscription.
+
+  A provider nothing consumes is never constructed. Taking the lifecycle
+  is a declaration that this component has work to do at start and stop,
+  and that work will not happen: the hook is never appended, a consumer
+  never subscribes, and the app logs a clean boot with /readyz green.
+
+      warren.Eager[*warren_test.deadSubscription]()
+
+  If something really should depend on it, make that dependency explicit
+  instead — or export it, if the consumer is in another module. If it is
+  dead code, delete it: this refuses to boot either way.

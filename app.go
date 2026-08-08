@@ -453,6 +453,9 @@ func (a *App) Start(ctx context.Context) error {
 		if err := checkUnreachableControllers(m); err != nil {
 			return err
 		}
+		if err := checkUnbuiltLifecycleComponents(m); err != nil {
+			return err
+		}
 	}
 
 	// A route nobody serves is a route that silently 404s in production, and
@@ -785,6 +788,13 @@ func splitSite(site string) (string, int) {
 // when deciding whether a plain provider is a controller in disguise.
 var controllerType = reflect.TypeFor[transport.Controller]()
 
+// The two parameters that mean "this component intends to RUN" — see
+// checkUnbuiltLifecycleComponents.
+var (
+	lifecycleType      = reflect.TypeFor[lifecycle.Lifecycle]()
+	healthRegistryType = reflect.TypeFor[health.Registry]()
+)
+
 // checkUnreachableControllers refuses a controller declared under
 // warren.Providers that nothing in the module can consume.
 //
@@ -839,6 +849,118 @@ func checkUnreachableControllers(m Module) error {
 		return errControllerIsAPlainProvider(m, out)
 	}
 	return nil
+}
+
+// consumedTypes is the set of types some constructor in the module takes as a
+// parameter, plus its eager list — reachability read off the declarations,
+// with nothing instantiated to find out.
+func consumedTypes(m Module) map[reflect.Type]bool {
+	consumed := map[reflect.Type]bool{}
+	for _, group := range [][]any{m.providers, m.controllers, m.consumers} {
+		for _, ctor := range group {
+			t := reflect.TypeOf(ctor)
+			if t == nil || t.Kind() != reflect.Func {
+				continue
+			}
+			for i := range t.NumIn() {
+				consumed[t.In(i)] = true
+			}
+		}
+	}
+	for _, t := range m.eager {
+		consumed[t] = true
+	}
+	return consumed
+}
+
+// checkUnbuiltLifecycleComponents refuses a provider that asks for the
+// lifecycle (or the health registry) and that nothing in the module builds.
+//
+// Architect ruling, 2026-08-08. warren.md §2.2 records a standing decision
+// NOT to refuse a merely-unused provider, and that decision stands: "nothing
+// consumes this" and "this is dead code mid-refactor" are indistinguishable,
+// and an unbuilt repository costs nothing. This carve-out turns on the
+// parameter. lifecycle.Lifecycle is not a dependency — it is a DECLARATION OF
+// INTENT TO RUN, and the only reason to inject it is to Append a hook. A
+// constructor that asks for it and is never called has voided that intent,
+// and there is no execution of any program in which it does something.
+//
+// Field test #11 deleted one warren.Eager line from a generated consumer
+// module. The service booted green, answered 201, marked its outbox rows
+// published, reported /readyz up, and consumed nothing, for ever, in silence.
+// health.Registry is included for the same reason one step further on: a
+// check nobody builds is a /readyz that cannot go red.
+//
+// The escapes are three and the diagnostic prints one of them: consume it,
+// export it, or make it eager.
+func checkUnbuiltLifecycleComponents(m Module) error {
+	if len(m.providers) == 0 {
+		return nil
+	}
+	consumed := consumedTypes(m)
+
+	for _, ctor := range m.providers {
+		t := reflect.TypeOf(ctor)
+		if t == nil || t.Kind() != reflect.Func || t.NumOut() == 0 {
+			continue
+		}
+		declaresIntent := false
+		for i := range t.NumIn() {
+			if in := t.In(i); in == lifecycleType || in == healthRegistryType {
+				declaresIntent = true
+				break
+			}
+		}
+		if !declaresIntent {
+			continue
+		}
+		out := t.Out(0)
+		if out == errType || consumed[out] || slices.Contains(m.exports, out) {
+			continue
+		}
+		// A controller is the other check's business, and it prints a better
+		// diagnostic for that case — the fix there is warren.Controllers, not
+		// warren.Eager.
+		if out.Implements(controllerType) {
+			continue
+		}
+		return errComponentNeverBuilt(m, ctor, out)
+	}
+	return nil
+}
+
+// errComponentNeverBuilt names the module, the constructor, the type, and the
+// line to paste — because the symptom is a clean boot and a green /readyz,
+// which is the hardest possible thing to go looking for.
+func errComponentNeverBuilt(m Module, ctor any, t reflect.Type) error {
+	return diagnostic(fmt.Sprintf(
+		"✗ component declared but never built\n\n"+
+			"    module %q (%s)\n"+
+			"      └─ warren.Providers lists %s, which takes the lifecycle —\n"+
+			"           and nothing in the module depends on %s.\n\n"+
+			"  A provider nothing consumes is never constructed. Taking the lifecycle\n"+
+			"  is a declaration that this component has work to do at start and stop,\n"+
+			"  and that work will not happen: the hook is never appended, a consumer\n"+
+			"  never subscribes, and the app logs a clean boot with /readyz green.\n\n"+
+			"      warren.Eager[%s]()\n\n"+
+			"  If something really should depend on it, make that dependency explicit\n"+
+			"  instead — or export it, if the consumer is in another module. If it is\n"+
+			"  dead code, delete it: this refuses to boot either way.",
+		m.name, m.declared, funcLabel(ctor), t, t))
+}
+
+// funcLabel is the constructor's name as a reader would write it, for a
+// diagnostic that has to be greppable.
+func funcLabel(ctor any) string {
+	f := runtime.FuncForPC(reflect.ValueOf(ctor).Pointer())
+	if f == nil {
+		return "a constructor"
+	}
+	name := f.Name()
+	if i := strings.LastIndexByte(name, '/'); i >= 0 {
+		name = name[i+1:]
+	}
+	return name
 }
 
 // errControllerIsAPlainProvider names the module, the type, and the one-word

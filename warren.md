@@ -412,11 +412,29 @@ never built." So a component nothing injects — a sweeper, a reconciler, any
 loop that registers its own lifecycle hook — is never constructed, the boot
 is green, `/readyz` is 200, and the work never runs.
 
-`warren.Eager[T]()` is the answer today, and it has to be written by hand.
-Making it automatic is still open, and the shape is a `warren lint` rule
-rather than a boot failure: at boot, "nothing consumes this" and "this is
-dead code" are indistinguishable, and failing on the second would refuse
-projects that are merely mid-refactor.
+`warren.Eager[T]()` is the answer, and for a plain provider it has to be
+written by hand. Making *that* automatic is still open, and the shape is a
+`warren lint` rule rather than a boot failure: at boot, "nothing consumes
+this" and "this is dead code" are indistinguishable, and failing on the
+second would refuse projects that are merely mid-refactor.
+
+**One carve-out is a boot failure, since 2026-08-08 (architect ruling).** A
+provider whose constructor takes `lifecycle.Lifecycle` or `health.Registry`,
+whose type nothing in the module consumes, that is neither `Eager` nor
+exported, **refuses the boot** — `✗ component declared but never built`. The
+parameter is what changes the category. A lifecycle is not a dependency, it
+is a declaration of intent to RUN, and the only reason to inject one is to
+`Append` a hook; a constructor that asks for it and is never called has
+voided that intent, and there is no execution of any program in which it
+does something. That is not "unused", it is "announced it would run, and
+cannot". A field test deleted one `warren.Eager` line from a generated
+consumer module and got a green boot, a 201, outbox rows marked published,
+`/readyz` up — and not one message consumed, with nothing logged.
+
+The escapes are three and the diagnostic prints one: consume it, export it,
+or make it eager. The check reads declared parameter types and declared
+consumption and infers nothing, which is what separates it from the three
+linters this project has declined for guessing.
 
 **Diagnostics are the product here.** Raw dig error:
 
