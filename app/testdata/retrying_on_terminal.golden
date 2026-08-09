@@ -1,0 +1,9 @@
+app: RetryingOn was composed on CONFLICT, which can never succeed on a retry — a request refused by a business rule is refused identically on every attempt, so this would spend the whole backoff budget and a database transaction per attempt to return the same answer.
+
+  RetryingOn accepts CONTENTION, UNAVAILABLE, INTERNAL — the codes for which the same request may succeed later. The other five are terminal.
+
+  A stale write is not CONFLICT. It is CONTENTION, and app.Retrying already retries it:
+
+      app.Chain(h, app.Retrying(policy), app.Transactional(uow))
+
+  Retrying re-invokes the HANDLER, so your handler must re-read its aggregate on each attempt.

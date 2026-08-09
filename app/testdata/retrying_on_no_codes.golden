@@ -1,0 +1,9 @@
+app: RetryingOn requires at least one code — with none it would retry nothing, which is app.Chain without it.
+
+  The codes it accepts are CONTENTION, UNAVAILABLE, INTERNAL — the ones for which the same request may succeed later; the other five are terminal and are refused.
+
+  app.Retrying(policy) is CONTENTION and UNAVAILABLE, and is what almost every handler wants:
+
+      app.Chain(h, app.Retrying(policy), app.Transactional(uow))
+
+  Name codes here only to reach INTERNAL, or to take CONTENTION without UNAVAILABLE.

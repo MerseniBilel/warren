@@ -298,39 +298,74 @@ func retrying[Req, Res any](policy RetryPolicy, shouldRetry func(error) bool) Mi
 	}
 }
 
-// RetryingOn is Retrying with the retryable codes given explicitly.
+// RetryingOn is Retrying with the retryable set given explicitly. The legal
+// set is CONTENTION, UNAVAILABLE and INTERNAL — the three codes for which the
+// same request may succeed later. The other five are terminal, and composing
+// on one panics at boot.
 //
-// Retrying retries CodeUnavailable and nothing else, which is right for a
-// dependency that was briefly away. It is NOT right for optimistic
-// concurrency: a stale write is CodeConflict, and under contention on one
-// aggregate that is the NORMAL outcome, not a failure. A field test measured
-// the consequence — 200 buyers against 50 seats sold far fewer than 50 —
-// and had to hand-write this middleware to get the right answer. Safe, but
-// wrong, and every team would rediscover it.
+// Prefer Retrying. It already covers CONTENTION and UNAVAILABLE, which is
+// what almost every handler wants and cannot spell wrongly. Two things are
+// reachable only through this function.
 //
-//	app.Chain(h, app.RetryingOn(broker.ExponentialBackoff(5), errors.CodeConflict))
+// FIRST, CodeInternal. Retrying never retries it — an unanticipated failure
+// carries no promise that a second attempt helps — and no other middleware
+// offers it. On a consumer-shaped handler, where a dead-letter queue is
+// already behind the retry, spending a bounded budget before giving up costs
+// one message's latency and saves the operator a redrive:
 //
-// The handler must RE-READ its aggregate on each attempt. Retrying re-invokes
-// the handler, not the transaction, so a handler that closed over a stale
-// version will conflict for ever — which is why this is a separate name
-// rather than a widened default.
+//	app.RetryingOn(policy, errors.CodeInternal, errors.CodeUnavailable)
+//
+// SECOND, deliberate NARROWING — which is the shape of the argument, not
+// widening. A handler safe to re-run on CONTENTION is not automatically safe
+// to re-run on UNAVAILABLE: if it makes an outbound call, an UNAVAILABLE can
+// mean the call arrived and only the reply was lost, so re-invoking the
+// handler charges the card twice. A lost conditional write cannot say that —
+// nothing was written — so name CONTENTION alone and leave UNAVAILABLE to the
+// caller:
+//
+//	app.Chain(h, app.RetryingOn(policy, errors.CodeContention), app.Transactional(uow))
+//
+// Under plain Retrying that same handler retries UNAVAILABLE too, and doubles
+// the side effect. That is the trade this function exists to let you make.
+//
+// The codes you name are the WHOLE set; nothing is inherited. Migrating
+// Retrying(p) to RetryingOn(p, errors.CodeContention) STOPS retrying a
+// dependency that was briefly away. Pass both when you want both —
+//
+//	app.RetryingOn(policy, errors.CodeContention, errors.CodeUnavailable)
+//
+// — which is Retrying(policy) spelled out, and the reason optimistic
+// concurrency needs no code list here at all. A stale write is CONTENTION,
+// not CONFLICT, and Retrying covers it.
 //
 // Everything else is Retrying's behaviour, including the rule that matters
-// most: the OUTERMOST code decides, so a handler that wraps a Conflict inside
-// an Internal has declared the failure final and this agrees. Retries are
-// only safe on an idempotent handler; see Retrying.
-//
-// IT DOES NOT INHERIT CodeUnavailable. The codes you name are the whole set,
-// so migrating Retrying(p) to RetryingOn(p, errors.CodeConflict) STOPS
-// retrying a dependency that was briefly away. Pass both when you want both:
-//
-//	app.RetryingOn(p, errors.CodeConflict, errors.CodeUnavailable)
+// most: the OUTERMOST code decides, so a handler that wraps a CONTENTION
+// inside an INTERNAL has declared the failure final and this agrees. The
+// handler must RE-READ its aggregate on each attempt — this re-invokes the
+// HANDLER, not the transaction, so one that closed over a stale version
+// contends for ever. Retries are only safe on an idempotent handler; see
+// Retrying.
 //
 // At least one code is required. An empty set would retry nothing, silently,
 // which is the failure mode a variadic helper like this usually has.
+//
+// This comment said the opposite until 2026-08-09, and the correction is
+// worth stating rather than hiding: it taught that a stale write was CONFLICT
+// and that RetryingOn was the fix for the undersell a field test measured.
+// The CONTENTION split (4a1d152) reassigned that case and gave it to Retrying,
+// and the examples the old comment gave now panic at boot.
 func RetryingOn[Req, Res any](policy RetryPolicy, codes ...errors.Code) Middleware[Req, Res] {
 	if len(codes) == 0 {
-		panic("app: RetryingOn requires at least one code — with none it would retry nothing, which is app.Chain without it")
+		panic("app: RetryingOn requires at least one code — with none it would retry " +
+			"nothing, which is app.Chain without it.\n\n" +
+			"  The codes it accepts are " + retryableList() + " — the ones for which " +
+			"the same request may succeed later; the other five are terminal and are " +
+			"refused.\n\n" +
+			"  app.Retrying(policy) is CONTENTION and UNAVAILABLE, and is what almost " +
+			"every handler wants:\n\n" +
+			"      app.Chain(h, app.Retrying(policy), app.Transactional(uow))\n\n" +
+			"  Name codes here only to reach INTERNAL, or to take CONTENTION without " +
+			"UNAVAILABLE.")
 	}
 	for _, c := range codes {
 		if slices.Contains(terminal, c) {
@@ -346,10 +381,16 @@ func RetryingOn[Req, Res any](policy RetryPolicy, codes ...errors.Code) Middlewa
 	})
 }
 
-// retryable reports whether the OUTERMOST Warren code is CodeUnavailable —
-// the adapter's own reading of the error, not a chain search: errors.Is
-// would find an Unavailable buried under a recategorizing Internal wrap and
-// retry a failure the handler declared final.
+// retryable reports whether the OUTERMOST Warren code is one of the two
+// retryable ones, CodeUnavailable or CodeContention. The outermost code is
+// the adapter's own reading of the error, not a chain search: errors.Is would
+// find an Unavailable buried under a recategorizing Internal wrap and retry a
+// failure the handler declared final.
+//
+// It is a strict subset of what RetryingOn will accept — CodeInternal is
+// legal there and is deliberately not here, because "unanticipated" carries
+// no promise that a second attempt helps. That gap is asserted, not assumed;
+// see TestDefaultRetryableIsAStrictSubsetOfTheLegalSet.
 func retryable(err error) bool {
 	var e *errors.Error
 	if stderrors.As(err, &e) {
@@ -370,6 +411,44 @@ func retryable(err error) bool {
 var terminal = []errors.Code{
 	errors.CodeInvalid, errors.CodeNotFound, errors.CodeConflict,
 	errors.CodeUnauthenticated, errors.CodePermissionDenied,
+}
+
+// retryableCodes returns the codes RetryingOn accepts: the closed vocabulary
+// minus the terminal ones, in errors.Codes' order — CONTENTION, UNAVAILABLE,
+// INTERNAL.
+//
+// It is DERIVED rather than written out a second time, because the set the
+// guard enforces and the set the diagnostics enumerate have to be one set.
+// Two lists is how this package came to document three compositions that
+// panic. The behaviour is unchanged either way: the guard has always tested
+// membership of terminal, so this only gives the messages something true to
+// say. It runs at composition, never per request.
+func retryableCodes() []errors.Code {
+	all := errors.Codes()
+	out := make([]errors.Code, 0, len(all)-len(terminal))
+	for _, c := range all {
+		if !slices.Contains(terminal, c) {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// retryableList renders retryableCodes for a diagnostic:
+// "CONTENTION, UNAVAILABLE, INTERNAL".
+//
+// Joined by hand rather than with strings.Join: app's import list is asserted
+// package-wide by TestTransportIndependence, and one comma is not worth an
+// entry on a list whose whole value is that nothing joins it casually.
+func retryableList() string {
+	out := ""
+	for i, c := range retryableCodes() {
+		if i > 0 {
+			out += ", "
+		}
+		out += string(c)
+	}
+	return out
 }
 
 // Authorized runs the policy before invoking the handler; a denial
@@ -452,17 +531,24 @@ func Metered[Req, Res any]() Middleware[Req, Res] {
 // 7ms for the same refusal returned once. Anyone who knew a SKU could burn a
 // worker per request. Composition time is the only place to catch it, because
 // at run time the two look identical.
+//
+// The second paragraph names the LEGAL set as well as the wrong answer. A
+// reader who arrives here has just learnt that some codes are refused and has
+// no other way to learn which: the signature takes errors.Code, and there is
+// no type that says "the three retryable ones".
 func errTerminalRetry(code errors.Code) string {
 	return fmt.Sprintf(
 		"app: RetryingOn was composed on %s, which can never succeed on a retry — "+
 			"a request refused by a business rule is refused identically on every "+
 			"attempt, so this would spend the whole backoff budget and a database "+
 			"transaction per attempt to return the same answer.\n\n"+
+			"  RetryingOn accepts %s — the codes for which the same request may "+
+			"succeed later. The other five are terminal.\n\n"+
 			"  A stale write is not %s. It is CONTENTION, and app.Retrying already "+
 			"retries it:\n\n"+
 			"      app.Chain(h, app.Retrying(policy), app.Transactional(uow))\n\n"+
 			"  Retrying re-invokes the HANDLER, so your handler must re-read its "+
-			"aggregate on each attempt.", code, code)
+			"aggregate on each attempt.", code, retryableList(), code)
 }
 
 // --- composition identity ---------------------------------------------------
