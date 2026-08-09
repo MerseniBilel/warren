@@ -3,3 +3,9 @@
 # committed replace or workspace breaks `go get` for users (invariant 8).
 go.work
 go.work.sum
+
+# Editor and IDE state. Nobody else's window layout belongs in the history,
+# and an untracked directory in `git status` trains contributors to ignore it.
+.idea/
+.vscode/
+.DS_Store

@@ -1,0 +1,16 @@
+✗ controller registration panicked
+
+    runtime error: invalid memory address or nil pointer dereference
+
+  *warren_test.brokenController panicked while module "user" was registering its routes
+  at boot step 5. The routes it had already registered are discarded and the
+  boot is abandoned; no adapter was built and nothing listened.
+
+  The usual cause is a controller field the constructor does not assign: the
+  struct literal in NewController omits it, the field is nil, and Register
+  hands that nil to a route. Check that every handler NewController takes is
+  assigned to a field, and that every field Register reads is one of them.
+
+  Where it came from:
+
+    <frames elided>

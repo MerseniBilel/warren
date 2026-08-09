@@ -37,7 +37,9 @@ Each package entry has a fixed shape:
 
 This section describes the internal design of the framework itself — not the layout of applications built with it (that is `warren new`'s concern, documented separately).
 
-**The governing constraint: Warren obeys its own dependency rule.** If the kernel imported `net/http`, the architecture-linting pitch would be a lie. Every boundary below is enforced by the same `warren lint arch` that ships to users.
+**The governing constraint: Warren obeys its own dependency rule.** If the kernel imported `net/http`, the architecture-linting pitch would be a lie.
+
+**How much of that is actually enforced, precisely.** `make ci` runs the same `warren lint arch` binary that ships to users over Warren's own tree, so the rules it owns — layer, cross-module, handler/transport and handler/driver, each directly and through a helper (§8) — hold here exactly as they hold in a user's project. The **ring** boundaries this section draws are a different rule set: `--rules=rings` is listed in README's roadmap and does not exist yet, so what enforces them today is `scripts/invariants.sh` — core's dependency list, dig's confinement, OpenTelemetry's confinement, a kernel package importing the contracts ring, `replace` directives, `XWithY` names — plus review for everything grep cannot see, which is most of "adapters never import each other". Saying the linter enforces every boundary below would be the same kind of claim this document exists to stop.
 
 ### 1.1 Four rings
 
@@ -189,6 +191,7 @@ Publishing runs the other way: `UnitOfWork` writes aggregate state and outbox ro
 warren/                                 MODULE: core        (stdlib + dig)
 ├── warren.go, di/, lifecycle/,
 │   config/, log/, errors/, validate/, health/            ← kernel
+├── internal/panics/                                      ← kernel-internal: panic containment
 ├── inbox/                                                ← dedupe port + memory store
 ├── broker/memory/, broker/brokertest/                    ← in-process driver + contract suite
 ├── outbox/                                               ← writer port, relay, memory store
@@ -217,6 +220,12 @@ warren/config/yaml/                     MODULE  yaml parser             audit fi
 ```
 
 **Rule:** adapters never import each other. `broker/kafka` and `persistence/postgres` are mutually invisible. Both depend only on the core module's contract packages.
+
+**`warren/internal/panics` is the one kernel-internal package, and both halves of that are deliberate.** Three places invoke user code while Warren holds the stack — `di` calls a constructor, `lifecycle` calls a hook, and the bootstrapper calls a controller's `Register` — and each one contains the panic and renders it as an ordinary Warren diagnostic (§2.1, §2.3). The frame-filtering rules that turn a Go dump into a block a reader can act on are what make that possible, and three copies of them would drift within a month and then hold in one place out of three.
+
+It is under `internal/` because **no part of it may appear in an exported signature**: a `panics.Caught` in a public API would be a second error vocabulary beside `warren/errors`, and users would start matching on it. And it is the **one package outside `warren/di` permitted to name `go.uber.org/dig`** — not to use it, but to drop its frames, because a diagnostic that ends in nine `dig` frames has leaked the wrap boundary invariant 2 exists to hold. `scripts/invariants.sh` encodes exactly that carve-out: dig may be *imported* only by `warren/di`, and *named* in shipped code only by `warren/di` and `warren/internal/panics`.
+
+What it is not: `recover`-shaped. Stack exhaustion, out of memory, a concurrent map write and `runtime.Goexit` are outside it, and a panic in a goroutine a hook spawned is the hook's to recover. "Contained" is the word the documents use; "cannot crash" is not.
 
 ### 1.7 Dependency budget
 
@@ -331,6 +340,24 @@ with a typo'd signature compiles and registers nothing. A type that genuinely
 registers nothing belongs in `Providers` with `Eager[T]()`.
 `App.Validator(v)` sets the validator those route closures compile in.
 
+**A panicking `Register` is contained, per controller.** `Register` is user
+code called on Warren's own stack, and a nil handler field is the ordinary way
+to write one that panics. It is recovered where it is called — inside the inner
+loop, so several broken controllers report together rather than the first one
+destroying the evidence for the rest — and rendered as
+`✗ controller registration panicked`, naming the controller type, the module,
+and the frames a reader can act on. It is reported **with** the registration
+failures step 5 already accumulates (`Builder.Failures()`, §3.5), because a
+panicking `Register` and a nil handler are the same mistake caught half a line
+apart.
+
+**And it suppresses the consequence checks.** `Fill`, `Unserved` and the
+eager-controller scan do not run when a controller panicked: a `Register`
+abandoned halfway leaves a partial route table, so "no adapter serves protocol
+EVENT" and "a route nobody serves" become artefacts of the panic rather than
+independent facts — and printing them buries the one block the reader can act
+on under two they cannot.
+
 Three rules the 2026-08-01 adversarial review of this package pinned down:
 **modules are deduplicated by identity, not call site** — copies of one
 `NewModule` value shared through several import paths are one module, while a
@@ -381,6 +408,44 @@ keeps the shape honest. Platform and adapter modules are unaffected: the rule
 is about feature-to-feature only. And within one service, most of what looks
 like a shared port is really an event — `warren g consumer` is the preferred
 answer.
+
+### 2.1a Exit codes
+
+The manifest carried no exit code anywhere until 2026-08-09, which left the one
+number an operator's alerting actually keys on to be inferred from the source.
+It is four rows:
+
+| Outcome | Status |
+|---|---|
+| Booted, ran, drained cleanly | 0 |
+| Any boot failure — including a contained panic | 1 |
+| Any shutdown failure — including a contained panic | 1 |
+| A panic Warren does **not** contain, or a runtime-fatal condition | 2 (Go's) |
+
+**Warren never calls `os.Exit`.** The 1 comes from the generated `main.go`,
+which prints `App.Run`'s error and exits — printed, not logged, because a
+Warren diagnostic is a multi-line block and a structured logger would escape
+every newline into `\n`:
+
+```go
+if err := warren.New(...).Run(); err != nil {
+    fmt.Fprintln(os.Stderr, err)
+    os.Exit(1)
+}
+```
+
+**After 2026-08-09, no Warren-invoked user code during boot or shutdown
+produces exit 2.** The three places Warren calls user code on its own stack —
+a constructor (§2.2), a lifecycle hook (§2.3), a controller's `Register`
+(above) — all contain the panic and return it as a diagnostic, so the process
+exits 1 with a block a reader can act on rather than 2 with a Go dump.
+
+The 2 remains reachable, and the honest list is short: a panic in `main` before
+`warren.New`, in a `warren.Option` or a `Substitution`, or in a goroutine a
+hook spawned and did not recover — Warren did not invoke those and cannot see
+them — plus everything `recover` cannot catch at all: stack exhaustion, out of
+memory, a concurrent map write, `runtime.Goexit`. The word for what Warren does
+is *contained*; it is never *cannot crash*.
 
 ---
 
@@ -517,6 +582,35 @@ remaining hooks because one flush failed; a failing `OnStart` stops the boot
 and stops the already-started hooks in reverse before returning. `Ready()`
 flips true when `Start` returns nil and false as `Stop`'s first action —
 before the first `OnStop` runs.
+
+**A hook that panics is contained, and behaves exactly as one that returns an
+error.** This is what makes "acquisition belongs in hooks, whose rollback the
+lifecycle guarantees" (§2.1) a guarantee rather than a hope: until 2026-08-09 a
+panicking `OnStart` produced a raw Go dump and exit 2, and the already-started
+hooks' `OnStop` did **not** run — the process died holding whatever they had
+acquired, on a goroutine `lifecycle` spawned, so `main` could not recover it
+either.
+
+- **`OnStart`** — the panic is caught where the hook is called, the
+  already-started hooks are stopped in reverse, readiness never opens, and
+  `Start` returns the diagnostic. A hook that returns an error gets the same
+  rollback; this one simply never got the chance to return.
+- **`OnStop`** — the panic is caught and **does not abandon the drain**. The
+  remaining hooks still stop, and the panic joins the errors `Stop` returns,
+  because shutdown never abandons the rest of the unwind over one failed
+  flush — the pools and the outbox relay are below it.
+
+Both render `✗ lifecycle hook panicked`, naming the hook, the phase, the panic
+value verbatim, and the frames a reader can act on; the rendering is
+`warren/internal/panics` (§1.6), shared with the constructor and `Register`
+paths so the frame-filtering rules have one implementation. Exit 1 either way
+(§2.1a).
+
+**A panic in a goroutine the hook SPAWNED is not Warren's to catch.** Go gives
+no mechanism to recover another goroutine's panic, so a hook that starts a loop
+recovers inside that loop or the process dies. The containment is
+`recover`-shaped throughout: stack exhaustion, out of memory, a concurrent map
+write and `runtime.Goexit` are outside it.
 
 A lifecycle runs once: `Start` a second time — or after `Stop` — is an error.
 `Stop` is idempotent, and `Stop` arriving while `Start` is mid-boot wins:
@@ -1099,13 +1193,39 @@ last to see the response — reading order matching execution order. Chain runs
 at boot; the composed handler is the route table's pre-built closure, and
 invoking it allocates nothing (benchmarked).
 
+**`Transactional` composed OUTSIDE `Retrying` is refused at boot — and the
+refusal has a stated limit.** The walk that finds it starts from the handler
+`Chain` was *given*, so `Chain(Chain(h, Retrying(p)), Transactional(uow))` —
+the same mistake spelled in two calls — is caught too. It sees through every
+middleware Warren ships, and through any of yours whose handler implements
+`Unwrapper`. **It stops at a middleware that implements neither**, and there
+the check fails OPEN: with your own opaque middleware between them,
+`Chain(Chain(h, yours(), Retrying(p)), Transactional(uow))` composes without
+complaint. That is the honest boundary of a runtime walk over interface values,
+and it is one method to lift:
+
+```go
+type myHandler[Req, Res any] struct{ next app.Handler[Req, Res] }
+
+func (h myHandler[Req, Res]) Handle(ctx context.Context, req Req) (Res, error) {
+    return h.next.Handle(ctx, req)
+}
+
+// Unwrap makes this middleware transparent to Chain's composition checks.
+func (h myHandler[Req, Res]) Unwrap() app.Handler[Req, Res] { return h.next }
+```
+
+An `Unwrap` returning nil, or returning the receiver, ends the walk rather than
+spinning: a boot that hangs is worse than one that refuses. There is
+deliberately no unchecked variant of `Chain`.
+
 **Built-in core middleware** — transport-independent, applies everywhere:
 
 | Middleware | Effect |
 |---|---|
 | `app.Transactional(uow)` | Wraps `Handle` in a transaction; commits state + outbox atomically. Its `uow` is `app.UnitOfWork` — one method, declared in `app` so it imports no sibling contract; `persistence.UnitOfWork` satisfies it |
-| `app.Retrying(policy)` | Retries on `CodeUnavailable` — a dependency that was briefly away |
-| `app.RetryingOn(policy, codes...)` | Retries on the codes you name, and ONLY those — it does not inherit `CodeUnavailable`. `RetryingOn(p, errors.CodeConflict)` is what optimistic concurrency needs: a stale write under contention is the NORMAL outcome, not a failure, and without it 200 buyers against 50 seats undersell. The handler must RE-READ its aggregate each attempt, because this re-invokes the HANDLER, not the transaction |
+| `app.Retrying(policy)` | Retries on `CodeUnavailable` **and `CodeContention`** — the two retryable codes of §2.6, and the only two. A dependency briefly away, and a conditional write that lost a race. This is what optimistic concurrency needs, and it needs no code list |
+| `app.RetryingOn(policy, codes...)` | Retries the codes you name and ONLY those — nothing is inherited, so migrating `Retrying(p)` to `RetryingOn(p, errors.CodeContention)` STOPS retrying `UNAVAILABLE`. The legal set is `{CodeContention, CodeUnavailable, CodeInternal}`; a terminal code **panics at composition**. Two reasons to prefer it over `Retrying`: **`CodeInternal`**, which `Retrying` never retries and nothing else offers — worth a bounded budget on a consumer, where a DLQ is already behind the retry; and **deliberate narrowing**, for a handler whose outbound call makes an `UNAVAILABLE` retry double a side effect, where naming `CodeContention` alone is the trade. The handler must RE-READ its aggregate each attempt, because this re-invokes the HANDLER, not the transaction |
 | `app.Timeout(d)` | Bounds the handler. Inside `Retrying` it bounds each attempt; outside, the whole sequence |
 | `app.Traced()` | Span per handler, named `<module>.<handler>` |
 | `app.Metered()` | Duration histogram, error counter by code |
@@ -1213,8 +1333,8 @@ is the only ordering that makes `Serializable` usable.
 ```go
 type Repository[T domain.Root[K], K domain.ID] interface {
     FindByID(ctx context.Context, id K) (T, error)   // CodeNotFound when absent
-    Save(ctx context.Context, root T) error          // MUST enlist — persistence.Write does
-    Delete(ctx context.Context, id K) error
+    Save(ctx context.Context, root T) error          // MUST enlist — persistence.Write is the call; a lost versioned write is CONTENTION
+    Delete(ctx context.Context, root T) error        // MUST enlist — and it takes the ROOT, not an id
 }
 
 type UnitOfWork interface {
@@ -1247,10 +1367,42 @@ generic; a unit of work holds saved aggregates of many types at once and
 cannot name their identifier types. `domain.Aggregate` — `PullEvents()`
 alone — is the non-generic view that admits a heterogeneous collection, and
 `Track`/`Collect` ride the same context the transaction already travels on.
-`Save` calls `Track` as part of its contract, not as an implementation
-detail: a driver whose `Save` does not `Track` loses events, and the contract
-suite asserts it. Outside a transaction `Track` is a no-op that loses
-nothing — the events stay pending for a later `Do`.
+Enlistment is part of the contract, not an implementation detail: a driver
+whose write does not enlist loses events, and the contract suite asserts it.
+Outside a transaction `Track` is a no-op that loses nothing — the events stay
+pending for a later `Do`.
+
+**`Delete` takes the ROOT, not an identifier, and it must enlist exactly as
+`Save` does.** Removing an aggregate is precisely when `OrderCancelled` or
+`AccountClosed` is raised, and those events live on the caller's instance.
+Taking an id cannot be repaired by loading the aggregate inside `Delete`: the
+reloaded object is a DIFFERENT object with zero pending events, so enlisting it
+publishes nothing. Measured against real Postgres, the id-shaped `Delete`
+published ONE event where the same `DELETE` under `persistence.Write` published
+two. The signature changed on 2026-08-09; this row said `Delete(ctx, id K)`
+before it.
+
+**Where the boundary runs, and what it does not buy.** `persistence.Write` is
+the call every repository write makes — `Save` and `Delete` alike. It checks
+for a unit of work before the write and enlists the root after it, and there is
+no way to perform half of it: outside a `Do` it refuses, because the row would
+autocommit while the aggregate's events stayed pending on an object about to go
+out of scope. `postgres.RequireTx` (§6.1) is the DRIVER's stricter,
+aggregate-free predicate — it also insists on an ambient Postgres transaction
+to run SQL on — and it is what `Store.Append` and a write carrying no root use.
+The two answer different questions and both are worth asking.
+
+Be precise about the limit, because the fused call is easy to oversell. What
+`Write` guarantees is that it **cannot be half-performed**. What it cannot do
+is **make itself be called**: a `Save` that runs its statement directly
+compiles, vets, serves traffic, answers 201, and loses every event — no error,
+no outbox row, no log line. Deleting the whole call is exactly as easy as
+deleting the separate `Track` statement it replaced. The thing that catches
+THAT is the contract suite — `persistence.RunContract` asserts that a driver's
+`Save` and `Delete` enlist, and `warren g repository` now generates a test that
+runs it, so a repository that drops `Write` goes red instead of green. A lint
+rule is deferred on capability rather than on precision: `warren lint arch` is
+import-graph only by design (§8).
 
 **A nested `Do` joins.** §10's handler calls `uow.Do` itself while §3.2 wraps
 the same handler in `app.Transactional`, so erroring would break documented
@@ -1267,8 +1419,10 @@ an **optimistic-concurrency conflict or a serialization failure** →
 the reasoning); constraint violation → `INVALID`; connection lost, pool
 exhausted, statement timeout, **commit failure** → `UNAVAILABLE`. `app.Retrying`
 covers `CONTENTION` and `UNAVAILABLE`, and it must be composed OUTSIDE
-`app.Transactional` so each attempt gets its own transaction — the reverse
-is refused at boot. An unsupported `Option` is `INVALID`, never a silent downgrade.
+`app.Transactional` so each attempt gets its own transaction — the reverse is
+refused at boot **wherever `Chain` can see it**, which is through Warren's own
+middleware and through any of yours implementing `app.Unwrapper`, and not
+through one that implements neither (§3.2). An unsupported `Option` is `INVALID`, never a silent downgrade.
 
 
 ### 3.4 `warren/broker`
@@ -1488,6 +1642,7 @@ type EventRoute struct { Topic, Name string; Options []broker.SubscribeOption
 type Builder struct{ ... }
 func NewBuilder(opts ...BuilderOption) *Builder
 func (b *Builder) For(module string) Registrar
+func (b *Builder) Failures() error   // the accumulated registration failures, or nil
 func (b *Builder) Table() (*Table, error)
 func (t *Table) HTTP() []HTTPRoute; GRPC() []GRPCRoute; Events() []EventRoute
 func (t *Table) Claim(p Protocol, by string); Unserved() error
@@ -1562,6 +1717,27 @@ Registration errors accumulate and surface together from `Table()`; duplicate
 routes and empty patterns fail the boot; `Claim`/`Unserved` fail the boot when
 routes are registered for a protocol nothing serves — a route nobody serves is
 a route that silently 404s in production.
+
+**The accumulation is a mechanism, not a shape of words: `reg.fail(err)`
+appends to `Builder.errs`, and `Fill` returns the whole list as one
+diagnostic**, so one boot names every registration problem rather than the
+first. `Builder.Failures()` reports that same list without freezing anything,
+which is what boot step 5 needs when it must abandon BEFORE `Fill` — a
+controller whose `Register` panicked (§2.1) leaves a partial table, and running
+the consequence checks over it would print two blocks the reader cannot act on
+around the one they can.
+
+**A nil handler is a registration failure, not a panic** — since 2026-08-09,
+and across `Get`/`Post`/`Put`/`Patch`/`Delete`, `Method`, `OnEvent` **and
+`Raw`**. It was a panic, and its two siblings in the same functions — a method
+written into the pattern, a duplicate route — were not, so one mistake produced
+a clean boot failure or a Go stack dump depending on which line of `Register`
+hit it first. Against AGENT.md's admission test it fails criterion 3 (`reg.fail`
+is three lines away, so the API need not return an error to report it) and
+criterion 4 (the alternative is a clean boot failure, not silent data loss).
+The usual cause is named in the diagnostic, because it is nearly always the
+same one: a controller field the constructor does not assign, so `Register`
+passes that nil straight through.
 
 **Honest note on the 1.27 migration:** explicit type arguments are mandatory
 in *both* shapes — Go cannot infer `[Req, Res]` from a concrete handler passed
@@ -1642,6 +1818,22 @@ http.Server(
 ```
 
 Registers a lifecycle hook: starts after all dependencies are healthy, stops before pools close, waits `DrainDelay` so the load balancer observes the 503, then drains in-flight requests.
+
+**The recover is the outermost edge middleware and is NOT removable** — there
+is no option to disable it, for the reason §4.2 gives for gRPC's `Recovery()`:
+an application must not be able to turn off panic recovery by forgetting an
+argument. A panic in a handler becomes a 500 carrying the correlation ID, and
+the stack goes to the **log** and never to the client. It is logged with
+`ErrorContext` rather than `Error`, so `log.Handler` resolves the correlation
+and trace IDs at emit time — otherwise the panic line would be the one record
+in the service unjoinable to the request that caused it, in the place that link
+is worth most.
+
+**One value passes straight through: `http.ErrAbortHandler`.** `net/http`
+raises it by design when a client goes away mid-write; it is not a bug, and
+logging it as one would fill the log with the ordinary behaviour of cancelled
+downloads. It is re-panicked so `net/http`'s own handling takes it
+(`transport/http/edge.go:33`).
 
 **Two escape hatches for what the typed port deliberately does not model** — uploads, downloads, SSE, WebSocket upgrades:
 
@@ -2201,20 +2393,25 @@ func (r *UserRepository) FindByID(ctx context.Context, id domain.UserID) (*domai
     return &u, nil
 }
 
-func (r *UserRepository) Delete(ctx context.Context, id domain.UserID) error {
-    if err := postgres.RequireTx(ctx, "delete user"); err != nil {
-        return err
-    }
-    // 3. Check rows-affected: a DELETE that matched nothing is NOT_FOUND.
-    //    The contract suite deletes twice and requires the second to fail.
-    n, err := r.db(ctx).Exec(ctx, `DELETE FROM users WHERE id = $1`, id)
-    if err != nil {
-        return err
-    }
-    if n == 0 {
-        return werrors.NotFound("user", id)
-    }
-    return nil
+// Delete takes the AGGREGATE, not an id, and goes through persistence.Write
+// for the same reason Save does: deleting an aggregate is exactly when
+// UserClosed is raised, and that event lives on the object the caller holds.
+//
+//     u.Close()                    // raises the fact
+//     return r.repo.Delete(ctx, u) // the row goes, the fact is published
+func (r *UserRepository) Delete(ctx context.Context, u *domain.User) error {
+    return persistence.Write(ctx, "delete user", u, func(ctx context.Context) error {
+        // 3. Check rows-affected: a DELETE that matched nothing is NOT_FOUND.
+        //    The contract suite deletes twice and requires the second to fail.
+        n, err := r.db(ctx).Exec(ctx, `DELETE FROM users WHERE id = $1`, u.ID())
+        if err != nil {
+            return err
+        }
+        if n == 0 {
+            return werrors.NotFound("user", u.ID())
+        }
+        return nil
+    })
 }
 ```
 
@@ -2230,9 +2427,23 @@ never imports `pgx` itself.
 
 **`warren g repository --driver postgres` writes exactly this.** The rules
 above are unenforced by any compiler, which is why the generator exists: it
-emits `persistence.Write` around the write, `r.db(ctx)` for the handle,
-`postgres.RequireTx` in the `Delete` that carries no aggregate, and the
-version-checked SQL of §3.3's optimistic concurrency.
+emits `persistence.Write` around **every** write, `Delete` included, `r.db(ctx)`
+for the handle, and the version-checked SQL of §3.3's optimistic concurrency.
+
+`Delete` used to be exempted here as "a write with no aggregate", and that
+premise was false — a delete carries the aggregate whose closure event was just
+raised. Measured against real Postgres, the exemption published ONE event where
+the same `DELETE` under `persistence.Write` published two. `postgres.RequireTx`
+keeps its own job, which is the stricter, aggregate-free one: `Store.Append`
+and any write that genuinely carries no root (§3.3).
+
+**And the generator writes a contract test beside the repository.**
+`persistence.Write` cannot make itself be called — a `Save` that runs its
+statement directly compiles, vets and serves traffic while losing every event —
+so `<name>_repository_test.go` runs `persistence.RunContract`, which asserts
+that `Save` and `Delete` enlist. It is generated because passing it is not
+optional and failing to run it is invisible. Delete the test and you are back
+to a green build over a repository that silently drops events.
 
 ### 6.2–6.4 `mysql` / `mongo` / `redis`
 
@@ -2368,9 +2579,11 @@ in v0.2.
 primitives it was to own split cleanly in two, and only one half is Warren's.
 
 **Retry and timeout are core-ring, and they ship.** `app.RetryPolicy` is the
-port; `app.Retrying(policy)` retries `CodeUnavailable` and nothing else, and
-`app.RetryingOn(policy, codes...)` retries exactly the codes you name —
-`errors.CodeContention` is the one optimistic concurrency needs;
+port; `app.Retrying(policy)` retries `CodeUnavailable` **and
+`CodeContention`** — the two retryable codes of §2.6, so **optimistic
+concurrency needs no code list at all**; `app.RetryingOn(policy, codes...)`
+retries exactly the codes you name and nothing else, which is how you reach
+`errors.CodeInternal` or deliberately narrow to `CodeContention` alone (§3.2);
 `app.Timeout(d)` bounds the handler's context; `broker.ExponentialBackoff(n)`
 is a concrete policy in the core module with zero dependencies, and
 `broker.Retry` / `broker.WithRetry` reuse the same port on the consumer chain.
@@ -2569,12 +2782,62 @@ warren generate repository <module> <Name>     [--driver memory|postgres]
 warren generate consumer   <module> <EventName> [--topic billing.customer.created]
 
 # govern
-warren lint arch    # layer and cross-module violations, non-zero exit
+warren lint arch [dir]   # four rules over the import graph; exit 1 on a violation
+                         #   layer            domain imports nothing from the other three
+                         #   cross-module     one feature module reaching into another's
+                         #   handler/transport  domain/ and application/ import no transport
+                         #   handler/driver     domain/ and application/ import no driver
+                         # each checked directly AND through a helper package
 
 warren version
 ```
 
 Every generator takes `--dir`, `--dry-run` and `--force`.
+
+**`lint arch` exits non-zero only on a violation, and the report also discloses
+which rules did NOT run.** A disclosure is not a violation: it does not change
+the exit code, and a clean run that could not compare features still exits 0.
+That asymmetry is the point — a check that did not run must never read as a
+check that passed, and it must not fail a build either. Warren's own CI run
+prints exactly this:
+
+```
+No violations in 35 packages.
+
+  Checked: the layer rule, the handler/transport rule and the handler/driver
+  rule — each directly and through a helper package.
+
+  NOT checked: the cross-module rule. …
+```
+
+**The cross-module rule finds feature modules by a `modules` path segment** —
+`internal/modules/<feature>/…`, the tree `warren new` generates — and the tool
+does not guess where a feature begins, because a heuristic fires on the project
+root of a single-feature app and then polices a boundary it invented. So a
+project laid out otherwise gets the `NOT checked: the cross-module rule`
+paragraph naming the layout it expects, rather than a silent pass. Warren's own
+repository is such a project, which is why the block above says so.
+
+**Handlers may import `warren/persistence` and `warren/broker`.** Those are
+contract packages — a domain naming `persistence.UnitOfWork` is the pattern,
+not the violation — and the prefix match is slash-bounded so that listing
+`warren/persistence/postgres` can never catch `warren/persistence`. What is
+refused in `domain/` and `application/` is the DRIVERS:
+`warren/persistence/postgres`, `warren/broker/kafka`, `warren/observability`
+and the rest of the adapter modules, plus `database/sql`, `pgx`, `pq`, the
+MySQL and Mongo and Redis clients, franz-go, kafka-go, sarama, amqp091 and
+nats.go. `infrastructure/` is exempt by construction, and so is the controller
+at the module root — that is exactly where a use case is allowed to meet a
+protocol.
+
+**Cloud and SaaS SDKs are deliberately not on the driver list** — no
+aws-sdk-go, no `cloud.google.com/go`, no Stripe, no Twilio. A domain importing
+the S3 SDK is the same violation in principle, and the list of SaaS clients is
+unbounded: a list maintained by whoever last hit a false negative is a
+heuristic in a different hat, permanently incomplete, and its incompleteness is
+indistinguishable from approval. The rule that catches those is the layer rule,
+the moment the port is declared in the domain and implemented in
+infrastructure.
 
 `--broker kafka` differs from `--db postgres` in shape, not just in name.
 `postgres.Module` is imported by platform and its ports reach a feature
@@ -2611,8 +2874,14 @@ Flags that do NOT exist either: `--layout`, `--fields`, `--transport` on
 `g command`, `--event` on `g consumer` (it is `--topic`), and the
 `module/Name` slash form (arguments are separate: `<module> <Name>`).
 `warren new --transport` is accepted but no transport adapter is released
-through it, and `--db postgres` is refused — adopting Postgres today means
-wiring `postgres.Module` into the platform module by hand.
+through it.
+
+`--db postgres` is **not** on that list, and this paragraph said it was
+refused until 2026-08-09. Verified: `warren new demo --db postgres --broker
+kafka` produces a working project whose `internal/platform/module.go` declares
+`postgres.Module` with `WithOutbox()` and `WithInbox()`, wires `newRelay` to
+drain the outbox, and declares `kafka.Broker` as its own module value for the
+features that consume events. Nothing about it is wired by hand.
 
 ### Generator rules
 
@@ -2654,7 +2923,6 @@ All generators support `--dry-run` and `--force`.
 | Mongo | **none adopted** | — | The design round CLOSED 2026-08-05: the port needs no change and a driver is additive, certified by the exported `RunContract`/`RunVersionedContract`. **Audited 2026-08-05:** `go.mongodb.org/mongo-driver/v2` v2.8.0 (2026-07-10), **Apache-2.0** — the SSPL question is about the SERVER, not the driver — not archived, 8535★, pushed 2026-08-05, 19 open issues. Healthy, and not the reason to wait: v2's session rides on `context.Context`, so no driver type reaches a signature |
 | Cron / jobs | **none — module DROPPED 2026-08-05** | Build | A scheduler is an ordinary `lifecycle.Hook`; `outbox.Electors` + `postgres.WithAdvisoryLock()` give leader-only BY NAME, provided and exported. (Until 2026-08-08 this row said `outbox.Elector` singular, and that was the defect: one elector is one lock, so a scheduler injecting it starved either itself or the relay.) **`robfig/cron/v3` REJECTED**: MIT, 14165★, **not archived** — and that is the trap. Its last release `v3.0.1` is tagged at a commit dated **2020-01-04**, its last commit on master is **2021-01-06**, `/releases/latest` returns **404** (no release object exists at all), and its `go.mod` declares **`go 1.12`**. `pushed_at: 2024-07-08` is repo metadata, not code. That is §9's httprouter rejection, three years worse, under a framework targeting Go 1.27. **`go-co-op/gocron/v2` REJECTED** (v2.22.0, 2026-07-09, 7126★, MIT, genuinely healthy): it **requires `robfig/cron/v3 v3.0.1`** transitively, and ships its own scheduler lifecycle, `Elector` and `Locker` — a second lifecycle beside `warren/lifecycle`, which is the one line this ledger rejected `fx` on. **`river` (MPL-2.0) / `asynq` (MIT) not adopted**: queues, not schedulers, and outbound — the user's `infrastructure/` |
 | Testing | none — stdlib + core | Build | `testify` and `testcontainers-go` were both budgeted and neither adopted: assertions are `if got != want`, and Docker fixtures wait for `warren/testing/containers`, its own module. |
-| CLI | `cobra` | Vendor | build-time only |
 
 ---
 

@@ -49,8 +49,10 @@ them:
 
 1. **Transport-agnostic use cases.** One `app.Handler[Req, Res]`; HTTP, gRPC,
    and message consumers are thin adapters over it. A handler imports no
-   transport package — *no `net/http`, no `pgx`, no `kgo`. That is the entire
-   point.*
+   transport and no driver — *no `net/http`, no `pgx`, no `kgo`. That is the
+   entire point.* Two rules with two different remedies — move the routing to
+   the controller; declare the port in the domain — and `warren lint arch`
+   checks both, directly and through a helper package.
 2. **Real module encapsulation.** A provider is private to its module unless
    exported, and imports are explicit — not one global container where
    everything sees everything.
@@ -251,9 +253,13 @@ contract now.
       releases and sat untouched through Go 1.19–1.27), and everything the
       five write compiles, vets and passes its own tests in a real project
       on every CI run
-- [x] `warren lint arch` — the layer rule and the cross-module rule, read
-      from the import graph; works on a project that does not compile; runs
-      in Warren's own CI over Warren, same binary *(`--rules=rings` next)*
+- [x] `warren lint arch` — four rules read from the import graph: layer,
+      cross-module, handler/transport and handler/driver, each checked
+      directly **and through a helper package**; works on a project that does
+      not compile; runs in Warren's own CI over Warren, same binary. The
+      report discloses which rules did not run — a project outside
+      `internal/modules/` is told the cross-module rule compared nothing,
+      rather than passing silently *(`--rules=rings` next)*
 - [ ] v0.2+: `doctor`, `graph`, `explain di`, `templates eject`
 - [ ] v0.3+: `extract module`, `add <adapter>`, `migrate layout`
 

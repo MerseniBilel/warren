@@ -40,23 +40,34 @@ A notes service: `POST /notes` and `GET /notes/{id}`, with validation, the
 error table, health probes and a graceful drain. Four layers, one module.
 
 ```
-internal/notes/
+internal/modules/notes/
     domain/            the model and the ports — imports nothing else
     application/       the use cases — imports domain
     infrastructure/    the adapters — imports domain
-    controller.go      the wiring — the ONLY file that sees all four
+    controller.go      the routes — where a use case meets a protocol
+    module.go          the wiring — the ONLY file that sees all four
 cmd/notes/main.go      the composition root
 ```
 
-That layering is not a convention here. `warren lint arch` fails the build
-when `domain/` imports `infrastructure/`.
+**The `internal/modules/` segment is load-bearing, not decoration.** It is the
+tree `warren new` and `warren g module` generate, and it is how
+`warren lint arch` finds where one feature ends and the next begins: the
+cross-module rule compares packages by the segment *after* `modules`, so under
+any other layout it compares nothing and says so in its report. Laying the page
+out as `internal/notes/` — which it did until 2026-08-09 — taught the one shape
+where that rule is silent.
+
+That layering is not a convention here. `warren lint arch` fails the build when
+`domain/` imports `infrastructure/`, when one feature module imports another's
+packages, and when anything in `domain/` or `application/` imports a transport
+package or a driver — each checked directly and through a helper package.
 
 ---
 
 ## 1. The module
 
 ```
-mkdir -p notes/internal/notes/{domain,application,infrastructure} notes/cmd/notes
+mkdir -p notes/internal/modules/notes/{domain,application,infrastructure} notes/cmd/notes
 cd notes
 ```
 
@@ -81,9 +92,14 @@ Two requires. That is the whole dependency budget for an HTTP service — the
 HTTP adapter is `net/http` and nothing else, and `dig` arrives indirectly and
 is never yours to import.
 
+**Indirectly still means `go.sum`.** A `go.mod` with no `go.sum` beside it does
+not build — `missing go.sum entry for module providing package
+go.uber.org/dig` — so there is a `go mod tidy` in §7, before the first build,
+and it is not optional.
+
 ---
 
-## 2. The domain — `internal/notes/domain/note.go`
+## 2. The domain — `internal/modules/notes/domain/note.go`
 
 ```go
 package domain
@@ -107,7 +123,7 @@ No framework import at all. That is the point.
 
 ---
 
-## 3. The use case — `internal/notes/application/write.go`
+## 3. The use case — `internal/modules/notes/application/write.go`
 
 ```go
 package application
@@ -117,7 +133,7 @@ import (
 
 	"github.com/MerseniBilel/warren/errors"
 
-	"example.com/notes/internal/notes/domain"
+	"example.com/notes/internal/modules/notes/domain"
 )
 
 // The tags are the whole contract with the edge: `json` for the body,
@@ -156,13 +172,26 @@ router. `errors.Conflict` becomes 409 over HTTP, `AlreadyExists` over gRPC, and
 an ack on a queue — because [one table](AGENT.md) owns that mapping and your
 handler is not in it.
 
-The read side is the same shape, and shows path binding:
+The read side is the same shape, and shows path binding —
+`internal/modules/notes/application/read.go`:
 
 ```go
+package application
+
+import (
+	"context"
+
+	"example.com/notes/internal/modules/notes/domain"
+)
+
 // `param:"id"` matches the "{id}" wildcard in the route pattern.
 type ReadNote struct {
 	ID string `param:"id"`
 }
+
+type readNote struct{ notes domain.Repository }
+
+func NewReadNote(notes domain.Repository) *readNote { return &readNote{notes: notes} }
 
 func (h *readNote) Handle(ctx context.Context, q ReadNote) (NoteView, error) {
 	n, err := h.notes.Find(ctx, q.ID)
@@ -173,13 +202,39 @@ func (h *readNote) Handle(ctx context.Context, q ReadNote) (NoteView, error) {
 }
 ```
 
+`NoteView` is declared once, in `write.go`, and both handlers return it — they
+are the same package.
+
 ---
 
-## 4. The infrastructure — `internal/notes/infrastructure/memory.go`
+## 4. The infrastructure — `internal/modules/notes/infrastructure/memory.go`
 
 ```go
+package infrastructure
+
+import (
+	"context"
+	"sync"
+
+	"github.com/MerseniBilel/warren/errors"
+
+	"example.com/notes/internal/modules/notes/domain"
+)
+
+type memoryNotes struct {
+	mu sync.RWMutex
+	m  map[string]domain.Note
+}
+
 func NewMemoryNotes() domain.Repository {
 	return &memoryNotes{m: map[string]domain.Note{}}
+}
+
+func (r *memoryNotes) Save(_ context.Context, n domain.Note) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.m[n.ID] = n
+	return nil
 }
 
 func (r *memoryNotes) Find(_ context.Context, id string) (domain.Note, error) {
@@ -199,10 +254,22 @@ returning `*memoryNotes` does not satisfy a module that exports
 
 ---
 
-## 5. The controller and the module — `internal/notes/controller.go`
+## 5. The controller and the module
+
+Two files, and the split is the one `warren g module` generates: routes in
+`controller.go`, wiring in `module.go`.
+
+`internal/modules/notes/controller.go`:
 
 ```go
 package notes
+
+import (
+	"github.com/MerseniBilel/warren/app"
+	"github.com/MerseniBilel/warren/transport"
+
+	"example.com/notes/internal/modules/notes/application"
+)
 
 type Controller struct {
 	write app.Handler[application.WriteNote, application.NoteView]
@@ -225,6 +292,23 @@ func (c *Controller) Register(r transport.Registrar) {
 	transport.Post(r, "/notes", c.write)
 	transport.Get(r, "/notes/{id}", c.read)
 }
+```
+
+`internal/modules/notes/module.go`:
+
+```go
+package notes
+
+import (
+	"sync"
+
+	"github.com/MerseniBilel/warren"
+	"github.com/MerseniBilel/warren/app"
+
+	"example.com/notes/internal/modules/notes/application"
+	"example.com/notes/internal/modules/notes/domain"
+	"example.com/notes/internal/modules/notes/infrastructure"
+)
 
 // Declared ONCE. Modules are deduplicated by identity, so a plain factory
 // called by two importers would be two modules sharing a name — a boot error.
@@ -259,19 +343,36 @@ Three rules worth burning in:
 
 ---
 
-## 6. `main.go`
+## 6. `cmd/notes/main.go`
 
 ```go
+package main
+
+import (
+	"fmt"
+	"os"
+	"time"
+
+	"github.com/MerseniBilel/warren"
+	whttp "github.com/MerseniBilel/warren/transport/http"
+
+	"example.com/notes/internal/modules/notes"
+)
+
 func main() {
-	app := warren.New(
+	err := warren.New(
 		notes.Module(),
 		whttp.Server(
 			whttp.Port(8080),
 			whttp.ReadTimeout(30*time.Second),
 		),
-	)
-	if err := app.Run(); err != nil {
-		log.Fatal(err)
+	).Run()
+
+	if err != nil {
+		// Print, don't log: Warren's diagnostics are multi-line blocks, and a
+		// structured logger would escape every newline into \n.
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
 	}
 }
 ```
@@ -281,14 +382,63 @@ sequence: **readiness closes first**, the load balancer is given `DrainDelay`
 to notice, in-flight requests finish, and only then do pools close. That
 ordering is the one most hand-rolled Go services get backwards.
 
+**Warren never calls `os.Exit`** — the line above is where the status comes
+from, which is why it is written out rather than hidden. 0 means booted, ran
+and drained cleanly; 1 is any boot or shutdown failure, including a panic
+Warren contained; 2 is Go's, for a panic Warren did not invoke and cannot see.
+The generated `main.go` is this file.
+
+### Acquiring something — the hooks
+
+§3 said constructors wire and never acquire, and that a connection or a
+goroutine belongs in a lifecycle hook whose rollback the framework guarantees.
+This is the mechanism. A module takes plain closures, fixed at declaration
+time:
+
+```go
+var Module = sync.OnceValue(func() warren.Module {
+	return warren.NewModule("search",
+		warren.OnStart(func(ctx context.Context) error { return index.Warm(ctx) }),
+		warren.OnStop(func(ctx context.Context) error { return index.Flush(ctx) }),
+	)
+})
+```
+
+`OnStart` hooks run in dependency order after the graph is built and before
+readiness opens; `OnStop` runs them in reverse, after readiness has already
+closed. Anything created *at* boot instead — a pool a constructor opened, a
+consumer pipeline's drain func — injects `lifecycle.Lifecycle` and appends its
+own `lifecycle.Hook`, because a closure fixed at declaration time cannot close
+over a value that does not exist yet.
+
+**What the rollback guarantee covers, exactly.** If an `OnStart` returns an
+error, the hooks that already started are stopped in reverse and readiness
+never opens. **A hook that PANICS gets the same treatment** — it is contained,
+rendered as `✗ lifecycle hook panicked` with the frames that raised it, and the
+process exits 1 with a diagnostic rather than 2 with a Go dump. A panicking
+`OnStop` does not abandon the rest of the drain either: the remaining hooks
+still stop, and the panic joins the errors `Stop` returns.
+
+The limit is worth knowing before you rely on it: this is `recover`-shaped, and
+**a panic in a goroutine your hook SPAWNED is yours to recover**. Go offers no
+way to catch another goroutine's panic, so a hook that starts a loop recovers
+inside that loop or the process dies.
+
 ---
 
 ## 7. Run it
 
 ```
+$ go mod tidy
 $ go build ./... && go vet ./... && go run ./cmd/notes
 INFO http server listening addr=[::]:8080 module=warren/transport/http tls=false
 ```
+
+**`go mod tidy` first, and it is not tidiness.** §1's `go.mod` has no `go.sum`
+beside it, and the build stops before it reaches your code:
+`missing go.sum entry for module providing package go.uber.org/dig (imported by
+github.com/MerseniBilel/warren/di)`. `dig` is indirect and never yours to
+import, but it is still a line in the checksum file.
 
 ```
 $ curl -i -X POST localhost:8080/notes -H 'Content-Type: application/json' -d '{"id":"n1","text":"hello"}'
@@ -369,32 +519,46 @@ and `span_id` too — pass `observability.LogAttrs()` as a second argument to
 
 The in-memory repository above is a real implementation of the port, and
 replacing it changes **no use case and no controller** — only the module's
-provider list. Add two requires:
+provider list. One more require, and — pre-release — its `replace`:
 
 ```go
 require github.com/MerseniBilel/warren/persistence/postgres v0.1.0
+
+replace github.com/MerseniBilel/warren/persistence/postgres => /path/to/warren/persistence/postgres
 ```
 
-### The repository
+Then `go mod tidy` again; `pgx` and its five siblings arrive with it.
 
-Two rules, and the first is what stops events being silently lost:
+### The repository — `internal/modules/notes/infrastructure/postgres.go`
+
+**Three rules**, and the first is what stops events being silently lost:
 
 ```go
+package infrastructure
+
+import (
+	"context"
+	"errors"
+
+	werrors "github.com/MerseniBilel/warren/errors"
+	"github.com/MerseniBilel/warren/persistence/postgres"
+
+	"example.com/notes/internal/modules/notes/domain"
+)
+
 type postgresNotes struct{ db postgres.DB }
 
 func NewPostgresNotes(db postgres.DB) domain.Repository { return &postgresNotes{db: db} }
 
 func (r *postgresNotes) Save(ctx context.Context, n domain.Note) error {
-	// 1. RequireTx FIRST. Outside a unit of work the row would autocommit —
+	// 1. Refuse the write outside a unit of work. The row would autocommit —
 	//    and if this type raised events, they would stay pending on an object
 	//    about to go out of scope and be lost silently, with no outbox row.
 	//
-	//    Note is a plain record, not an aggregate, so RequireTx is the whole
-	//    of the rule here. A repository that saves an AGGREGATE uses
-	//    persistence.Write instead, which makes this same check AND enlists
-	//    the aggregate when the write succeeds — one call, so there is no
-	//    separate Track statement to forget. That is what
-	//    `warren g repository --driver postgres` writes.
+	//    Note is a plain record, not an aggregate: it has no events to enlist,
+	//    so RequireTx is the whole of the rule HERE. A repository that saves
+	//    an AGGREGATE uses persistence.Write instead — see below — and that is
+	//    what `warren g repository --driver postgres` writes.
 	if err := postgres.RequireTx(ctx, "save note"); err != nil {
 		return err
 	}
@@ -417,36 +581,101 @@ func (r *postgresNotes) Find(ctx context.Context, id string) (domain.Note, error
 }
 ```
 
-`r.db(ctx)` is the only piece of framework machinery here, and it does one
-thing: return the transaction if `UnitOfWork.Do` put one on the context, and
-the pool otherwise. **Reads work outside a transaction; writes are refused** —
-with a diagnostic that explains why.
+**2. `r.db(ctx)` for the handle, never a stored pool.** It is the only piece of
+framework machinery here, and it does one thing: return the transaction if
+`UnitOfWork.Do` put one on the context, and the pool otherwise. **Reads work
+outside a transaction; writes are refused** — with a diagnostic that explains
+why.
 
-3. A `Delete` must check rows-affected and return `NOT_FOUND` when it matched
-   nothing. A bare `DELETE ... WHERE id = $1` returns nil for a missing row,
-   and silent success hides bugs.
+**3. A `Delete` must check rows-affected** and return `NOT_FOUND` when it
+matched nothing. A bare `DELETE ... WHERE id = $1` returns nil for a missing
+row, and silent success hides bugs.
+
+### When the type IS an aggregate — `persistence.Write`
+
+`Note` is a plain record. The moment your type embeds `domain.AggregateRoot`
+and raises events, rule 1 changes shape: the write and the enlistment become
+one call, because a separate `persistence.Track` statement after the write is a
+statement that can be deleted, and a field test deleted one — the row
+committed, the request returned 201, and the event evaporated with no error, no
+outbox row and no log line.
+
+```go
+func Write(ctx context.Context, op string, root domain.Aggregate,
+	write func(context.Context) error) error
+```
+
+It refuses outside a unit of work, runs `write`, and enlists `root` when — and
+only when — the write succeeded. Both halves, or neither. `Order` below is an
+aggregate of your own — the notes service has none, so these two methods are
+the shape rather than a file from this project:
+
+```go
+func (r *OrderRepository) Save(ctx context.Context, o *domain.Order) error {
+	return persistence.Write(ctx, "save order", o, func(ctx context.Context) error {
+		n, err := r.db(ctx).Exec(ctx, `
+			UPDATE orders SET total = $2, version = version + 1
+			WHERE id = $1 AND version = $3`,
+			o.ID().String(), o.Total, o.Version())
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			// NOTHING was written, so the next attempt re-reads and usually
+			// wins: CONTENTION, which app.Retrying covers. Not CONFLICT —
+			// that code ACKS on a consumer and destroys the message.
+			return werrors.Contention("order %s was changed since it was loaded", o.ID())
+		}
+		o.SetVersion(o.Version() + 1)
+		return nil
+	})
+}
+
+// Delete takes the AGGREGATE, not an id. Cancelling is exactly when the
+// aggregate raises OrderCancelled, and that event lives on THIS object —
+// loading a second one inside Delete would enlist an instance with no pending
+// events and publish nothing.
+func (r *OrderRepository) Delete(ctx context.Context, o *domain.Order) error {
+	return persistence.Write(ctx, "delete order", o, func(ctx context.Context) error {
+		n, err := r.db(ctx).Exec(ctx, `DELETE FROM orders WHERE id = $1`, o.ID().String())
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return werrors.NotFound("order", o.ID())
+		}
+		return nil
+	})
+}
+```
+
+`Write` cannot be half-performed. What it **cannot** do is make itself be
+called: a `Save` that runs its statement directly compiles, vets, serves
+traffic and loses every event. The thing that catches that is the contract
+suite — `warren g repository` generates a test running
+`persistence.RunContract`, which asserts that `Save` and `Delete` enlist. Keep
+it; deleting it puts you back to a green build over a repository that silently
+drops events.
 
 ### The wiring
 
-```go
-warren.NewModule("notes",
-	warren.Imports(pg),                       // pg is the postgres module value
-	warren.Providers(NewPostgresNotes, ...),
-	warren.Controllers(NewController),
-)
-```
+A module that wants `postgres.DB` must **import** the module that provides it —
+a provider is private to its module unless exported. Declare that ONCE, in
+`internal/platform`, and let features import it. A module factory that takes a
+module as an argument does not work: modules are deduplicated by identity, so a
+factory called by two importers is two modules sharing a name — a boot error.
 
-A module that wants `postgres.DB` must **import** the postgres module — a
-provider is private to its module unless exported. In `main`:
-
-Declare it ONCE, in `internal/platform`, and let features import it. A module
-factory that takes a module as an argument does not work: modules are
-deduplicated by identity, so a factory called by two importers is two modules
-sharing a name — a boot error. This is also the shape `warren g module`
-generates, which expects `platform.Module()` to exist.
+**There are two values, and both are needed.** `platform.Postgres()` is the
+ADAPTER module; `platform.Module()` is the platform module that imports it and
+provides the app-level seams (`app.UnitOfWork`, the outbox relay). A feature
+imports `platform.Module()` always — that is what `warren g module` generates —
+and adds `platform.Postgres()` when its own repository injects `postgres.DB`,
+because `Exports` names what a module PROVIDES and platform therefore cannot
+re-export the adapter's ports on its behalf. Attempting that facade fails the
+boot with its own diagnostic.
 
 ```go
-// internal/platform/postgres.go
+// internal/platform/module.go
 var Postgres = sync.OnceValue(func() warren.Module {
 	return postgres.Module(
 		postgres.DSN(os.Getenv("DATABASE_URL")),
@@ -454,17 +683,32 @@ var Postgres = sync.OnceValue(func() warren.Module {
 	)
 })
 
+var Module = sync.OnceValue(func() warren.Module {
+	return warren.NewModule("platform",
+		warren.Imports(Postgres()),
+		warren.Providers(appUnitOfWork),        // persistence.ForApp
+		warren.Exports[app.UnitOfWork](),
+	)
+})
+
 // internal/modules/notes/module.go
 var Module = sync.OnceValue(func() warren.Module {
 	return warren.NewModule("notes",
-		warren.Imports(platform.Postgres()),
+		// Postgres() too, because this feature's repository injects
+		// postgres.DB. platform cannot pass it on.
+		warren.Imports(platform.Module(), platform.Postgres()),
+		warren.Providers(infrastructure.NewPostgresNotes /* … */),
 		warren.Controllers(NewController),
 	)
 })
 
-// cmd/app/main.go
-warren.New(platform.Postgres(), notes.Module(), whttp.Server(whttp.Port(8080))).Run()
+// cmd/notes/main.go
+warren.New(platform.Module(), notes.Module(), whttp.Server(whttp.Port(8080))).Run()
 ```
+
+`warren new --db postgres` writes exactly this shape, relay and all; this
+section is what it looks like when you add Postgres to a project that started
+without it.
 
 ### The schema — a deploy step, never a boot step
 
@@ -523,7 +767,7 @@ correct behaviour but worth knowing.
 | Authorization on one route | `transport.Guard(app.RequireScope("users:read"))` — runs **before** decode, so a denied caller's malformed body is a 401/403, not a 400 |
 | Reading the caller | `id, ok := app.IdentityFromContext(ctx)` — seeded by your own edge middleware with `app.WithIdentity`. The ok-bool is the point: `IdentityFromContext(ctx).Subject` does not compile |
 | Cross-cutting logic on every protocol | `app.Chain` / core middleware — wraps the handler, so it applies to HTTP, gRPC and consumers identically |
-| Retrying a lost connection | `app.Retrying(broker.ExponentialBackoff(3))` — retries `UNAVAILABLE` only |
+| Retrying a lost connection | `app.Retrying(broker.ExponentialBackoff(3))` — retries `UNAVAILABLE` **and `CONTENTION`**, the two codes for which the same request may succeed later unchanged, and nothing else |
 | **Contention on one aggregate** | `app.Retrying(p)` — no code list. A stale write is `CONTENTION`, which `Retrying` covers along with `UNAVAILABLE`. **Write it exactly like this**, and read the note under this table before you change the order: `app.Chain(h, app.Retrying(p), app.Transactional(uow))`. Your handler must also **RE-READ** the aggregate on each attempt — `Retrying` re-invokes the handler, not the transaction, so one closing over a stale aggregate contends for ever. `RetryingOn(p, errors.CodeConflict)` is a boot panic: a business refusal is refused identically on every attempt, and retrying it cost a measured 6 transactions and 1.25s against 7ms |
 | Bounding a slow dependency | `app.Timeout(3*time.Second)` — inside `Retrying` bounds each attempt, outside bounds the sequence |
 | File upload, download, SSE, WebSocket | `transport.Raw(r, transport.ProtocolHTTP, "POST /uploads", h)` from your controller — note the pattern carries the method here |
@@ -538,14 +782,37 @@ correct behaviour but worth knowing.
 > its own transaction, and swapping those two arguments wraps one transaction
 > around the whole retry loop.
 >
-> **The reverse is now REFUSED at boot**, with a panic naming the fix. It
-> used to compile, boot, pass every generated test and serve 201s — a field
-> test wrote it straight from an earlier version of this table and measured
-> *eight handler attempts for eight concurrent requests*: zero retries, and
-> two callers got a 409 for stock that existed. With the arguments the right
-> way round, the same test succeeded 8 of 8.
+> **The reverse is REFUSED at boot — as far as `Chain` can see.** It used to
+> compile, boot, pass every generated test and serve 201s: a field test wrote
+> it straight from an earlier version of this table and measured *eight
+> handler attempts for eight concurrent requests* — zero retries, and two
+> callers got a 409 for stock that existed. With the arguments the right way
+> round, the same test succeeded 8 of 8.
 >
-> An architect ruling settled that it is never legitimate. On Postgres it is
+> **The limit, exactly as `app/app.go:74-79` states it.** The walk sees every
+> middleware Warren ships and anything whose handler implements
+> `app.Unwrapper` — including across a nested `Chain`, so
+> `Chain(Chain(h, Retrying(p)), Transactional(uow))` is caught too. It
+> **stops** at a middleware that implements neither, and there the check fails
+> OPEN: with your own opaque middleware between them, the corrupting order
+> composes without complaint. One method lifts it:
+>
+> ```go
+> type auditing[Req, Res any] struct{ next app.Handler[Req, Res] }
+>
+> func (h auditing[Req, Res]) Handle(ctx context.Context, req Req) (Res, error) {
+> 	return h.next.Handle(ctx, req)
+> }
+>
+> // Unwrap makes this middleware transparent to Chain's composition checks.
+> func (h auditing[Req, Res]) Unwrap() app.Handler[Req, Res] { return h.next }
+> ```
+>
+> An `Unwrap` returning nil, or returning the receiver, simply ends the walk —
+> a boot that hangs would be worse than one that refuses. There is deliberately
+> no unchecked variant of `Chain`.
+>
+> An architect ruling settled that the composition is never legitimate. On Postgres it is
 > worse than wasteful: the version check runs inside the handler, so the
 > retry DOES run — in the same open transaction — and commits the failed
 > attempt's staged writes alongside the successful one's. To retry one flaky
@@ -686,6 +953,35 @@ package of your own outside `internal/modules/` that only the controller
 imports. A field test put it beside its tenant reader in one `internal/auth`
 and had to split the package once the linter told it so.
 
+**Four rules, not one.** `lint arch` reads the import graph and checks the
+layer rule, the **cross-module** rule (one feature module reaching into
+another's packages), the **handler/transport** rule above, and the
+**handler/driver** rule — `domain/` and `application/` may name
+`warren/persistence` and `warren/broker`, which are ports, and may not name
+`warren/persistence/postgres`, `warren/broker/kafka`, `pgx`, `database/sql`,
+franz-go or the rest, which are drivers. Each is checked directly *and* through
+a helper package, because moving the import one hop away is how the direct
+check goes quiet while the dependency stays exactly as real. Cloud and SaaS
+SDKs are deliberately not on the driver list: that list is unbounded, and an
+incomplete one is indistinguishable from approval — the layer rule is what
+catches those, the moment the port is declared in the domain.
+
+**A project laid out outside `internal/modules/` is told so.** The
+cross-module rule finds features by a `modules` path segment, and rather than
+guess where a feature begins it reports what it did:
+
+```
+No violations in 35 packages.
+
+  Checked: the layer rule, the handler/transport rule and the handler/driver
+  rule — each directly and through a helper package.
+
+  NOT checked: the cross-module rule. …
+```
+
+A disclosure is not a violation — it does not change the exit code. The command
+exits 1 only when a rule was actually broken.
+
 **A path parameter can contain a `/`.** Go's `ServeMux` unescapes `%2F`
 inside a segment, so `GET /tenants/evil/stock/acme%2fWIDGET` yields
 `sku = "acme/WIDGET"`. That is harmless when the tenant is a whole segment,
@@ -765,17 +1061,30 @@ copy-pasteable. A real one, in full:
 ✗ cannot resolve dependency
 
     domain.Repository
-      └─ required by *application.writeNote
+      └─ required by app.Handler[example.com/notes/internal/modules/notes/application.WriteNote,example.com/notes/internal/modules/notes/application.NoteView]
            └─ required by *notes.Controller
-                └─ declared in internal/notes/controller.go:44
+                └─ declared in notes/module.go:18
 
   No provider found in scope "notes" or its imports.
 
   Did you mean:
     • infrastructure.NewMemoryNotes is registered in scope "storage" but not exported.
       Add to storage's module: warren.Exports[domain.Repository]()
+      That is the first half. To NAME the type, this module must also
+      import the package declaring it — and `warren lint arch` refuses one
+      feature module importing another's packages. A port shared between
+      features belongs in a self-contained package outside
+      internal/modules/ (internal/contracts/<owner>/), declaring the
+      interface and its own types and importing no feature.
+      If this module is REACTING rather than asking, consume the owner's
+      event instead — warren g consumer — and neither half is needed.
     • Or provide it locally:  warren.Providers(infrastructure.NewMemoryNotes)
 ```
+
+That is a paste, not a paraphrase: it is what this page's own project prints
+when the repository's provider is moved into a `storage` module that does not
+export it. The `declared in` line is the `warren.NewModule` call site, which
+lives in `module.go` — not in `controller.go`, where this page used to point.
 
 If a diagnostic ever tells you something that does not fix your problem, that
 is a bug worth reporting — the error messages are a deliverable here, and they
