@@ -247,7 +247,10 @@ contract now.
 
 - [x] `warren new` — a scaffold that compiles and tests against today's
       framework, with the CI gate that builds it (the anti-rot mechanism)
-- [x] `warren version`; core tagged v0.1.0 so a scaffold's go.mod resolves
+- [x] `warren version`; core **and all six submodules** tagged v0.2.0, so a
+      scaffold's go.mod resolves without a `replace`. v0.1.0 tagged core alone
+      — a scaffold also requires `transport/http`, so it never resolved, and
+      `--framework <path>` was the only working route
 - [x] `warren g module|entity|command|repository|consumer` — golden-file
       tested, idempotent, stdlib AST editing (no `dst`: it has published no
       releases and sat untouched through Go 1.19–1.27), and everything the
