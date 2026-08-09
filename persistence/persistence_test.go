@@ -626,3 +626,102 @@ func TestTwoAggregateTypesWithOneIDDoNotCollide(t *testing.T) {
 		t.Fatalf("the order itself no longer loads: %v", err)
 	}
 }
+
+// TestAWriteThatSucceedsCannotLeaveItsEventsBehind is field test #12's D2,
+// pinned. The tester deleted ONE line — persistence.Track(ctx, u) — from a
+// generated repository's Save. The user row committed, POST /users returned
+// 201, and the UserRegistered event evaporated: no outbox row, no error, no
+// log line, and the consumer never fired. That is the exact loss the whole
+// outbox subsystem exists to make impossible, and it was one deletable
+// statement away.
+//
+// persistence.Write removes the statement. The enlistment is no longer
+// something the repository remembers to do after the write; it is what Write
+// does when the write returns nil.
+func TestAWriteThatSucceedsCannotLeaveItsEventsBehind(t *testing.T) {
+	t.Parallel()
+
+	ctx, drain := persistence.Collect(context.Background())
+	o := newOrder("a", 1)
+
+	wrote := false
+	err := persistence.Write(ctx, "order.Save", o, func(context.Context) error {
+		wrote = true
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if !wrote {
+		t.Fatal("Write did not run the write function")
+	}
+	if events := drain(); len(events) != 1 {
+		t.Errorf("drained %d events, want 1 — the write succeeded and the aggregate was not enlisted", len(events))
+	}
+}
+
+func TestWriteRefusesAndEnlists(t *testing.T) {
+	t.Parallel()
+
+	t.Run("outside a unit of work it refuses and does not write", func(t *testing.T) {
+		t.Parallel()
+		o := newOrder("a", 1)
+		ran := false
+		err := persistence.Write(context.Background(), "order.Save", o, func(context.Context) error {
+			ran = true
+			return nil
+		})
+		if err == nil {
+			t.Fatal("Write outside a unit of work succeeded — the row would autocommit and the events would be lost")
+		}
+		if ran {
+			t.Error("the write function ran anyway — the refusal must come BEFORE the row is touched")
+		}
+		if !strings.Contains(err.Error(), "order.Save") {
+			t.Errorf("the diagnostic does not name the operation: %v", err)
+		}
+		// The aggregate keeps its events: a later Do must still be able to
+		// publish them, exactly as Track outside a transaction does.
+		if len(o.PullEvents()) != 1 {
+			t.Error("a refused Write consumed the aggregate's events")
+		}
+	})
+
+	t.Run("a write that fails enlists nothing", func(t *testing.T) {
+		t.Parallel()
+		ctx, drain := persistence.Collect(context.Background())
+		o := newOrder("a", 1)
+		boom := stderrors.New("duplicate key")
+		err := persistence.Write(ctx, "order.Save", o, func(context.Context) error { return boom })
+		if !stderrors.Is(err, boom) {
+			t.Errorf("Write = %v, want the write function's own error unchanged", err)
+		}
+		if events := drain(); len(events) != 0 {
+			t.Errorf("drained %d events after a FAILED write, want 0", len(events))
+		}
+	})
+
+	t.Run("it enlists exactly once", func(t *testing.T) {
+		t.Parallel()
+		ctx, drain := persistence.Collect(context.Background())
+		o := newOrder("a", 1)
+		if err := persistence.Write(ctx, "order.Save", o, func(context.Context) error { return nil }); err != nil {
+			t.Fatalf("Write: %v", err)
+		}
+		if events := drain(); len(events) != 1 {
+			t.Errorf("drained %d events, want exactly 1", len(events))
+		}
+	})
+
+	t.Run("a nil aggregate is named, not dereferenced", func(t *testing.T) {
+		t.Parallel()
+		ctx, _ := persistence.Collect(context.Background())
+		err := persistence.Write(ctx, "order.Save", nil, func(context.Context) error { return nil })
+		if err == nil {
+			t.Fatal("Write with a nil aggregate succeeded")
+		}
+		if !strings.Contains(err.Error(), "order.Save") {
+			t.Errorf("the diagnostic does not name the operation: %v", err)
+		}
+	})
+}

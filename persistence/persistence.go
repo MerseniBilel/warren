@@ -133,6 +133,88 @@ func Track(ctx context.Context, aggregates ...domain.Aggregate) {
 	c.roots = append(c.roots, aggregates...)
 }
 
+// Write performs one aggregate write inside the unit of work in scope, and
+// enlists root when — and only when — the write succeeded.
+//
+// It is the repository's write contract in a single call, and there is no way
+// to perform half of it. Outside a unit of work it refuses, because the row
+// would autocommit while the aggregate's events stayed pending on an object
+// about to go out of scope. On success it Tracks, so those events reach the
+// outbox in the same commit. A write that returns an error enlists nothing.
+//
+// This exists because the enlistment used to be a separate statement AFTER
+// the write, and a separate statement is a statement that can be deleted. A
+// field test deleted it: the row committed, the request returned 201, and the
+// event evaporated with no error, no outbox row and no log line — the exact
+// loss the outbox subsystem exists to prevent. There is now no such line.
+//
+//	func (r *UserRepository) Save(ctx context.Context, u *domain.User) error {
+//	    return persistence.Write(ctx, "user.Save", u, func(ctx context.Context) error {
+//	        _, err := r.db(ctx).Exec(ctx, `INSERT INTO users …`, u.ID(), u.Email)
+//	        return err
+//	    })
+//	}
+//
+// One aggregate, because one repository owns one. A write that legitimately
+// touches more calls Track for the others inside the write function.
+//
+// The check it makes is "is there a unit of work", which is precisely the
+// precondition for Track to do anything. A DRIVER may hold a stricter one —
+// postgres.RequireTx also insists on an ambient Postgres transaction to run
+// SQL on — and keeps it; the two answer different questions and both are
+// worth asking.
+func Write(ctx context.Context, op string, root domain.Aggregate, write func(context.Context) error) error {
+	if !InTransaction(ctx) {
+		return ErrNoTransaction(op)
+	}
+	// Pointer compares, and they buy a named failure instead of a nil
+	// dereference inside the unit of work's drain — a stack frame away from
+	// the mistake, and long after the write committed.
+	if root == nil {
+		return stderrString("persistence.Write(" + quoted(op) + ") was given no aggregate to enlist — Write exists to enlist the root it is handed, so a nil one would drain nothing and lose the events silently. Pass the aggregate you just wrote.")
+	}
+	if write == nil {
+		return stderrString("persistence.Write(" + quoted(op) + ") was given no write function — there is nothing for it to do.")
+	}
+	if err := write(ctx); err != nil {
+		return err
+	}
+	Track(ctx, root)
+	return nil
+}
+
+func quoted(s string) string { return `"` + s + `"` }
+
+// ErrNoTransaction is the diagnostic a write outside a unit of work produces.
+// It is exported for the same reason ErrNestedOptions is: every driver must
+// produce the SAME message, and a second copy in another module drifts from
+// this one within a month.
+func ErrNoTransaction(op string) error {
+	return stderrString("✗ " + op + ` outside a transaction
+
+    This write was attempted with no persistence.UnitOfWork in scope.
+
+  It would autocommit — and the events the aggregate raised would stay
+  pending on an object about to go out of scope, and be lost. Silently:
+  no error, no outbox row, no way to find out afterwards.
+
+  Wrap the use case:
+
+      func (h *handler) Handle(ctx context.Context, cmd Cmd) (Res, error) {
+          return res, h.uow.Do(ctx, func(ctx context.Context) error {
+              return h.repo.Save(ctx, aggregate)
+          })
+      }
+
+  or declare the handler with app.Transactional, which does it for you.
+
+  A repository's write does not make this check itself. It calls
+  persistence.Write, which makes it — and enlists the aggregate when the
+  write succeeds, so its events cannot be left behind.
+
+  Reads need no transaction; only writes are refused.`)
+}
+
 // Collect returns a context that gathers the aggregates enlisted beneath it
 // and the drain that pulls their events, in enlistment order, exactly once.
 // A UnitOfWork calls it when it opens a transaction and calls the drain

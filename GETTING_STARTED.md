@@ -377,7 +377,7 @@ require github.com/MerseniBilel/warren/persistence/postgres v0.1.0
 
 ### The repository
 
-Three rules. The first two are what stop events being silently lost:
+Two rules, and the first is what stops events being silently lost:
 
 ```go
 type postgresNotes struct{ db postgres.DB }
@@ -385,9 +385,16 @@ type postgresNotes struct{ db postgres.DB }
 func NewPostgresNotes(db postgres.DB) domain.Repository { return &postgresNotes{db: db} }
 
 func (r *postgresNotes) Save(ctx context.Context, n domain.Note) error {
-	// 1. RequireTx FIRST. Outside a unit of work the row would autocommit
-	//    while the aggregate's events stayed pending on an object about to go
-	//    out of scope — lost silently, with no error and no outbox row.
+	// 1. RequireTx FIRST. Outside a unit of work the row would autocommit —
+	//    and if this type raised events, they would stay pending on an object
+	//    about to go out of scope and be lost silently, with no outbox row.
+	//
+	//    Note is a plain record, not an aggregate, so RequireTx is the whole
+	//    of the rule here. A repository that saves an AGGREGATE uses
+	//    persistence.Write instead, which makes this same check AND enlists
+	//    the aggregate when the write succeeds — one call, so there is no
+	//    separate Track statement to forget. That is what
+	//    `warren g repository --driver postgres` writes.
 	if err := postgres.RequireTx(ctx, "save note"); err != nil {
 		return err
 	}
@@ -395,8 +402,6 @@ func (r *postgresNotes) Save(ctx context.Context, n domain.Note) error {
 		`INSERT INTO notes (id, text) VALUES ($1, $2)
 		 ON CONFLICT (id) DO UPDATE SET text = EXCLUDED.text`, n.ID, n.Text)
 	return err
-	// 2. If Note were an aggregate raising events, persistence.Track(ctx, n)
-	//    goes here — that is what puts its events in the outbox at commit.
 }
 
 func (r *postgresNotes) Find(ctx context.Context, id string) (domain.Note, error) {
@@ -510,7 +515,7 @@ correct behaviour but worth knowing.
 
 ---
 
-## 8. What to reach for next
+## 9. What to reach for next
 
 | You want | Use |
 |---|---|

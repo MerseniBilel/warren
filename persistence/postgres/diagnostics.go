@@ -3,6 +3,8 @@ package postgres
 import (
 	"fmt"
 	"strings"
+
+	"github.com/MerseniBilel/warren/persistence"
 )
 
 // diagnostic carries a rendered multi-line block; the text is the contract,
@@ -124,22 +126,14 @@ func errNotStarted() error {
 
 // errNoTransaction is the refusal that keeps a write from autocommitting
 // outside a unit of work, where its events would be silently lost.
+//
+// The MESSAGE lives in core, and deliberately: every driver must produce the
+// same one, and two copies of a diagnostic drift within a month. The
+// PREDICATE stays here and is stricter than core's — core asks "is there a
+// unit of work", which is what enlistment needs; this asks "and is there a
+// Postgres transaction to run SQL on", which is what the statement needs.
 func errNoTransaction(op string) error {
-	return diagnostic(fmt.Sprintf(
-		"✗ %s outside a transaction\n\n"+
-			"    This write was attempted with no persistence.UnitOfWork in scope.\n\n"+
-			"  It would autocommit — and the events the aggregate raised would stay\n"+
-			"  pending on an object about to go out of scope, and be lost. Silently:\n"+
-			"  no error, no outbox row, no way to find out afterwards.\n\n"+
-			"  Wrap the use case:\n\n"+
-			"      func (h *handler) Handle(ctx context.Context, cmd Cmd) (Res, error) {\n"+
-			"          return res, h.uow.Do(ctx, func(ctx context.Context) error {\n"+
-			"              return h.repo.Save(ctx, aggregate)\n"+
-			"          })\n"+
-			"      }\n\n"+
-			"  or declare the handler with app.Transactional, which does it for you.\n\n"+
-			"  Reads need no transaction; only writes are refused.",
-		op))
+	return persistence.ErrNoTransaction(op)
 }
 
 func errTableMissing(table string) error {

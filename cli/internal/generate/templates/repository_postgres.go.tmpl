@@ -16,21 +16,27 @@ import (
 // design: this file is yours to edit, and the only framework machinery in it
 // is postgres.DB.
 //
-// Four rules hold it together, and NONE of them is enforced by the
-// compiler — which is why this file is generated rather than described:
+// Three rules hold it together — which is why this file is generated rather
+// than described:
 //
-//  1. RequireTx first on every write. Outside a unit of work the row would
-//     autocommit while the aggregate's events stayed pending on an object
-//     about to go out of scope, and they would be lost silently.
+//  1. persistence.Write around a write that carries an aggregate. It refuses
+//     outside a unit of work, where the row would autocommit while the
+//     aggregate's events stayed pending on an object about to go out of
+//     scope, and it enlists the aggregate on success, which is what puts its
+//     events in the outbox in the same commit. A write with NO aggregate —
+//     Delete — uses postgres.RequireTx, which makes the first check only.
 //  2. r.db(ctx) for the handle — never a stored pool. It returns the ambient
 //     transaction if one is in scope, and the pool otherwise, so a read works
 //     outside a unit of work and a write does not.
-//  3. persistence.Track after a successful write. That is what enlists the
-//     aggregate so its events reach the outbox in the same commit.
-//  4. Every write carries the version it read. A write that matches no row is
-//     a CONTENTION on update and a CONFLICT on insert — never a silent
-//     no-op, and never a blind upsert. The old text said a write that matches no
-//     row is a CONFLICT — never a silent no-op, and never a blind upsert.
+//  3. Every write carries the version it read. A write that matches no row is
+//     a CONTENTION on update and a CONFLICT on insert — never a silent no-op,
+//     and never a blind upsert.
+//
+// There was a fourth, "call persistence.Track after a successful write", and
+// it is gone because a field test deleted that one line: the row committed,
+// the request returned 201, and the event evaporated with no error and no
+// outbox row. Write is that rule fused with the first, so there is no longer
+// a statement to delete.
 type {{.Name}}Repository struct{ db postgres.DB }
 
 // New{{.Name}}Repository returns the repository as its PORT, so the
@@ -73,60 +79,58 @@ func (r *{{.Name}}Repository) FindByID(ctx context.Context, id domain.{{.Name}}I
 // is the whole point: without it, two requests that both read version 3 both
 // write, both return 201, and the second silently erases the first.
 func (r *{{.Name}}Repository) Save(ctx context.Context, {{.Lower}} *domain.{{.Name}}) error {
-	// RULE 1. Without this the write autocommits and the aggregate's events
-	// are lost with no error anywhere.
-	if err := postgres.RequireTx(ctx, "save {{.Lower}}"); err != nil {
-		return err
-	}
-
-	expected := {{.Lower}}.Version()
-	var n int64
-	var err error
-	if expected == 0 {
-		// Never persisted. DO NOTHING rather than DO UPDATE: if the row is
-		// already there, two requests minted the same identity, and
-		// overwriting one with the other is the bug, not the fix.
-		n, err = r.db(ctx).Exec(ctx, `
-			INSERT INTO {{.Plural}} (id, created_at, version)
-			VALUES ($1, $2, 1)
-			ON CONFLICT (id) DO NOTHING`,
-			{{.Lower}}.ID().String(), {{.Lower}}.CreatedAt,
-		)
-	} else {
-		n, err = r.db(ctx).Exec(ctx, `
-			UPDATE {{.Plural}}
-			SET created_at = $2, version = version + 1
-			WHERE id = $1 AND version = $3`,
-			{{.Lower}}.ID().String(), {{.Lower}}.CreatedAt, expected,
-		)
-	}
-	if err != nil {
-		return err
-	}
-	if n == 0 {
-		// RULE 4, and the two halves are NOT the same answer.
+	// RULE 1 and RULE 3 in one call. persistence.Write refuses outside a unit
+	// of work — where this would autocommit and the aggregate's events would
+	// be lost with no error anywhere — and enlists the aggregate when, and
+	// only when, the write succeeded. The enlistment used to be a separate
+	// statement at the end, and a field test found that deleting it returned
+	// 201 with the event silently gone.
+	return persistence.Write(ctx, "save {{.Lower}}", {{.Lower}}, func(ctx context.Context) error {
+		expected := {{.Lower}}.Version()
+		var n int64
+		var err error
 		if expected == 0 {
-			// The row is already there: two requests minted the same
-			// identity. CONFLICT — a retry re-reads and finds it still
-			// there, on this attempt and on every one after it.
-			return werrors.Conflict("{{.Lower}} %s already exists", {{.Lower}}.ID())
+			// Never persisted. DO NOTHING rather than DO UPDATE: if the row
+			// is already there, two requests minted the same identity, and
+			// overwriting one with the other is the bug, not the fix.
+			n, err = r.db(ctx).Exec(ctx, `
+				INSERT INTO {{.Plural}} (id, created_at, version)
+				VALUES ($1, $2, 1)
+				ON CONFLICT (id) DO NOTHING`,
+				{{.Lower}}.ID().String(), {{.Lower}}.CreatedAt,
+			)
+		} else {
+			n, err = r.db(ctx).Exec(ctx, `
+				UPDATE {{.Plural}}
+				SET created_at = $2, version = version + 1
+				WHERE id = $1 AND version = $3`,
+				{{.Lower}}.ID().String(), {{.Lower}}.CreatedAt, expected,
+			)
 		}
-		// The version moved, or the row was deleted under us. NOTHING was
-		// written. CONTENTION — app.Retrying re-invokes the handler, which
-		// re-reads and usually wins the next round. Returning CONFLICT here
-		// is not a cosmetic mistake: on a CONSUMER that code ACKS, so the
-		// message would be destroyed with its work not done.
-		return werrors.Contention("{{.Lower}} %s was changed by another request since it was loaded (it was at version %d)", {{.Lower}}.ID(), expected)
-	}
-	// Advance the in-memory aggregate to what was just written, so a second
-	// Save in the same request checks against the new version instead of
-	// conflicting with itself.
-	{{.Lower}}.SetVersion(expected + 1)
-
-	// RULE 3. The unit of work drains the enlisted aggregates at commit and
-	// writes their events to the outbox in the same transaction.
-	persistence.Track(ctx, {{.Lower}})
-	return nil
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			// RULE 3, and the two halves are NOT the same answer.
+			if expected == 0 {
+				// The row is already there: two requests minted the same
+				// identity. CONFLICT — a retry re-reads and finds it still
+				// there, on this attempt and on every one after it.
+				return werrors.Conflict("{{.Lower}} %s already exists", {{.Lower}}.ID())
+			}
+			// The version moved, or the row was deleted under us. NOTHING was
+			// written. CONTENTION — app.Retrying re-invokes the handler, which
+			// re-reads and usually wins the next round. Returning CONFLICT here
+			// is not a cosmetic mistake: on a CONSUMER that code ACKS, so the
+			// message would be destroyed with its work not done.
+			return werrors.Contention("{{.Lower}} %s was changed by another request since it was loaded (it was at version %d)", {{.Lower}}.ID(), expected)
+		}
+		// Advance the in-memory aggregate to what was just written, so a
+		// second Save in the same request checks against the new version
+		// instead of conflicting with itself.
+		{{.Lower}}.SetVersion(expected + 1)
+		return nil
+	})
 }
 
 // Delete removes it. The domain's {{.Name}}Repository port does NOT declare

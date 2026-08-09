@@ -841,6 +841,8 @@ and per-field details, so no library's error type reaches a handler.
 Transport adapters call the compiled rule automatically after decode;
 handlers never invoke it.
 
+**Surface**
+
 ```go
 type Validator interface{ Plan(t reflect.Type) (Rule, error) }
 type Rule func(v any) error
@@ -903,6 +905,8 @@ translations are its business, not core's. Installed with
   registry, and `warren/transport/grpc` serves the gRPC health service from
   the same one, so the two can never disagree.
 
+**Surface**
+
 ```go
 type Check interface { Name() string; Check(ctx context.Context) error }
 func NewCheck(name string, fn func(context.Context) error) Check
@@ -947,6 +951,8 @@ Pure interfaces, zero implementations, in the core module. This is what lets an 
 ### 3.1 `warren/domain`
 
 - **Mode** Build
+
+**Surface**
 
 ```go
 type ID interface { comparable; fmt.Stringer }
@@ -1045,6 +1051,8 @@ Events accumulate on the aggregate. Nothing is published until the `UnitOfWork` 
 
 - **Mode** Build · **The central abstraction of the framework.**
 
+**Surface**
+
 ```go
 type Handler[Req, Res any] interface {
     Handle(ctx context.Context, req Req) (Res, error)
@@ -1065,6 +1073,26 @@ type Unwrapper[Req, Res any] interface {
 	Unwrap() Handler[Req, Res]
 }
 ```
+
+The middleware and the context helpers the table above describes, as
+signatures — this block exists so the manifest is complete enough for
+`scripts/invariants.sh` to hold it to the code:
+
+```go
+func Traced[Req, Res any]() Middleware[Req, Res]
+func Metered[Req, Res any]() Middleware[Req, Res]
+func Authorized[Req, Res any](policy AuthorizationPolicy) Middleware[Req, Res]
+func Retrying[Req, Res any](policy RetryPolicy) Middleware[Req, Res]
+func RetryingOn[Req, Res any](policy RetryPolicy, codes ...errors.Code) Middleware[Req, Res]
+func Transactional[Req, Res any](uow UnitOfWork) Middleware[Req, Res]
+
+func InstrumentsHandlers(t Telemetry) bool
+func IsNilPolicy(p AuthorizationPolicy) bool
+func Stamp(name string, t Telemetry) func(context.Context) context.Context
+func StampHandlerName(name string) func(context.Context) context.Context
+func WithoutIdentity(ctx context.Context) context.Context
+```
+
 
 `Chain(h, a, b, c)`: `a` is the **outermost** — first to see the request,
 last to see the response — reading order matching execution order. Chain runs
@@ -1161,7 +1189,8 @@ observability's edge integration seeds `Telemetry`, the transport adapter
 seeds the `"<module>.<handler>"` name in the route table's pre-built closure
 (it is the one party that knows both names), and on a context carrying
 neither the two middleware are exact pass-throughs — 0 allocs, benchmarked.
-`Retrying` retries `CodeUnavailable` only and returns the handler's **last**
+`Retrying` retries `CodeUnavailable` and `CodeContention` — the two retryable
+codes of §2.6, and the only two — and returns the handler's **last**
 error on exhaustion or cancellation (freshest, code intact); `Authorized`
 short-circuits on denial and returns the policy's error **unchanged**, so
 policies speak the §2.6 vocabulary (`PermissionDenied` for a known caller,
@@ -1179,10 +1208,12 @@ is the only ordering that makes `Serializable` usable.
 
 - **Mode** Build (ports) · **The deliberate omission is an ORM.**
 
+**Surface**
+
 ```go
 type Repository[T domain.Root[K], K domain.ID] interface {
     FindByID(ctx context.Context, id K) (T, error)   // CodeNotFound when absent
-    Save(ctx context.Context, root T) error          // MUST call persistence.Track
+    Save(ctx context.Context, root T) error          // MUST enlist — persistence.Write does
     Delete(ctx context.Context, id K) error
 }
 
@@ -1196,14 +1227,19 @@ func Isolation(l Level) Option        // ReadCommitted | RepeatableRead | Serial
 func Configure(opts ...Option) Transaction
 
 // the enlistment seam
+func Write(ctx context.Context, op string, root domain.Aggregate, write func(context.Context) error) error
 func Track(ctx context.Context, aggregates ...domain.Aggregate)
 func Collect(ctx context.Context) (context.Context, func() []domain.Event)
 func InTransaction(ctx context.Context) bool
+func ForApp(uow UnitOfWork, opts ...Option) app.UnitOfWork
+func ErrNoTransaction(op string) error   // one message; every driver returns THIS
+func ErrNestedOptions() error
 
 // the in-process driver + the exported contract suite
 func NewMemoryUnitOfWork() *MemoryUnitOfWork
 func NewMemoryRepository[T domain.Root[K], K domain.ID](uow *MemoryUnitOfWork) *MemoryRepository[T, K]
 func RunContract[T domain.Root[K], K domain.ID](t *testing.T, newDriver NewDriver[T, K], newAggregate func(K) T)
+func RunVersionedContract[T domain.Root[K], K domain.ID](t *testing.T, newDriver NewDriver[T, K], newAggregate func(K) T)
 ```
 
 **How the unit of work drains events it never imported.** A `Repository` is
@@ -1239,6 +1275,8 @@ is refused at boot. An unsupported `Option` is `INVALID`, never a silent downgra
 
 - **Mode** Build (ports only) · **The least negotiable wrap in the framework.**
 
+**Surface**
+
 ```go
 type Message struct {
     ID          string            // idempotency key
@@ -1267,6 +1305,25 @@ type MessageHandler func(context.Context, Message) error
 const CorrelationHeader = "correlation-id"
 func Correlating(next Publisher) Publisher   // nil-safe; never overwrites
 ```
+
+The consumer chain's stages and the delivery-header seam, as signatures —
+the chain ORDER is the table above; these are the exports it names:
+
+```go
+func Recover() Middleware
+func Drain() (Middleware, func(context.Context) error)
+func TraceExtract() Middleware
+func Deduplicate(subscription string, store inbox.Store, ttl time.Duration) Middleware
+func DeadLetter(pub Publisher, originTopic, dlqTopic string) Middleware
+func RequireMessageID() Middleware
+func Retry(policy app.RetryPolicy) Middleware
+func ConcurrencyLimit(n int) Middleware
+
+func InjectTrace(ctx context.Context, msgs []Message)
+func DeliveryHeaders(ctx context.Context) map[string]string
+func WithDeliveryHeaders(ctx context.Context, h map[string]string) context.Context
+```
+
 
 **`Subscribe` returns once the subscription is LIVE, and that is a promise the
 port makes rather than a convention callers follow.** It used to block for the
@@ -1379,6 +1436,8 @@ over loss, never silently).
 so registration is generic **free functions** — warren.md §9's recorded
 "Fix A" — with the names and argument order the 1.27 methods will have:
 
+**Surface**
+
 ```go
 type Registrar interface{ /* sealed: transport holds the only implementation */ }
 type Controller interface{ Register(r Registrar) }
@@ -1433,6 +1492,21 @@ func (b *Builder) Table() (*Table, error)
 func (t *Table) HTTP() []HTTPRoute; GRPC() []GRPCRoute; Events() []EventRoute
 func (t *Table) Claim(p Protocol, by string); Unserved() error
 ```
+
+The remaining verb helpers and the seams a builder and a handler read — all
+of them driver-free:
+
+```go
+func Put[Req, Res any](r Registrar, pattern string, h app.Handler[Req, Res], opts ...RouteOption)
+func Patch[Req, Res any](r Registrar, pattern string, h app.Handler[Req, Res], opts ...RouteOption)
+func Delete[Req, Res any](r Registrar, pattern string, h app.Handler[Req, Res], opts ...RouteOption)
+
+func WithTelemetry(t app.Telemetry) BuilderOption
+func WithValidator(v validate.Validator) BuilderOption
+func WithParams(ctx context.Context, p Params) context.Context
+func ParamsFromContext(ctx context.Context) Params
+```
+
 
 A controller registers once and is exposed three ways:
 
@@ -2092,30 +2166,27 @@ if err := postgres.Migrate(ctx, dsn, postgres.Schema); err != nil { ... }
 if err := postgres.Migrate(ctx, dsn, schema.FS);      err != nil { ... }
 ```
 
-**A repository, by hand or generated.** Three rules, and the first two are
-what stop events being silently lost:
+**A repository, by hand or generated.** Two rules, and the first is what
+stops events being silently lost:
 
 ```go
 type UserRepository struct{ db postgres.DB }   // DB resolves tx-from-context or pool
 
 func (r *UserRepository) Save(ctx context.Context, u *domain.User) error {
-    // 1. RequireTx FIRST. Outside a unit of work the row would autocommit
-    //    while the aggregate's events stayed pending on an object about to
-    //    go out of scope — lost silently, with no outbox row.
-    if err := postgres.RequireTx(ctx, "save user"); err != nil {
+    // 1. persistence.Write. It refuses outside a unit of work — where the row
+    //    would autocommit while the aggregate's events stayed pending on an
+    //    object about to go out of scope, lost silently with no outbox row —
+    //    and it ENLISTS the aggregate when, and only when, the write
+    //    succeeded. The enlistment was a separate statement until 2026-08-09;
+    //    a field test deleted that line and the service returned 201 with the
+    //    event gone.
+    return persistence.Write(ctx, "save user", u, func(ctx context.Context) error {
+        _, err := r.db(ctx).Exec(ctx,
+            `INSERT INTO users (id, email) VALUES ($1, $2)
+             ON CONFLICT (id) DO UPDATE SET email = EXCLUDED.email`,
+            u.ID(), u.Email)
         return err
-    }
-    if _, err := r.db(ctx).Exec(ctx,
-        `INSERT INTO users (id, email) VALUES ($1, $2)
-         ON CONFLICT (id) DO UPDATE SET email = EXCLUDED.email`,
-        u.ID(), u.Email); err != nil {
-        return err
-    }
-    // 2. Track enlists the aggregate, so its events reach the outbox at
-    //    commit. persistence.Repository's own doc: a Save that does not
-    //    Track loses them, and the contract suite asserts it.
-    persistence.Track(ctx, u)
-    return nil
+    })
 }
 
 func (r *UserRepository) FindByID(ctx context.Context, id domain.UserID) (*domain.User, error) {
@@ -2157,10 +2228,11 @@ alias — `werrors "github.com/MerseniBilel/warren/errors"` — so
 in one file. `postgres.ErrNoRows` is re-exported precisely so a repository
 never imports `pgx` itself.
 
-**`warren g repository --driver postgres` writes exactly this.** The three
-rules above are unenforced by any compiler, which is why the generator exists:
-it emits `RequireTx` first, `r.db(ctx)` for the handle, `persistence.Track`
-after the write, and the version-checked SQL of §3.3's optimistic concurrency.
+**`warren g repository --driver postgres` writes exactly this.** The rules
+above are unenforced by any compiler, which is why the generator exists: it
+emits `persistence.Write` around the write, `r.db(ctx)` for the handle,
+`postgres.RequireTx` in the `Delete` that carries no aggregate, and the
+version-checked SQL of §3.3's optimistic concurrency.
 
 ### 6.2–6.4 `mysql` / `mongo` / `redis`
 

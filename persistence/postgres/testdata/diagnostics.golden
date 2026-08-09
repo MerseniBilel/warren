@@ -61,6 +61,10 @@
 
   or declare the handler with app.Transactional, which does it for you.
 
+  A repository's write does not make this check itself. It calls
+  persistence.Write, which makes it — and enlists the aggregate when the
+  write succeeds, so its events cannot be left behind.
+
   Reads need no transaction; only writes are refused.
 
 ── table missing

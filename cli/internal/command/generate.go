@@ -102,10 +102,11 @@ func generateCmd() *cobra.Command {
 			"declares, and provides it from the module. Run `warren g entity`\n" +
 			"first: the port has to exist for this to compile.\n\n" +
 			"--driver postgres writes plain SQL over postgres.DB, plus the\n" +
-			"migration for its table. It follows three rules the compiler cannot\n" +
-			"enforce — RequireTx first on every write, db(ctx) for the handle,\n" +
-			"and persistence.Track after a successful write — which is exactly\n" +
-			"why it is generated rather than described in a document.",
+			"migration for its table. Its writes go through persistence.Write,\n" +
+			"which refuses outside a unit of work and enlists the aggregate on\n" +
+			"success, and it takes its handle from db(ctx) rather than a stored\n" +
+			"pool — which is exactly why it is generated rather than described\n" +
+			"in a document.",
 		Args: cobra.ExactArgs(2),
 		RunE: run(generate.Repository, true),
 	}

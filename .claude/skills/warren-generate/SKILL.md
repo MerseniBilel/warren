@@ -112,18 +112,25 @@ command` that is not wiring you get for free.
 ## `warren g repository --driver postgres`
 
 Writes plain SQL over `postgres.DB`, the table's migration, and
-`cmd/migrate/main.go`. It exists because a Postgres repository has three
-rules **no compiler enforces**, and getting any of them wrong loses data
-silently:
+`cmd/migrate/main.go`. It exists because a Postgres repository has rules
+**no compiler enforces**, and getting them wrong loses data silently:
 
-1. **`postgres.RequireTx(ctx, "save x")` first on every write.** Outside a
-   unit of work the row autocommits while the aggregate's events stay pending
-   on an object about to go out of scope — lost, with no error anywhere.
+1. **`persistence.Write(ctx, "save x", agg, func(ctx) error { … })` around a
+   write that carries an aggregate.** It refuses outside a unit of work —
+   where the row would autocommit while the aggregate's events stayed pending
+   on an object about to go out of scope, lost with no error anywhere — and
+   it enlists the aggregate when, and only when, the write succeeded. A write
+   with **no** aggregate (`Delete`) uses `postgres.RequireTx`, which makes the
+   first check and not the second.
 2. **`r.db(ctx)` for the handle**, never a stored pool. It returns the
    ambient transaction if one is in scope and the pool otherwise, which is
    what lets a read work outside a unit of work while a write does not.
-3. **`persistence.Track(ctx, agg)` after a successful write.** That enlists
-   the aggregate so its events reach the outbox in the same commit.
+
+There used to be a third — "call `persistence.Track` after a successful
+write" — and it is gone because a field test deleted that one line: the row
+committed, the request returned 201, and the event evaporated with no error
+and no outbox row. `Write` fuses it with the first rule, so there is no
+longer a statement to delete.
 
 A `Delete` must also check rows-affected and return `NOT_FOUND` when it
 matched nothing: a bare `DELETE … WHERE id = $1` returns nil for a missing

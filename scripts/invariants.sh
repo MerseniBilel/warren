@@ -175,7 +175,7 @@ for pkg in $(awk '
 		}
 		insec && /^\*\*Surface\*\*/ { seen = 1; next }
 		seen && !inblk && /^```/ { inblk = 1; next }
-		inblk && /^```/ { inblk = 0; seen = 0; next }
+		inblk && /^```/ { inblk = 0; next }
 		inblk { print }
 	' warren.md | grep -oE '^func [A-Z][A-Za-z0-9_]*' | awk '{print $2}' | sort -u)
 	real=$(go doc -all "$dir" 2>/dev/null | grep -oE '^func [A-Z][A-Za-z0-9_]*' | awk '{print $2}' | sort -u)
