@@ -88,6 +88,39 @@ and found N+1 files, none of them `main.go`.
 
 ---
 
+## Install
+
+```
+go install github.com/MerseniBilel/warren/cli/cmd/warren@latest
+warren new myapp --module github.com/you/myapp
+cd myapp && go mod tidy && go run ./cmd/myapp
+```
+
+That is the whole setup. The generated `go.mod` requires the published
+framework — core plus `transport/http`, and `persistence/postgres` or
+`broker/kafka` when you ask for them — so `go mod tidy` resolves it from the
+module proxy and there is no `replace` anywhere. It serves `POST /users`,
+`/healthz` and `/readyz` on `:8080`.
+
+To use the framework without the CLI, `go get github.com/MerseniBilel/warren`
+and its adapters directly; [GETTING_STARTED.md](GETTING_STARTED.md) writes a
+service by hand that way, one file at a time.
+
+**Working on Warren itself** is the one case that needs more. Build the CLI
+from your checkout and scaffold against it, so a change to the framework is
+exercised by a real service before it is tagged:
+
+```
+cd cli && go build -o ~/.local/bin/warren ./cmd/warren
+warren new myapp --module github.com/you/myapp --framework /path/to/warren
+```
+
+`--framework` writes `replace` directives into **the new project's** `go.mod`,
+pinning it to your filesystem. That is why it is not the default, and it is
+not a committed replace in this repository either (invariant 8).
+
+---
+
 ## Status & roadmap
 
 Progress is spec-first: ☑ means *done and verified*, not *started*.

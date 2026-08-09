@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/MerseniBilel/warren/cli/internal/command"
+	"github.com/MerseniBilel/warren/cli/internal/scaffold"
 )
 
 func run(t *testing.T, args ...string) (string, error) {
@@ -21,6 +22,17 @@ func run(t *testing.T, args ...string) (string, error) {
 	return out.String(), err
 }
 
+// TestVersion pins the two halves of the line to different rules, because
+// they answer different questions.
+//
+// The CLI's half is read from the build, and a `go test` binary carries no
+// released version — so "(devel)" is the correct answer here, and printing a
+// version number would be the lie this whole change removes. What it looks
+// like for a real build is TestVersionMatchesTheBuild's business.
+//
+// The framework's half must be a release whatever the build is: it is the
+// version a scaffold's go.mod pins, and a pseudo-version or "(devel)" in a
+// require line is a project that does not resolve.
 func TestVersion(t *testing.T) {
 	t.Parallel()
 
@@ -28,8 +40,12 @@ func TestVersion(t *testing.T) {
 	if err != nil {
 		t.Fatalf("version: %v", err)
 	}
-	if !strings.Contains(out, "warren v") || !strings.Contains(out, "framework v") {
-		t.Errorf("version prints %q — it must name both, since a scaffold pins the framework", out)
+	if !strings.Contains(out, "warren (devel)") {
+		t.Errorf("version prints %q — a test binary is not a release and must not claim one", out)
+	}
+	if !strings.Contains(out, "(framework "+scaffold.DefaultVersion+")") {
+		t.Errorf("version prints %q — the framework half must name the release a scaffold pins (%s)",
+			out, scaffold.DefaultVersion)
 	}
 }
 
@@ -57,6 +73,75 @@ func TestNewScaffolds(t *testing.T) {
 	// what the tool already knew.
 	if strings.Contains(out, "MYAPP_NAME") {
 		t.Errorf("the run step still demands a variable the config defaults:\n%s", out)
+	}
+}
+
+// TestNewWritesAResolvableGoModWithoutAReplace is the shape of the happy
+// path after publication.
+//
+// Until all seven modules were tagged v0.2.0, `warren new` printed "Warren is
+// not published yet, so `go mod tidy` cannot resolve it" and six replace
+// directives to paste — and it was right: v0.1.0 tagged the core module
+// alone, so nothing a scaffold required existed. A user's first command in a
+// new project now has to be `go mod tidy` and nothing else, which means no
+// replace, no notice telling them to add one, and requires pinned to a
+// version the proxy serves.
+func TestNewWritesAResolvableGoModWithoutAReplace(t *testing.T) {
+	t.Parallel()
+
+	dir := filepath.Join(t.TempDir(), "myapp")
+	out, err := run(t, "new", "myapp", "--module", "example.com/myapp", "--dir", dir)
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	mod, err := os.ReadFile(filepath.Join(dir, "go.mod"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(mod), "replace ") {
+		t.Errorf("the default scaffold pins the framework to a local path:\n%s", mod)
+	}
+	want := "github.com/MerseniBilel/warren " + scaffold.DefaultVersion
+	if !strings.Contains(string(mod), want) {
+		t.Errorf("go.mod does not require %s:\n%s", want, mod)
+	}
+	// And the printed steps must not send the user looking for a checkout.
+	for _, gone := range []string{"not published", "--framework", "replace "} {
+		if strings.Contains(out, gone) {
+			t.Errorf("`warren new` still tells the user %q:\n%s", gone, out)
+		}
+	}
+}
+
+// TestNewFrameworkFlagStillWritesReplaces — the flag is the exception now,
+// not the default, and an exception that quietly stopped working would strand
+// the people developing Warren itself.
+func TestNewFrameworkFlagStillWritesReplaces(t *testing.T) {
+	t.Parallel()
+
+	dir := filepath.Join(t.TempDir(), "myapp")
+	out, err := run(t, "new", "myapp", "--module", "example.com/myapp", "--dir", dir,
+		"--framework", "/path/to/warren")
+	if err != nil {
+		t.Fatalf("new --framework: %v", err)
+	}
+	mod, err := os.ReadFile(filepath.Join(dir, "go.mod"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"replace github.com/MerseniBilel/warren => /path/to/warren",
+		"replace github.com/MerseniBilel/warren/transport/http => /path/to/warren/transport/http",
+		"replace github.com/MerseniBilel/warren/validate/playground => /path/to/warren/validate/playground",
+	} {
+		if !strings.Contains(string(mod), want) {
+			t.Errorf("go.mod is missing %q:\n%s", want, mod)
+		}
+	}
+	// A machine-specific go.mod that nobody mentioned is the next person's
+	// bug report, so it is said once, here.
+	if !strings.Contains(out, "/path/to/warren") {
+		t.Errorf("nothing told the user their go.mod now points at a local checkout:\n%s", out)
 	}
 }
 

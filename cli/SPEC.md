@@ -684,3 +684,36 @@ and not `go/ast`.
     version-pinned, or invoked through a `buf.gen.yaml` the generator writes? What
     is the error when it is absent — and per AGENT.md § Errors, that message must
     say how to install it.
+
+---
+
+**Rehomed from `cli/internal/arch/SPEC.md` on its retirement (2026-08-09).**
+That spec shipped the driver rule and the "NOT checked" disclosure and named
+these three as the product owner's, not its own. Questions 10 and 16 above are
+the same territory; these are the specific decisions left.
+
+20. **`--feature-root`, or a `warren.yaml`?** The cross-module rule finds
+    feature modules by a `modules` path segment — `internal/modules/<feature>/`,
+    the tree `warren new` generates — and it deliberately does NOT guess,
+    because a heuristic fires on the project root of a single-feature app and
+    then polices a boundary it invented. So a project laid out otherwise is
+    told the rule did not run, and today has no way to opt in. A flag is the
+    cheap answer and a config file is the one that scales to the other
+    questions above (10, 13, 16), which is exactly why it should be decided
+    once rather than a flag at a time. Escalated by the arch round; not taken.
+
+21. **`--strict-outbound`.** The driver rule forbids `domain/` and
+    `application/` importing a driver. It does not forbid them reaching an
+    outbound HTTP or SMTP client, which is the same layering mistake wearing
+    different clothes — §7.3's ruling sends every outbound dependency to the
+    user's `infrastructure/`, and nothing enforces that. Whether the check
+    exists, whether it is opt-in, and what counts as "outbound" (a package
+    allowlist will rot; an import-path heuristic will misfire) are all open.
+
+22. **Has the `Rings` rule set ever been run against Warren's own tree?**
+    warren.md line 42 is careful about this — `--rules=rings` is in the roadmap
+    and does not exist yet, so `scripts/invariants.sh` plus review is what
+    holds §1.1 today, and most of "adapters never import each other" is review.
+    The claim that Warren obeys its own dependency rule is the framework's
+    stated governing constraint, so the audit is worth doing deliberately
+    rather than assuming a rule set that has never been executed would pass.

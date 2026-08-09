@@ -31,17 +31,22 @@ type Options struct {
 	Name string
 	// ModulePath is the generated go.mod's module path.
 	ModulePath string
-	// Version is the framework version the scaffold pins.
+	// Version is the framework version the scaffold pins in the generated
+	// go.mod. Empty means DefaultVersion — a scaffold whose require lines
+	// read "github.com/MerseniBilel/warren " with nothing after them is a
+	// tree in which no go command runs at all.
 	Version string
 	// FrameworkPath, when set, adds replace directives pointing the
 	// framework modules at a local checkout.
 	//
-	// It exists because Warren is not published: the generated go.mod
-	// requires github.com/MerseniBilel/warren v0.1.0, nothing serves that
-	// version yet, and `go build` in a fresh scaffold fails fifteen times
-	// over with "missing go.sum entry". A user who has the repository can
-	// point at it; when v0.1.0 is tagged, this flag stops being necessary
-	// and the templates stop mentioning it.
+	// It is the EXCEPTION, not the happy path: every framework module is
+	// published, so a scaffold's requires resolve under a plain
+	// `go mod tidy` and the flag is not needed to build one. What it is for
+	// is developing Warren ITSELF — scaffolding an app against your working
+	// tree so a change to the framework is exercised by a real service
+	// before it is tagged. That is also why the CLI's own compile tests
+	// pass it: they certify the templates against the checkout, not against
+	// the last release.
 	//
 	// AGENT.md invariant 8 forbids a replace COMMITTED TO THIS REPOSITORY.
 	// One written into a user's own new project, on request, is not that.
@@ -97,10 +102,14 @@ func New(opts Options) error {
 	if brk == "" {
 		brk = "memory"
 	}
+	version := opts.Version
+	if version == "" {
+		version = DefaultVersion
+	}
 	data := map[string]string{
 		"Name":      opts.Name,
 		"Module":    opts.ModulePath,
-		"Version":   opts.Version,
+		"Version":   version,
 		"EnvPrefix": strings.ToUpper(strings.ReplaceAll(opts.Name, "-", "_")),
 		"GoVersion": goVersion,
 		"DB":        db,
@@ -125,16 +134,11 @@ func New(opts Options) error {
 		return errConflict(conflicts)
 	}
 
-	// frameworkModules is EVERY Warren module, in go.mod order. It is one
-	// list because it has two readers: the go.mod this writes, and the
-	// notice `warren new` prints when --framework was NOT given. Those two
-	// disagreed — the notice named two modules while a
-	// `--db postgres --broker kafka` project requires four, so following it
-	// verbatim left the project unable to resolve half the framework.
+	// --framework only. Without it the go.mod this wrote is already
+	// complete: every framework module is published at DefaultVersion, so
+	// `go mod tidy` resolves the requires from the proxy and a replace here
+	// would only pin the new project to one machine's filesystem.
 	if opts.FrameworkPath != "" {
-		// A missing replace is not a warning: the module is untagged, so
-		// `go mod tidy` fails on it and the scaffold does not build at all —
-		// which is the whole reason the flag exists.
 		files["go.mod"] = append(files["go.mod"], []byte(Replaces(opts.FrameworkPath, "\n"))...)
 	}
 
@@ -321,6 +325,17 @@ func checkModulePath(path, name string) error {
 	return nil
 }
 
+// DefaultVersion is the framework version a scaffold pins when the CLI
+// binary carries no released version of its own — a `go build` from a
+// checkout, a `go test` binary, or a pseudo-version built between tags. None
+// of those name a version the module proxy serves, so none of them can be
+// written into a user's go.mod.
+//
+// Warren's modules are tagged in lockstep: core is vX.Y.Z and every adapter
+// is <module>/vX.Y.Z, which is why one string pins all six. TestDefaultVersionIsTagged
+// checks that against git rather than trusting this comment.
+const DefaultVersion = "v0.2.0"
+
 // frameworkModules is every Warren module, as a path suffix. EVERY one, not
 // only those a given scaffold requires today: a replace for an unrequired
 // module is inert, but the moment a user runs `go get` for one that is
@@ -337,11 +352,9 @@ var frameworkModules = []string{
 }
 
 // Replaces renders a replace directive per framework module, each prefixed
-// by lead. It is what `--framework` writes into go.mod and what the notice
-// prints when the flag was omitted, so the two cannot drift apart again.
-//
-// All of this goes away when v0.1.0 is tagged and the flag stops being
-// necessary.
+// by lead. It is what `--framework` writes into go.mod, and only that: a
+// scaffold without the flag requires published versions and needs no replace
+// at all.
 func Replaces(frameworkPath, lead string) string {
 	var b strings.Builder
 	for _, m := range frameworkModules {

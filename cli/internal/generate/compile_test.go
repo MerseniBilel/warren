@@ -30,7 +30,8 @@ func TestGeneratedCodeCompilesAndPasses(t *testing.T) {
 
 	dir := t.TempDir()
 	if err := scaffold.New(scaffold.Options{
-		Dir: dir, Name: "myapp", ModulePath: "example.com/myapp", Version: "v0.1.0",
+		Dir: dir, Name: "myapp", ModulePath: "example.com/myapp",
+		Version: scaffold.DefaultVersion,
 	}); err != nil {
 		t.Fatalf("scaffold: %v", err)
 	}
@@ -121,11 +122,15 @@ func TestGeneratedCodeCompilesAndPasses(t *testing.T) {
 	}
 	// Replace directives in the TEMP app's go.mod, not a go.work.
 	//
-	// A workspace cannot resolve a require on an untagged sibling module —
-	// the generated app requires warren/transport/http v0.1.0, which does not
-	// exist yet — so `use` is not enough and `go work sync` would write the
-	// workspace's resolved versions back into the FRAMEWORK's go.mod, which
-	// is how an indirect dependency once contaminated the core module.
+	// The generated app's requires resolve on their own now — every framework
+	// module is tagged — so this is not about making the tree build. It is
+	// about building it against the CHECKOUT: a generator that drifts from a
+	// signature changed in this very commit would still compile happily
+	// against the last release, and the point of this test is that it does
+	// not. `go work sync` would write the workspace's resolved versions back
+	// into the FRAMEWORK's go.mod, which is how an indirect dependency once
+	// contaminated the core module, so replaces it is.
+	//
 	// Replaces here are scoped to this temp directory and nothing is added to
 	// the repository (invariant 8: no COMMITTED replace).
 	mod := filepath.Join(dir, "go.mod")
@@ -134,7 +139,7 @@ func TestGeneratedCodeCompilesAndPasses(t *testing.T) {
 		t.Fatal(rerr)
 	}
 	src = append(src, []byte(
-		"\nrequire github.com/MerseniBilel/warren/persistence/postgres v0.1.0\n"+
+		"\nrequire github.com/MerseniBilel/warren/persistence/postgres "+scaffold.DefaultVersion+"\n"+
 			"\nreplace github.com/MerseniBilel/warren => "+framework+
 			"\n\nreplace github.com/MerseniBilel/warren/transport/http => "+framework+"/transport/http"+
 			"\n\nreplace github.com/MerseniBilel/warren/persistence/postgres => "+framework+"/persistence/postgres\n")...)
@@ -163,9 +168,9 @@ func TestGeneratedCodeCompilesAndPasses(t *testing.T) {
 	}
 
 	for _, cmdline := range [][]string{
-		// tidy first: the replaces above point at untagged local modules, so
-		// the generated go.sum has no entries for them or their own
-		// dependencies until it is written.
+		// tidy first: the replaces above redirect the requires at a local
+		// checkout, so the generated go.sum has no entries for those modules'
+		// own dependencies until it is written.
 		{"go", "mod", "tidy"},
 		{"go", "build", "./..."},
 		{"go", "vet", "./..."},

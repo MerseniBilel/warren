@@ -13,11 +13,6 @@ import (
 	"github.com/MerseniBilel/warren/cli/internal/scaffold"
 )
 
-// Version is the CLI's version, stamped at build time. It is also the
-// framework version a scaffold pins, so a CLI and the code it generates
-// always agree.
-var Version = "v0.1.0"
-
 // Root returns the command tree.
 func Root() *cobra.Command {
 	root := &cobra.Command{
@@ -36,8 +31,14 @@ func versionCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "version",
 		Short: "Print the CLI and framework versions",
+		Long: "version prints this binary's own version, read from the build rather\n" +
+			"than written down, and the framework version a scaffold would pin.\n\n" +
+			"They are the same for an installed release. They differ for a binary\n" +
+			"built from a checkout — that build has no released version, so it says\n" +
+			"so and scaffolds against the last one.",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			_, err := fmt.Fprintf(cmd.OutOrStdout(), "warren %s (framework %s)\n", Version, Version)
+			_, err := fmt.Fprintf(cmd.OutOrStdout(), "warren %s (framework %s)\n",
+				Version(), FrameworkVersion())
 			return err
 		},
 	}
@@ -124,15 +125,14 @@ func newCmd() *cobra.Command {
 		Long: "new writes a working Warren service: a module graph, a feature with\n" +
 			"its four layers, the transactional outbox, a consumer, and tests that\n" +
 			"boot the whole thing.\n\n" +
-			"Warren is not published yet, so `go build` in a fresh scaffold cannot\n" +
-			"resolve the framework. Pass --framework <path-to-warren-checkout> and\n" +
-			"the go.mod gets the replace directives that make it compile and pass\n" +
-			"`go test` as generated. When v0.1.0 is tagged the flag stops being\n" +
-			"necessary.",
+			"The generated go.mod requires the published framework, so `go mod tidy`\n" +
+			"and `go build ./...` work in the new directory with nothing else to set\n" +
+			"up. --framework is for developing Warren itself: it adds replace\n" +
+			"directives pointing at your checkout instead.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			opts.Name = args[0]
-			opts.Version = Version
+			opts.Version = FrameworkVersion()
 			if opts.Dir == "" {
 				opts.Dir = args[0]
 			}
@@ -147,27 +147,20 @@ func newCmd() *cobra.Command {
 				"Created %s\n\n%s  cd %s\n  go mod tidy\n%s  go run ./cmd/%s\n  go test ./...\n\n"+
 					"It serves POST /users, /healthz and /readyz on :8080.\n"+
 					"README.md says what is there and what is not.\n",
-				abs, unpublishedNotice(opts.FrameworkPath), opts.Dir,
+				abs, frameworkNotice(opts.FrameworkPath), opts.Dir,
 				firstRunSteps(opts), opts.Name)
 			return err
 		},
 	}
 	cmd.Flags().StringVar(&opts.ModulePath, "module", "", "the Go module path of the new app (required)")
 	cmd.Flags().StringVar(&opts.Dir, "dir", "", "where to write it (default: the app's name)")
-	cmd.Flags().StringVar(&opts.FrameworkPath, "framework", "", "path to a local Warren checkout, written as replace directives (needed until v0.1.0 is tagged)")
+	cmd.Flags().StringVar(&opts.FrameworkPath, "framework", "", "develop Warren itself: replace the framework modules with a local checkout")
 	cmd.Flags().StringVar(&opts.Transport, "transport", "", "transport adapter: http (grpc is not released yet)")
 	cmd.Flags().StringVar(&opts.DB, "db", "memory", "persistence driver: memory or postgres")
 	cmd.Flags().StringVar(&opts.Broker, "broker", "memory", "broker driver: memory or kafka")
 	return cmd
 }
 
-// unpublishedNotice tells the user what --framework would have done, once,
-// at the moment it matters. Without it the first thing a new project does is
-// fail fifteen times with "missing go.sum entry for module providing package
-// github.com/MerseniBilel/warren/app" — which names neither the cause nor
-// the fix.
-//
-// Delete this when v0.1.0 is tagged and the require resolves on its own.
 // firstRunSteps is what has to happen between `go mod tidy` and `go run`.
 //
 // It used to be one line, `<PREFIX>_NAME=<name> go run ./cmd/<name>`, and it
@@ -189,18 +182,26 @@ func firstRunSteps(opts scaffold.Options) string {
 			"  go run ./cmd/migrate\n", prefix, opts.Name)
 }
 
-func unpublishedNotice(frameworkPath string) string {
-	if frameworkPath != "" {
+// frameworkNotice says what --framework did, and nothing at all when it was
+// not given.
+//
+// It used to say the opposite, at length: "Warren is not published yet, so
+// `go mod tidy` cannot resolve it", followed by six replace directives to
+// paste. That was true — v0.1.0 tagged the core module alone, so no
+// scaffold's go.mod ever resolved — and it stopped being true the moment all
+// seven modules were tagged v0.2.0. A default path that tells every new user
+// to pin the framework to one machine's filesystem is worse than no notice.
+//
+// What survives is the other half: a project WITH replaces is unusual, its
+// go.mod is now machine-specific, and a user who forgets that debugs it on a
+// second machine instead.
+func frameworkNotice(frameworkPath string) string {
+	if frameworkPath == "" {
 		return ""
 	}
-	// The same list --framework writes, from the same place. This used to
-	// name two modules by hand; a `--db postgres --broker kafka` project
-	// requires four, so following the notice verbatim left half the
-	// framework unresolvable — with the go.sum error naming neither the
-	// cause nor the fix, which is the thing this notice exists to prevent.
-	return "Warren is not published yet, so `go mod tidy` cannot resolve it. Either\n" +
-		"re-run with --framework <path-to-your-warren-checkout>, or add to go.mod:\n\n" +
-		scaffold.Replaces("/path/to/warren", "  ") + "\n"
+	return "go.mod replaces the framework with " + frameworkPath + " — the tree\n" +
+		"builds against your checkout, and the replace lines are yours to remove\n" +
+		"before anyone else clones it.\n\n"
 }
 
 func envPrefix(name string) string {

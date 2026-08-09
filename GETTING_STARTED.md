@@ -7,15 +7,22 @@ are real terminal output, not illustrations. If something in this file stops
 being true, that is a bug: [warren.md](warren.md) is the design and
 [AGENT.md](AGENT.md) is the rules, but **this** is the page that has to work.
 
-> **Pre-release.** Warren is not tagged yet, so your `go.mod` needs a `replace`
-> pointing at a local checkout. That goes away at v0.1.
-
-> **Getting the `warren` binary.** Untagged means `go install
-> github.com/MerseniBilel/warren/cli/cmd/warren@latest` has nothing to fetch,
-> so build it from your checkout:
+> **Getting the `warren` binary.** Every module is published, so:
+>
+> ```
+> go install github.com/MerseniBilel/warren/cli/cmd/warren@latest
+> ```
+>
+> `warren version` prints the release it came from, and that same version is
+> what a scaffold's `go.mod` pins.
+>
+> **Developing Warren itself is the other route**, and only that: build the
+> CLI from your checkout and pass `--framework` so a scaffold builds against
+> your working tree.
 >
 > ```
 > cd cli && go build -o ~/.local/bin/warren ./cmd/warren
+> warren new demo --module example.com/demo --framework /path/to/warren
 > ```
 >
 > The `cd cli` is required, not tidiness: the CLI is **its own module**, so
@@ -79,18 +86,14 @@ module example.com/notes
 go 1.26.3
 
 require (
-	github.com/MerseniBilel/warren v0.1.0
-	github.com/MerseniBilel/warren/transport/http v0.1.0
+	github.com/MerseniBilel/warren v0.2.0
+	github.com/MerseniBilel/warren/transport/http v0.2.0
 )
-
-// Until v0.1 is tagged:
-replace github.com/MerseniBilel/warren => /path/to/warren
-replace github.com/MerseniBilel/warren/transport/http => /path/to/warren/transport/http
 ```
 
-Two requires. That is the whole dependency budget for an HTTP service — the
-HTTP adapter is `net/http` and nothing else, and `dig` arrives indirectly and
-is never yours to import.
+Two requires, and no `replace`. That is the whole dependency budget for an
+HTTP service — the HTTP adapter is `net/http` and nothing else, and `dig`
+arrives indirectly and is never yours to import.
 
 **Indirectly still means `go.sum`.** A `go.mod` with no `go.sum` beside it does
 not build — `missing go.sum entry for module providing package
@@ -519,12 +522,10 @@ and `span_id` too — pass `observability.LogAttrs()` as a second argument to
 
 The in-memory repository above is a real implementation of the port, and
 replacing it changes **no use case and no controller** — only the module's
-provider list. One more require, and — pre-release — its `replace`:
+provider list. One more require:
 
 ```go
-require github.com/MerseniBilel/warren/persistence/postgres v0.1.0
-
-replace github.com/MerseniBilel/warren/persistence/postgres => /path/to/warren/persistence/postgres
+require github.com/MerseniBilel/warren/persistence/postgres v0.2.0
 ```
 
 Then `go mod tidy` again; `pgx` and its five siblings arrive with it.
@@ -775,7 +776,7 @@ correct behaviour but worth knowing.
 | **Refusing a misspelled field** | `whttp.Codec(transport.StrictJSON())`. The default codec IGNORES unknown members, so a client sending `reorderPoint` for `reorder_point` gets a 201 and a record with the field it asked for left at zero. That default is deliberate — one codec decodes HTTP *and* events, and an INVALID on a consumer dead-letters without retry, so a producer adding a field would DLQ 100% of a consumer's traffic — but on an HTTP-only service strict is usually what you want |
 | A test that boots the app | `warren/testing` — `NewModuleTest`, `Replace`, `Invoke` for a handler, and `Resolve[T]` for anything else the boot built (a repository, the publisher, a sweeper). `Resolve` returns the instance the boot made, not a second construction |
 | A fast test suite | `whttp.DrainDelay(0)` — the 5s default is correct in production and costs 5s per test |
-| Scaffolding the next feature | `warren new` and `warren g` — see the CLI's skills, and **build the binary first** (below) |
+| Scaffolding the next feature | `warren new` and `warren g` — see the CLI's skills, and **install the binary first**: `go install github.com/MerseniBilel/warren/cli/cmd/warren@latest` |
 
 > **`app.Chain`'s first middleware is the OUTERMOST one.** So
 > `app.Chain(h, app.Retrying(p), app.Transactional(uow))` gives each retry

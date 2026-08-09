@@ -13,10 +13,140 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Tags, not just the tip. cli/internal/scaffold's
+          # TestDefaultVersionIsTagged checks the version a scaffold pins
+          # against the tags that exist, and it SKIPS when it can see none —
+          # so under the default fetch-depth of 1 the one test guarding the
+          # published version would quietly stop running.
+          fetch-depth: 0
       - uses: actions/setup-go@v5
         with:
           go-version: "1.26.x"
       - run: make fmt vet invariants test
+
+  # The check the repository did not have, and the one it most needed.
+  #
+  # For 134 commits every job above was green while `go get
+  # github.com/MerseniBilel/warren/transport/http` resolved for nobody: v0.1.0
+  # tagged the CORE module alone, so a scaffold's go.mod named five versions
+  # that did not exist, and the documented workaround was `--framework <path>`
+  # plus six replace lines. Nothing in CI ever left the repository, so nothing
+  # could tell. Every test here does — it goes through the module proxy from a
+  # module cache that starts empty.
+  #
+  # Two questions, deliberately kept apart:
+  #
+  #   1. Is the PUBLISHED CLI installable and runnable? That is about the tags
+  #      and the proxy, not about this commit, and only `@latest` can answer
+  #      it.
+  #   2. Does a scaffold from THIS TREE resolve against the published
+  #      framework with no replace? That is what a pull request can break, and
+  #      it fails here before the tag rather than after it.
+  #
+  # What is deliberately NOT asserted: that the @latest binary's scaffold
+  # builds. It cannot, until the release after the one that fixed it — the
+  # published v0.2.0 CLI writes v0.1.0 requires — and a gate that stays red
+  # waiting for a tag is a gate people learn to ignore. Question 2 covers the
+  # same ground one step earlier, and cli/internal/scaffold's
+  # TestDefaultVersionIsTagged ties the version a scaffold pins to the tags
+  # that exist. Add the assertion here once the tag carrying this change is
+  # pushed.
+  install:
+    runs-on: ubuntu-latest
+    env:
+      # A cache that starts empty, and the real proxy. Reusing the runner's
+      # would let a module resolve from a copy the previous job downloaded
+      # out of the checkout, which is the one thing this job must not do.
+      #
+      # github.workspace, not runner.temp: the `runner` context is not
+      # available in a job-level `env` block, and a workflow that names it
+      # there fails to parse.
+      GOMODCACHE: ${{ github.workspace }}/../go-clean/modcache
+      GOPATH: ${{ github.workspace }}/../go-clean/gopath
+      GOPROXY: https://proxy.golang.org,direct
+      GOFLAGS: ""
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.x"
+          # setup-go pre-populates the module cache from the repository's own
+          # go.sum files. "Clean" has to mean clean.
+          cache: false
+
+      # `go install …@latest` reads the proxy's version list, which lags a tag
+      # push by up to a few minutes. Retrying is the difference between a job
+      # that catches a broken release and a job that is flaky on the day of
+      # one — so it retries, with a fixed budget, and still FAILS at the end
+      # rather than passing quietly.
+      - name: go install the published CLI from an empty cache
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3 4 5 6; do
+            if go install github.com/MerseniBilel/warren/cli/cmd/warren@latest; then
+              exit 0
+            fi
+            echo "attempt $attempt failed; the proxy may not have the tag yet"
+            sleep 30
+          done
+          echo "::error::go install github.com/MerseniBilel/warren/cli/cmd/warren@latest failed"
+          exit 1
+
+      - name: the installed binary runs and names a released version
+        run: |
+          set -euo pipefail
+          "$GOPATH/bin/warren" version
+          # Both halves must be a released version. `go install` stamps the
+          # tag it resolved, so "(devel)" or a pseudo-version here means the
+          # version stopped coming from the build — which is the defect this
+          # whole shape replaced.
+          "$GOPATH/bin/warren" version \
+            | grep -Eq '^warren v[0-9]+\.[0-9]+\.[0-9]+ \(framework v[0-9]+\.[0-9]+\.[0-9]+\)$'
+
+      # Question 2. The CLI from this checkout, scaffolding OUTSIDE the
+      # repository — inside it the parent go.mod and any go.work would resolve
+      # the framework locally and prove nothing.
+      - name: build the CLI from this checkout
+        run: go build -o "$RUNNER_TEMP/warren" ./cmd/warren
+        working-directory: cli
+
+      - name: a scaffold from this tree resolves with plain go mod tidy
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/scaffolds"
+          cd "$RUNNER_TEMP/scaffolds"
+          "$RUNNER_TEMP/warren" new demo --module example.com/demo
+          cd demo
+          # The whole point: no replace, so the requires come from the proxy.
+          if grep -q '^replace ' go.mod; then
+            echo "::error::the default scaffold writes a replace directive"
+            cat go.mod
+            exit 1
+          fi
+          go mod tidy
+          go build ./...
+          go vet ./...
+          go test ./...
+
+      # The driver flags pin two more modules, and a release that tagged four
+      # of six would look perfectly healthy above. Build and vet only: these
+      # scaffolds' tests want a database and a broker, which is an integration
+      # concern, while resolution and compilation are what this job is for.
+      - name: the driver adapters resolve too
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/scaffolds"
+          "$RUNNER_TEMP/warren" new drivers --module example.com/drivers --db postgres --broker kafka
+          cd drivers
+          if grep -q '^replace ' go.mod; then
+            echo "::error::the --db postgres --broker kafka scaffold writes a replace directive"
+            cat go.mod
+            exit 1
+          fi
+          go mod tidy
+          go build ./...
+          go vet ./...
 
   # golangci-lint-action runs in ONE directory. This is a multi-module
   # repository and go.work is generated, never committed (invariant 8), so

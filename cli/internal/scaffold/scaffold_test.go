@@ -244,14 +244,17 @@ func TestOrdinaryModulePathsAreAccepted(t *testing.T) {
 	}
 }
 
-// TestFrameworkPathWritesReplaceDirectives — `warren new` produced a tree
-// that did not build: "missing go.sum entry for module providing package
-// github.com/MerseniBilel/warren/app", fifteen times over, because the
-// framework is not published yet and go could not resolve the require.
-// `warren new --help` claimed "It compiles and passes `go test` as
-// generated". This is the flag that makes that true, and the CLI's own
-// compile test now uses it rather than hand-patching go.mod — so the path a
-// user takes is the path CI exercises.
+// TestFrameworkPathWritesReplaceDirectives — the flag survives publication,
+// with a different job.
+//
+// It was born because `warren new` produced a tree that did not build:
+// "missing go.sum entry for module providing package
+// github.com/MerseniBilel/warren/app", fifteen times over, because v0.1.0
+// tagged the core module alone and nothing else the scaffold required
+// existed. Every module is tagged now, so that is no longer what it is for —
+// what it is for is developing Warren itself, where a scaffold has to build
+// against a working tree rather than the last release. The CLI's own compile
+// tests take that path, which is why it stays exercised.
 func TestFrameworkPathWritesReplaceDirectives(t *testing.T) {
 	t.Parallel()
 

@@ -10,11 +10,13 @@ warren new <name> --module github.com/acme/<name>
 ```
 
 `--module` is the Go module path of the new service and you should always
-pass it; `--dir` defaults to the app's name. `--db` and `--broker` both
-default to `memory`, which is the only driver that exists today.
+pass it; `--dir` defaults to the app's name. `--db` takes `memory` or
+`postgres`, `--broker` takes `memory` or `kafka`, and both default to
+`memory`; anything else is refused by name rather than silently ignored.
 
-The result compiles, vets and passes `go test ./...` **as generated**. If it
-does not, that is a bug in the CLI, not something to work around.
+The result compiles, vets and passes `go test ./...` **as generated**, after
+`go mod tidy` and nothing else. If it does not, that is a bug in the CLI, not
+something to work around.
 
 ## What you get, and why it is shaped that way
 
@@ -73,23 +75,23 @@ adapter serve them.
 slog's plain `Info` passes `context.Background()` and silently drops every
 correlation field.
 
-## Working in a scaffolded project before the framework is published
+## Resolving the framework
 
-The framework is not on a module proxy yet, so a generated `go.mod` will not
-resolve. Write a `go.work` in the app directory pointing at your checkout:
+`go mod tidy` in the new directory. That is all: every framework module is
+published, the generated `go.mod` requires the version the CLI itself was
+built from, and there is no `replace` in it.
 
-```
-go 1.26.3
+**Do not add one.** A `replace` pins the project to one machine's filesystem
+and it is the wrong habit to teach in a generated project — invariant 8
+forbids one committed to Warren's own repository for the same reason. If a
+require does not resolve, the version is wrong; say so rather than working
+around it.
 
-use (
-	.
-	/path/to/warren
-)
-```
-
-Never commit a `replace` directive into the app's `go.mod` — invariant 8
-forbids it in this repository, and it is the wrong habit to teach in a
-generated project.
+**The exception is developing Warren itself.** `warren new … --framework
+/path/to/warren` writes the replace directives that point the new app at a
+checkout, so a framework change is exercised by a real service before it is
+tagged. `warren new` says so in its output when the flag was used, because a
+machine-specific `go.mod` nobody mentioned is the next person's bug report.
 
 ## Then what
 
