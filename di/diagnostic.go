@@ -6,6 +6,8 @@ import (
 	"go/token"
 	"strings"
 	"unicode"
+
+	"github.com/MerseniBilel/warren/internal/panics"
 )
 
 // The diagnostics are the product. Every error this package returns is
@@ -277,95 +279,24 @@ func errConstructorFailed(scope string, cause error) error {
 // with the container's plumbing removed: a panic is as often a genuine bug in
 // the constructor (a nil map, an index) as a refusal, and a bug with no
 // frames is unfindable.
-func errConstructorPanicked(scope string, value any, stack string) error {
-	frames := cleanStack(stack)
+func errConstructorPanicked(scope string, caught *panics.Caught) error {
 	who := "A constructor"
-	if len(frames) > 0 {
-		who = frames[0].fn
+	if len(caught.Frames) > 0 {
+		who = caught.Frames[0].Func
 	}
-
-	var b strings.Builder
-	b.WriteString("✗ constructor panicked\n\n")
-	for _, line := range strings.Split(strings.TrimRight(fmt.Sprint(value), "\n"), "\n") {
-		b.WriteString("    " + line + "\n")
-	}
-	fmt.Fprintf(&b, "\n  %s panicked while the graph for scope %q was being built.\n", who, scope)
-	b.WriteString("  A panic during boot is one of two things: a refusal Warren raises on\n")
-	b.WriteString("  purpose — the message above says so when it is — or a bug in the\n")
-	b.WriteString("  constructor. Either way the process never served a request.\n")
-	if len(frames) > 0 {
-		b.WriteString("\n  Where it came from:\n\n")
-		for _, f := range frames {
-			b.WriteString("    " + f.fn + "\n        " + f.at + "\n")
-		}
-	}
-	return &diagnostic{text: strings.TrimRight(b.String(), "\n")}
+	detail := fmt.Sprintf("%s panicked while the graph for scope %q was being built.\n", who, scope) +
+		"A panic during boot is one of two things: a refusal Warren raises on\n" +
+		"purpose — the message above says so when it is — or a bug in the\n" +
+		"constructor. Either way the process never served a request."
+	// This package's own frames are the plumbing that placed the recover, not
+	// the answer to "where did this come from"; internal/panics drops the
+	// universal noise and leaves this one to the caller that knows.
+	return &diagnostic{text: caught.Diagnostic("constructor panicked", detail, selfPrefix).Error()}
 }
 
-type stackFrame struct{ fn, at string }
-
-// shortFuncName drops the module path from a stack frame's function, leaving
-// the package and the function — "user/application.NewRegisterUserHandler"
-// rather than 60 characters of forge, owner and repository that are the same
-// on every line.
-func shortFuncName(fn string) string {
-	dot := strings.LastIndexByte(fn, '.')
-	if dot < 0 {
-		return fn
-	}
-	pkg := fn[:dot]
-	if slash := strings.LastIndexByte(pkg, '/'); slash >= 0 {
-		pkg = pkg[slash+1:]
-	}
-	return pkg + fn[dot:]
-}
-
-// cleanStack turns debug.Stack's output into the frames a user can act on.
-//
-// It drops three kinds of noise: the panic machinery (runtime.gopanic and the
-// deferred recover that captured this), dig's frames — which invariant 2
-// forbids showing — and this package's own. What is left starts at the code
-// that actually panicked.
-func cleanStack(stack string) []stackFrame {
-	lines := strings.Split(stack, "\n")
-	var out []stackFrame
-	// Frames come in pairs: a function line, then a tab-indented file:line.
-	for i := 0; i+1 < len(lines); i++ {
-		fn := lines[i]
-		at := strings.TrimSpace(lines[i+1])
-		if fn == "" || !strings.HasPrefix(lines[i+1], "\t") {
-			continue
-		}
-		i++ // the file:line belongs to this frame, never to the next
-		switch {
-		case strings.HasPrefix(fn, "go.uber.org/dig"), strings.Contains(at, "go.uber.org/dig"):
-		case strings.HasPrefix(fn, "panic("), strings.HasPrefix(fn, "runtime/debug.Stack"):
-		case strings.HasPrefix(fn, "runtime."), strings.HasPrefix(fn, "created by "):
-		case strings.HasPrefix(fn, "github.com/MerseniBilel/warren/di."):
-		// reflect is how the container calls a constructor at all. Those two
-		// frames sit between the caller and the constructor in every single
-		// trace and say nothing about this one.
-		case strings.HasPrefix(fn, "reflect."):
-		default:
-			// The argument list and the +0x.. offset are compiler detail that
-			// helps nobody reading a boot failure. Cut at the LAST paren and
-			// only when one closes the line: a method's frame is printed
-			// "warren.(*App).Start.func1(0x14000)", whose FIRST paren opens
-			// the receiver — cutting there left the frame reading "warren."
-			// and nothing else.
-			if strings.HasSuffix(fn, ")") {
-				if p := strings.LastIndexByte(fn, '('); p > 0 {
-					fn = fn[:p]
-				}
-			}
-			if p := strings.LastIndex(at, " +0x"); p > 0 {
-				at = at[:p]
-			}
-			out = append(out, stackFrame{fn: shortFuncName(fn), at: at})
-		}
-	}
-	return out
-}
+// selfPrefix is this package's import path, the frames errConstructorPanicked
+// hides.
+const selfPrefix = "github.com/MerseniBilel/warren/di."
 
 // errInternal is the sanitized fallback for a container failure this package
 // did not anticipate. It deliberately carries no third-party wording.

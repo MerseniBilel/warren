@@ -1055,3 +1055,223 @@ func TestHooksSeeNoTelemetryWhenThereIsNone(t *testing.T) {
 		t.Errorf("an app with no telemetry got %T on its hook context", got)
 	}
 }
+
+// --- a panicking Controller.Register ---------------------------------------
+//
+// F7: c.Register(r) was unrecovered, so a controller field the constructor
+// forgot to assign — the shape `warren new` generates — killed the process
+// with a Go dump and exit 2, while the registration failures beside it in the
+// same step produced a clean block and exit 1.
+
+// brokenController is the reproduction: the constructor omits the field, so
+// Register dereferences nil.
+type brokenController struct{ svc *greetService }
+
+type greetService struct{ prefix string }
+
+func (c *brokenController) Register(r transport.Registrar) {
+	// c.svc is nil: this is the nil dereference, inside Register, at boot.
+	transport.Post(r, "/greet/"+c.svc.prefix,
+		app.HandlerFunc[greet, greeting](func(context.Context, greet) (greeting, error) {
+			return greeting{}, nil
+		}))
+}
+
+// halfController registers a route and then panics, leaving a partial table:
+// the shape that makes the consequence checks report artefacts of the panic.
+type halfController struct{ svc *greetService }
+
+func (c *halfController) Register(r transport.Registrar) {
+	transport.Post(r, "/half", app.HandlerFunc[greet, greeting](
+		func(context.Context, greet) (greeting, error) { return greeting{}, nil }))
+	panic("half-registered: " + c.svc.prefix)
+}
+
+// TestPanickingRegisterFailsTheBootNotTheProcess is the F7 regression test.
+func TestPanickingRegisterFailsTheBootNotTheProcess(t *testing.T) {
+	t.Parallel()
+
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("a panicking Register killed the boot instead of failing it: %v", r)
+		}
+	}()
+
+	m := warren.NewModule("user",
+		warren.Controllers(func() *brokenController { return &brokenController{} }),
+	)
+	err := warren.New(m).Start(context.Background())
+	if err == nil {
+		t.Fatal("a panicking Register booted successfully")
+	}
+	assertGolden(t, "register_panicked", elideBootFrames(err.Error()))
+}
+
+// TestTwoPanickingControllersBothReport — "every registration problem is
+// reported together" is a claim app.go makes in a comment, and an uncontained
+// panic destroyed it after the first one.
+func TestTwoPanickingControllersBothReport(t *testing.T) {
+	t.Parallel()
+
+	user := warren.NewModule("user",
+		warren.Controllers(func() *brokenController { return &brokenController{} }),
+	)
+	billing := warren.NewModule("billing",
+		warren.Controllers(func() *halfController { return &halfController{} }),
+	)
+	err := warren.New(user, billing).Start(context.Background())
+	if err == nil {
+		t.Fatal("two panicking Registers booted successfully")
+	}
+	got := err.Error()
+	if n := strings.Count(got, "✗ controller registration panicked"); n != 2 {
+		t.Errorf("%d panic blocks reported, want 2:\n%s", n, got)
+	}
+	for _, want := range []string{`module "user"`, `module "billing"`} {
+		if !strings.Contains(got, want) {
+			t.Errorf("the report does not name %s:\n%s", want, got)
+		}
+	}
+}
+
+// TestPanickingRegisterSuppressesConsequenceChecks — a controller that panicked
+// halfway through Register left a partial route table, so "a route nobody
+// serves" and "no adapter claims this protocol" are artefacts of the panic.
+// Printing them buries the one block the reader can act on under two they
+// cannot.
+func TestPanickingRegisterSuppressesConsequenceChecks(t *testing.T) {
+	t.Parallel()
+
+	m := warren.NewModule("billing",
+		warren.Controllers(func() *halfController { return &halfController{} }),
+	)
+	err := warren.New(m).Start(context.Background())
+	if err == nil {
+		t.Fatal("a panicking Register booted successfully")
+	}
+	got := err.Error()
+	if !strings.Contains(got, "✗ controller registration panicked") {
+		t.Fatalf("the panic block is missing:\n%s", got)
+	}
+	for _, artefact := range []string{"no adapter serving them", "unserved", "Unserved", "Claim"} {
+		if strings.Contains(got, artefact) {
+			t.Errorf("a consequence check ran on a half-registered table (%q):\n%s", artefact, got)
+		}
+	}
+}
+
+// TestRegisterPanicStackHasNoFrameworkFrames is C0 on this path.
+func TestRegisterPanicStackHasNoFrameworkFrames(t *testing.T) {
+	t.Parallel()
+
+	m := warren.NewModule("user",
+		warren.Controllers(func() *brokenController { return &brokenController{} }),
+	)
+	err := warren.New(m).Start(context.Background())
+	if err == nil {
+		t.Fatal("a panicking Register booted successfully")
+	}
+	got := err.Error()
+	if !strings.Contains(got, "warren_test.(*brokenController).Register") {
+		t.Errorf("the controller's own frame is missing:\n%s", got)
+	}
+	for _, noise := range []string{
+		"go.uber.org/dig", // invariant 2
+		"runtime.",
+		"reflect.",
+		"panic(",
+		"created by ",
+		"internal/panics.Do",
+		"warren.(*App).Start",
+	} {
+		if strings.Contains(got, noise) {
+			t.Errorf("the diagnostic shows machinery %q:\n%s", noise, got)
+		}
+	}
+}
+
+// TestNoWarrenInvokedUserCodePanicsUncontained is the cross-cutting claim, in
+// one table: after this change, no user code Warren invokes during boot or
+// shutdown produces a raw Go dump and exit 2. Each row would have killed this
+// test binary before the containment landed.
+func TestNoWarrenInvokedUserCodePanicsUncontained(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name     string
+		headline string
+		run      func(*testing.T) error
+	}{
+		{
+			name:     "constructor",
+			headline: "✗ constructor panicked",
+			run: func(*testing.T) error {
+				m := warren.NewModule("user",
+					warren.Controllers(func() *echoController { panic("constructor refusal") }),
+				)
+				return warren.New(m).Start(context.Background())
+			},
+		},
+		{
+			name:     "Controller.Register",
+			headline: "✗ controller registration panicked",
+			run: func(*testing.T) error {
+				m := warren.NewModule("user",
+					warren.Controllers(func() *brokenController { return &brokenController{} }),
+				)
+				return warren.New(m).Start(context.Background())
+			},
+		},
+		{
+			name:     "lifecycle hook OnStart",
+			headline: "✗ lifecycle hook panicked",
+			run: func(*testing.T) error {
+				m := warren.NewModule("user",
+					warren.OnStart(func(context.Context) error { panic("hook refusal") }),
+				)
+				return warren.New(m).Start(context.Background())
+			},
+		},
+		{
+			name:     "lifecycle hook OnStop",
+			headline: "✗ lifecycle hook panicked",
+			run: func(t *testing.T) error {
+				m := warren.NewModule("user",
+					warren.OnStop(func(context.Context) error { panic("drain refusal") }),
+				)
+				a := warren.New(m)
+				if err := a.Start(context.Background()); err != nil {
+					t.Fatalf("Start: %v", err)
+				}
+				return a.Stop(context.Background())
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			defer func() {
+				if r := recover(); r != nil {
+					t.Fatalf("the panic escaped Warren and would have exited 2: %v", r)
+				}
+			}()
+			err := tc.run(t)
+			if err == nil {
+				t.Fatal("the panic was swallowed: no error was returned")
+			}
+			if !strings.Contains(err.Error(), tc.headline) {
+				t.Errorf("the error is not the %q block:\n%v", tc.headline, err)
+			}
+		})
+	}
+}
+
+// elideBootFrames replaces the "Where it came from" frames with a marker, so a
+// golden pins the wording without pinning this machine's file paths.
+func elideBootFrames(block string) string {
+	const marker = "\n\n  Where it came from:\n"
+	i := strings.Index(block, marker)
+	if i < 0 {
+		return block
+	}
+	return block[:i+len(marker)] + "\n    <frames elided>"
+}

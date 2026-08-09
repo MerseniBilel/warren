@@ -4,12 +4,13 @@ import (
 	stderrors "errors"
 	"reflect"
 	"runtime"
-	"runtime/debug"
 	"slices"
 	"strconv"
 	"strings"
 
 	"go.uber.org/dig"
+
+	"github.com/MerseniBilel/warren/internal/panics"
 )
 
 // digScope is the slice of dig's API this package uses. *dig.Container and
@@ -139,7 +140,7 @@ func (c *container) Provide(constructor any, opts ...ProvideOption) error {
 	return nil
 }
 
-func (c *container) Invoke(fn any) (err error) {
+func (c *container) Invoke(fn any) error {
 	v := reflect.ValueOf(fn)
 	if !v.IsValid() || v.Kind() != reflect.Func {
 		return errNonConstructor(fn)
@@ -151,12 +152,19 @@ func (c *container) Invoke(fn any) (err error) {
 	// broken by a stack trace instead of a message. Converting it to an error
 	// also routes it through App.Run, which prints Warren's multi-line blocks
 	// the way every other boot failure is printed.
-	defer func() {
-		if r := recover(); r != nil {
-			err = errConstructorPanicked(c.name, r, string(debug.Stack()))
-		}
-	}()
+	//
+	// The containment and the frame filtering live in internal/panics, which
+	// lifecycle and the bootstrapper share: the rules for which frames a
+	// reader may see are invariant 2's enforcement, and one implementation is
+	// the only way they hold in all three places at once.
+	var err error
+	if caught := panics.Do(func() { err = c.invoke(v, fn) }); caught != nil {
+		return errConstructorPanicked(c.name, caught)
+	}
+	return err
+}
 
+func (c *container) invoke(v reflect.Value, fn any) error {
 	// Pre-check the whole subgraph this call needs, so any resolution failure
 	// is Warren's diagnostic and anything left for dig to report is a
 	// constructor's own error. The trailing variadic parameter, if any, is

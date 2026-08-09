@@ -1,0 +1,16 @@
+✗ lifecycle hook panicked
+
+    nil pointer in the pool
+
+  Hook "user" panicked during OnStart, so Warren stopped the hooks that had
+  already started, in reverse order, and the process never opened readiness.
+  A hook that RETURNS an error gets the same rollback; this one did not get
+  the chance to return.
+
+  A panic here is one of two things: a refusal Warren raises on purpose — the
+  message above says so when it is — or a bug in the hook. Either way the
+  process never served a request.
+
+  Where it came from:
+
+    <frames elided>

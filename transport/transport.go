@@ -46,6 +46,12 @@ type Registrar interface {
 
 // Controller exposes handlers over transports. Register is called once, at
 // boot step 5, on an already-instantiated controller — never per request.
+//
+// A panic inside Register FAILS THE BOOT; it does not kill the process. It is
+// contained per controller, so several broken controllers are reported
+// together, and it is reported with the registration failures step 5 already
+// accumulates. The routes a panicking controller had registered are
+// discarded.
 type Controller interface {
 	Register(r Registrar)
 }
@@ -452,6 +458,19 @@ func NewBuilder(opts ...BuilderOption) *Builder {
 // For returns the Registrar passed to one module's controllers.
 func (b *Builder) For(module string) Registrar { return &registrar{b: b, module: module} }
 
+// Failures returns the registration failures accumulated so far as one
+// diagnostic, or nil. Fill reports the same list, and reporting it twice is
+// not the point of this method: it exists for the bootstrapper, which has to
+// abandon boot step 5 BEFORE Fill when a controller's Register panicked — a
+// half-registered table makes "no adapter serves this protocol" and "a route
+// nobody serves" artefacts of the panic rather than independent facts.
+func (b *Builder) Failures() error {
+	if len(b.errs) == 0 {
+		return nil
+	}
+	return errRegistration(b.errs)
+}
+
 // Table freezes the registrations into a new Table.
 func (b *Builder) Table() (*Table, error) {
 	t := &Table{}
@@ -608,7 +627,8 @@ func Raw(r Registrar, p Protocol, pattern string, h any, opts ...RouteOption) {
 		panic("transport: Raw with a foreign Registrar — the interface is sealed")
 	}
 	if h == nil {
-		panic("transport: Raw registered a nil handler for " + pattern)
+		reg.fail(errNilHandler("transport.Raw", "raw route "+fmt.Sprintf("%q", pattern), "registered", reg.moduleName(), "handler"))
+		return
 	}
 	if pattern == "" {
 		reg.fail(errEmptyPattern("Raw"))
@@ -657,7 +677,8 @@ func OnEvent[Req, Res any](r Registrar, topic string, h app.Handler[Req, Res], o
 		panic("transport: OnEvent with a foreign Registrar — the interface is sealed")
 	}
 	if h == nil {
-		panic("transport: OnEvent registered a nil handler for topic " + topic)
+		reg.fail(errNilHandler("transport.OnEvent", "topic "+fmt.Sprintf("%q", topic), "subscribed", reg.moduleName(), "app.Handler[Req, Res]"))
+		return
 	}
 	if topic == "" {
 		reg.fail(errEmptyPattern("OnEvent"))
@@ -697,7 +718,8 @@ func register[Req, Res any](r Registrar, p Protocol, verb, pattern string, h app
 		panic("transport: registration with a foreign Registrar — the interface is sealed")
 	}
 	if h == nil {
-		panic("transport: registered a nil handler for " + verb + " " + pattern)
+		reg.fail(errNilHandler(registrationFunc(p, verb), routeSubject(p, verb, pattern), "registered", reg.moduleName(), "app.Handler[Req, Res]"))
+		return
 	}
 	if pattern == "" {
 		reg.fail(errEmptyPattern(verb))
@@ -951,6 +973,59 @@ func methodFunc(verb string) string {
 	default:
 		return verb
 	}
+}
+
+// errNilHandler reports a route registered with a handler that is nil.
+//
+// It was a panic until 2026-08-09, and the two sibling checks in the same
+// functions — a method written into the pattern, a duplicate route — were
+// not: the same mistake produced a clean boot failure or a Go stack dump
+// depending on which line of Register hit it first. The admission test
+// (AGENT.md § General) fails a nil handler on criterion 3, because reg.fail
+// is three lines away, and on criterion 4, because the alternative is a clean
+// boot failure rather than silent data loss.
+//
+// It leads with "✗ nil handler" — its OWN headline, in the shape errDuplicate
+// and the pattern checks already use — because until 2026-08-09 it had none.
+// Joined with a sibling failure the entry read as the body of the report's
+// "✗ route registration failed" header while the duplicate beside it kept its
+// own ✗, so which failure appeared nested depended on the order the routes
+// were registered in. That is the 2/10 field grade one notch quieter: every
+// failure in Warren leads with ✗, and a headline borrowed from a neighbour is
+// not one.
+//
+// fn is the registration function as the user wrote it, subject is the route
+// or topic, action is "registered" or "subscribed", and what is the handler
+// type that was nil — Raw takes an opaque handler rather than an
+// app.Handler[Req, Res].
+func errNilHandler(fn, subject, action, module, what string) error {
+	return diagnostic(fmt.Sprintf(
+		"✗ nil handler\n\n    %s was %s with a nil handler\n      in module %q\n\n"+
+			"  %s was given a nil %s. The usual cause is a\n"+
+			"  controller field the constructor does not assign: the struct literal in\n"+
+			"  NewController omits it, so the field is nil and Register passes that nil\n"+
+			"  straight through.\n\n"+
+			"  Check that every handler NewController takes is assigned to a field, and\n"+
+			"  that every field Register reads is one of them.",
+		subject, action, module, fn, what))
+}
+
+// registrationFunc names the function the user called, so the diagnostic
+// shows the line they wrote rather than the internal one it reached.
+func registrationFunc(p Protocol, verb string) string {
+	if p == ProtocolGRPC {
+		return "transport.Method"
+	}
+	return "transport." + methodFunc(verb)
+}
+
+// routeSubject names the route the way its own protocol does: HTTP by verb
+// and path, gRPC by full method.
+func routeSubject(p Protocol, verb, pattern string) string {
+	if p == ProtocolGRPC {
+		return fmt.Sprintf("method %q", pattern)
+	}
+	return verb + " " + pattern
 }
 
 func errEmptyPattern(what string) error {

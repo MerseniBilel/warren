@@ -416,3 +416,204 @@ func BenchmarkReady(b *testing.B) {
 		_ = l.Ready()
 	}
 }
+
+// --- panicking hooks -------------------------------------------------------
+//
+// A hook that RETURNS an error rolls back correctly; until 2026-08-09 a hook
+// that PANICKED produced a raw Go dump, exit 2, and no rollback at all — the
+// panic escaped on a goroutine the lifecycle spawned, where the user's own
+// main could not recover it either. Three documents guarantee that rollback.
+// These tests are what makes the guarantee true for both phases.
+
+// panickingHook is a package-level helper so its frame has a name and a
+// file:line to report.
+func panickingHook(context.Context) error {
+	panic("nil pointer in the pool")
+}
+
+// TestPanickingStartHookRunsPriorStopHooks is the F1 regression test: the
+// rollback GETTING_STARTED and warren.md promise, for a hook that panics.
+func TestPanickingStartHookRunsPriorStopHooks(t *testing.T) {
+	t.Parallel()
+
+	j := &journal{}
+	l := lifecycle.New()
+	l.Append(hook("pool", j))
+	l.Append(lifecycle.Hook{
+		Name:    "user",
+		OnStart: panickingHook,
+		OnStop:  func(context.Context) error { j.add("stop user"); return nil },
+	})
+
+	err := l.Start(context.Background())
+	if err == nil {
+		t.Fatal("Start with a panicking OnStart returned nil")
+	}
+	got := j.all()
+	if !slices.Contains(got, "stop pool") {
+		t.Errorf("the prior hook's OnStop did not run — the rollback guarantee is void: %v", got)
+	}
+	// The panicking hook never completed its start, so it is not unwound.
+	if slices.Contains(got, "stop user") {
+		t.Errorf("a hook whose OnStart panicked was stopped as if it had started: %v", got)
+	}
+	if !strings.Contains(err.Error(), "lifecycle hook panicked") {
+		t.Errorf("the error is not the panic diagnostic:\n%v", err)
+	}
+	if !strings.Contains(err.Error(), "nil pointer in the pool") {
+		t.Errorf("the panic value was lost:\n%v", err)
+	}
+}
+
+func TestPanickingStartHookNeverOpensReadiness(t *testing.T) {
+	t.Parallel()
+
+	l := lifecycle.New()
+	l.Append(lifecycle.Hook{Name: "user", OnStart: panickingHook})
+	if err := l.Start(context.Background()); err == nil {
+		t.Fatal("Start with a panicking OnStart returned nil")
+	}
+	if l.Ready() {
+		t.Error("readiness opened after a hook panicked during OnStart")
+	}
+}
+
+// TestPanickingStopHookDoesNotAbandonTheDrain is the second F1 regression
+// test. One panicking stop hook used to strand every hook below it in the
+// unwind — the pools and the outbox relay — which inverts §1.3's shutdown
+// ordering, the single ordering lifecycle is a Build in order to own.
+func TestPanickingStopHookDoesNotAbandonTheDrain(t *testing.T) {
+	t.Parallel()
+
+	j := &journal{}
+	l := lifecycle.New()
+	l.Append(hook("pool", j))
+	l.Append(lifecycle.Hook{
+		Name:   "kafka",
+		OnStop: func(context.Context) error { panic("send on closed channel") },
+	})
+	l.Append(lifecycle.Hook{
+		Name:   "relay",
+		OnStop: func(context.Context) error { j.add("stop relay"); return stderrors.New("flush failed") },
+	})
+
+	if err := l.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	err := l.Stop(context.Background())
+	if err == nil {
+		t.Fatal("Stop with a panicking OnStop returned nil")
+	}
+	got := j.all()
+	if !slices.Contains(got, "stop pool") {
+		t.Errorf("the drain was abandoned below the panicking hook: %v", got)
+	}
+	if !slices.Contains(got, "stop relay") {
+		t.Errorf("the hook above the panicking one did not stop: %v", got)
+	}
+	// Everything that failed on the way down is reported, joined.
+	for _, want := range []string{"lifecycle hook panicked", "send on closed channel", "flush failed"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the joined error does not carry %q:\n%v", want, err)
+		}
+	}
+}
+
+// TestPanickingHookIsNotReportedAsAbandoned pins the classification: a hook
+// that panicked RETURNED, so it is not "still stopping" and it must not take
+// the force-exit short-circuit, which would strand the hooks below it exactly
+// as the missing recover did.
+func TestPanickingHookIsNotReportedAsAbandoned(t *testing.T) {
+	t.Parallel()
+
+	j := &journal{}
+	l := lifecycle.New()
+	l.Append(hook("pool", j))
+	l.Append(lifecycle.Hook{Name: "kafka", OnStop: func(context.Context) error { panic("boom") }})
+
+	if err := l.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	err := l.Stop(context.Background())
+	if err == nil {
+		t.Fatal("Stop with a panicking OnStop returned nil")
+	}
+	for _, forbidden := range []string{"was abandoned", "still stopping", "force-exit deadline"} {
+		if strings.Contains(err.Error(), forbidden) {
+			t.Errorf("a panicking hook is reported as %q:\n%v", forbidden, err)
+		}
+	}
+	if !slices.Contains(j.all(), "stop pool") {
+		t.Error("the force-exit short-circuit fired and stranded the hooks below")
+	}
+}
+
+// TestPanickingHookDiagnosticIsGolden pins both phases' wording.
+func TestPanickingHookDiagnosticIsGolden(t *testing.T) {
+	t.Parallel()
+
+	l := lifecycle.New()
+	l.Append(lifecycle.Hook{Name: "user", OnStart: panickingHook})
+	err := l.Start(context.Background())
+	if err == nil {
+		t.Fatal("Start with a panicking OnStart returned nil")
+	}
+	assertGolden(t, "hook_panicked_onstart", elideFrames(err.Error()))
+
+	l2 := lifecycle.New()
+	l2.Append(lifecycle.Hook{
+		Name:   "warren/broker/kafka",
+		OnStop: func(context.Context) error { panic("send on closed channel") },
+	})
+	if err := l2.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	err = l2.Stop(context.Background())
+	if err == nil {
+		t.Fatal("Stop with a panicking OnStop returned nil")
+	}
+	assertGolden(t, "hook_panicked_onstop", elideFrames(err.Error()))
+}
+
+// TestPanickingHookStackHasNoFrameworkFrames is C0 on this path: the frames a
+// reader is shown start at the hook and carry none of the plumbing that ran
+// it. A stack with lifecycle's goroutine in it is a stack that answers a
+// question nobody asked.
+func TestPanickingHookStackHasNoFrameworkFrames(t *testing.T) {
+	t.Parallel()
+
+	l := lifecycle.New()
+	l.Append(lifecycle.Hook{Name: "user", OnStart: panickingHook})
+	err := l.Start(context.Background())
+	if err == nil {
+		t.Fatal("Start with a panicking OnStart returned nil")
+	}
+	got := err.Error()
+	if !strings.Contains(got, "lifecycle_test.panickingHook") {
+		t.Errorf("the hook's own frame is missing:\n%s", got)
+	}
+	for _, noise := range []string{
+		"go.uber.org/dig", // invariant 2
+		"runtime.",
+		"reflect.",
+		"panic(",
+		"created by ",
+		"warren/lifecycle.runHook",
+		"internal/panics.Do",
+	} {
+		if strings.Contains(got, noise) {
+			t.Errorf("the diagnostic shows machinery %q:\n%s", noise, got)
+		}
+	}
+}
+
+// elideFrames replaces the "Where it came from" frames with a marker, so a
+// golden file pins the wording without pinning this machine's file paths.
+func elideFrames(block string) string {
+	const marker = "\n\n  Where it came from:\n"
+	i := strings.Index(block, marker)
+	if i < 0 {
+		return block
+	}
+	return block[:i+len(marker)] + "\n    <frames elided>"
+}

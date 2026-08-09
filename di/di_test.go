@@ -953,6 +953,40 @@ func newPanickingService() *user.UserService {
 	panic("warren: a deliberate refusal, raised while composing")
 }
 
+// TestPanickingConstructorBlockIsGolden pins the rendered block byte for byte.
+//
+// It exists for one reason: the containment and the frame filtering moved into
+// internal/panics, and "di's text does not change by one byte" is a claim that
+// needs a file to check it against rather than a promise. The frames are
+// elided because their paths differ per machine; the behavioural tests above
+// and TestPanicFramesSurviveAMethodReceiver assert what is in them.
+func TestPanickingConstructorBlockIsGolden(t *testing.T) {
+	t.Parallel()
+
+	root := di.New()
+	if err := root.Provide(newPanickingService); err != nil {
+		t.Fatalf("providing: %v", err)
+	}
+	_, err := di.Resolve[*user.UserService](root)
+	if err == nil {
+		t.Fatal("Resolve through a panicking constructor succeeded")
+	}
+	assertGolden(t, "constructor_panicked", elideFrames(err.Error()))
+}
+
+// elideFrames replaces the "Where it came from" frames with a marker, so a
+// golden file pins the wording without pinning this machine's file paths. A
+// golden that has to be regenerated per machine is a golden people stop
+// reading.
+func elideFrames(block string) string {
+	const marker = "\n\n  Where it came from:\n"
+	i := strings.Index(block, marker)
+	if i < 0 {
+		return block
+	}
+	return block[:i+len(marker)] + "\n    <frames elided>"
+}
+
 // TestPanicFramesSurviveAMethodReceiver pins a defect found by running a real
 // scaffolded app rather than this test suite: a method's frame prints as
 // "warren.(*App).Start.func1(0x14000)", whose FIRST parenthesis opens the

@@ -3,6 +3,9 @@ package transport_test
 import (
 	"context"
 	stderrors "errors"
+	"flag"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -383,16 +386,24 @@ func TestRegistrationErrorsAccumulate(t *testing.T) {
 	}
 }
 
-func TestNilHandlerPanicsAtRegistration(t *testing.T) {
+// TestNilHandlerDoesNotPanicAtRegistration replaces a test that asserted the
+// opposite. The panic was never argued against AGENT.md's admission test —
+// added 2026-08-09, which is exactly what it was written to stop — and it
+// fails two of the four criteria: reg.fail is three lines away, and the
+// alternative is a clean boot failure rather than silent data loss.
+func TestNilHandlerDoesNotPanicAtRegistration(t *testing.T) {
 	t.Parallel()
 
 	defer func() {
-		if r := recover(); r == nil {
-			t.Fatal("registering a nil handler did not panic")
+		if r := recover(); r != nil {
+			t.Fatalf("registering a nil handler panicked: %v", r)
 		}
 	}()
-	transport.Post(transport.NewBuilder().For("user"), "/users",
-		app.Handler[registerUser, userDTO](nil))
+	b := transport.NewBuilder()
+	transport.Post(b.For("user"), "/users", app.Handler[registerUser, userDTO](nil))
+	if b.Failures() == nil {
+		t.Fatal("a nil handler was accepted silently")
+	}
 }
 
 func TestContainerNotConsultedPerRequest(t *testing.T) {
@@ -946,3 +957,207 @@ func registerUser2(context.Context, registerUser) (userDTO, error) { return user
 type noopUoW struct{}
 
 func (noopUoW) Do(ctx context.Context, fn func(context.Context) error) error { return fn(ctx) }
+
+// --- nil handlers ----------------------------------------------------------
+//
+// A controller field the constructor forgot to assign is the shape `warren new`
+// generates, and until 2026-08-09 it was a raw panic and exit 2 — while the
+// two sibling checks in the same functions, a method in the pattern and a
+// duplicate route, produced a clean "✗ route registration failed" block and
+// exit 1. The admission test (AGENT.md § General) fails a nil handler on
+// criteria 3 and 4: reg.fail exists, and the alternative is a clean boot
+// failure rather than silent data loss.
+
+var update = flag.Bool("update", false, "rewrite golden files")
+
+func assertGolden(t *testing.T, name, got string) {
+	t.Helper()
+	path := filepath.Join("testdata", name+".golden")
+	if *update {
+		if err := os.WriteFile(path, []byte(got), 0o644); err != nil {
+			t.Fatalf("writing golden file: %v", err)
+		}
+	}
+	want, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading golden file: %v", err)
+	}
+	if got != string(want) {
+		t.Errorf("diagnostic does not match golden file %s\ngot:\n%s\nwant:\n%s", path, got, want)
+	}
+}
+
+// nilHandlerController is the reproduction: a constructor that omits a field,
+// so Register hands a nil handler to a route.
+type nilHandlerController struct {
+	h app.Handler[registerUser, userDTO] // never assigned
+}
+
+func (c *nilHandlerController) Register(r transport.Registrar) {
+	transport.Post(r, "/users", c.h)
+}
+
+func TestNilHandlerIsARegistrationFailureNotAPanic(t *testing.T) {
+	t.Parallel()
+
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("registering a nil handler panicked instead of failing the boot: %v", r)
+		}
+	}()
+
+	b := transport.NewBuilder()
+	(&nilHandlerController{}).Register(b.For("user"))
+	_, err := b.Table()
+	if err == nil {
+		t.Fatal("a nil handler built a table")
+	}
+	// The failure is accumulated, not raised: the builder holds it, and the
+	// bootstrapper can read the list without Fill when it has to abandon
+	// earlier than Fill.
+	failures := b.Failures()
+	if failures == nil {
+		t.Fatal("Failures() is nil after a failed registration")
+	}
+	if failures.Error() != err.Error() {
+		t.Errorf("Failures() and Fill report different things:\n%v\n\n%v", failures, err)
+	}
+	if got := strings.Count(err.Error(), "was registered with a nil handler"); got != 1 {
+		t.Errorf("the nil handler is reported %d times, want 1:\n%v", got, err)
+	}
+}
+
+func TestNilHandlerDiagnosticIsGolden(t *testing.T) {
+	t.Parallel()
+
+	t.Run("http", func(t *testing.T) {
+		t.Parallel()
+		b := transport.NewBuilder()
+		(&nilHandlerController{}).Register(b.For("user"))
+		_, err := b.Table()
+		if err == nil {
+			t.Fatal("a nil handler built a table")
+		}
+		assertGolden(t, "nil_handler", err.Error())
+	})
+
+	t.Run("event", func(t *testing.T) {
+		t.Parallel()
+		b := transport.NewBuilder()
+		var h app.Handler[registerUser, userDTO]
+		transport.OnEvent(b.For("user"), "user.registered", h)
+		_, err := b.Table()
+		if err == nil {
+			t.Fatal("a nil handler built a table")
+		}
+		assertGolden(t, "nil_handler_event", err.Error())
+	})
+
+	t.Run("grpc", func(t *testing.T) {
+		t.Parallel()
+		b := transport.NewBuilder()
+		var h app.Handler[registerUser, userDTO]
+		transport.Method(b.For("user"), "user.v1.UserService/Register", h)
+		_, err := b.Table()
+		if err == nil {
+			t.Fatal("a nil handler built a table")
+		}
+		assertGolden(t, "nil_handler_grpc", err.Error())
+	})
+
+	t.Run("raw", func(t *testing.T) {
+		t.Parallel()
+		b := transport.NewBuilder()
+		transport.Raw(b.For("user"), transport.ProtocolHTTP, "POST /uploads", nil)
+		_, err := b.Table()
+		if err == nil {
+			t.Fatal("a nil raw handler built a table")
+		}
+		assertGolden(t, "nil_handler_raw", err.Error())
+	})
+}
+
+// TestNilHandlerJoinsOtherRegistrationFailures — a nil handler is an ordinary
+// registration failure, so one boot reports it together with everything else
+// that went wrong, which is the property step 5 claims.
+func TestNilHandlerJoinsOtherRegistrationFailures(t *testing.T) {
+	t.Parallel()
+
+	b := transport.NewBuilder()
+	r := b.For("user")
+	var h app.Handler[registerUser, userDTO]
+	transport.Post(r, "/users", h)
+	good := app.Handler[registerUser, userDTO](app.HandlerFunc[registerUser, userDTO](
+		func(context.Context, registerUser) (userDTO, error) { return userDTO{}, nil }))
+	transport.Get(r, "/users/{id}", good)
+	transport.Get(r, "/users/{id}", good)
+
+	_, err := b.Table()
+	if err == nil {
+		t.Fatal("a nil handler and a duplicate route built a table")
+	}
+	for _, want := range []string{"nil handler", "duplicate route"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the report does not carry %q:\n%v", want, err)
+		}
+	}
+}
+
+// TestEveryJoinedFailureLeadsWithItsOwnHeadline — a report that joins two
+// failures gives each of them a ✗ line of its own, at the same indent.
+//
+// The nil-handler entry began with its subject and no headline, so when it
+// was the first entry it read as the BODY of "✗ route registration failed"
+// while the duplicate beside it kept its own "✗ duplicate route" — one
+// failure nested under the other, and only because of the order they were
+// registered in. A field test graded the nil handler 2/10 for lacking the
+// framework's diagnostic shape; an entry that borrows a neighbour's headline
+// is the same defect one notch quieter.
+func TestEveryJoinedFailureLeadsWithItsOwnHeadline(t *testing.T) {
+	t.Parallel()
+
+	b := transport.NewBuilder()
+	r := b.For("user")
+	var nilHandler app.Handler[registerUser, userDTO]
+	transport.Post(r, "/users", nilHandler)
+	good := app.Handler[registerUser, userDTO](app.HandlerFunc[registerUser, userDTO](
+		func(context.Context, registerUser) (userDTO, error) { return userDTO{}, nil }))
+	transport.Get(r, "/users/{id}", good)
+	transport.Get(r, "/users/{id}", good)
+
+	_, err := b.Table()
+	if err == nil {
+		t.Fatal("a nil handler and a duplicate route built a table")
+	}
+	report := err.Error()
+	assertGolden(t, "nil_handler_and_duplicate", report)
+
+	lines := strings.Split(report, "\n")
+	if len(lines) == 0 || lines[0] != "✗ route registration failed" {
+		t.Fatalf("the report does not open with the joined header:\n%s", report)
+	}
+
+	// Every ✗ after the header is one failure's own headline, and they all sit
+	// at the same indent — which is what "neither nests under the other" means
+	// when the only structure the terminal has is leading spaces.
+	indents := map[string]int{}
+	for _, line := range lines[1:] {
+		trimmed := strings.TrimLeft(line, " ")
+		if !strings.HasPrefix(trimmed, "✗ ") {
+			continue
+		}
+		indents[trimmed] = len(line) - len(trimmed)
+	}
+	for _, want := range []string{"✗ nil handler", "✗ duplicate route"} {
+		if _, ok := indents[want]; !ok {
+			t.Errorf("no headline %q of its own — the failure is nested in a sibling's:\n%s", want, report)
+		}
+	}
+	seen := map[int][]string{}
+	for headline, indent := range indents {
+		seen[indent] = append(seen[indent], headline)
+	}
+	if len(seen) > 1 {
+		t.Errorf("the joined failures sit at %d different indents, so one nests under another: %v\n%s", len(seen), seen, report)
+	}
+}

@@ -33,10 +33,36 @@ if [ "$indirect" != "0" ]; then
 fi
 
 # Invariant 2 — dig is imported by warren/di alone.
-offenders=$(grep -rl --include='*.go' 'go.uber.org/dig' . | grep -v '^\./di/' || true)
-if [ -n "$offenders" ]; then
+#
+# Two checks, because "imports dig" and "names dig" are different failures and
+# both matter. An IMPORT line outside warren/di is the invariant itself; a
+# MENTION in shipped code is how dig's wording leaks into a diagnostic, which
+# is the half a user actually sees.
+#
+# Amended 2026-08-09, when panic containment moved into warren/internal/panics.
+# The old check was one grep for the string in any .go file outside ./di/, and
+# it fired on the two places that ENFORCE the invariant rather than break it:
+# internal/panics' frame filter, whose whole job is to drop go.uber.org/dig
+# frames before a user sees them, and the tests across lifecycle, the root
+# package and internal/panics that assert a rendered diagnostic contains no
+# dig wording. Asserting an absence requires writing the absent thing down.
+# Narrowing this to imports plus non-test mentions keeps every failure the
+# check was written to catch: no package outside warren/di may import dig, and
+# no shipped file outside warren/di and warren/internal/panics may name it.
+imports=$(grep -rlE --include='*.go' '^[[:space:]]*([A-Za-z_][A-Za-z0-9_]* )?"go\.uber\.org/dig"$' . | grep -v '^\./di/' || true)
+if [ -n "$imports" ]; then
 	echo "invariant 2: go.uber.org/dig imported outside warren/di:"
-	echo "$offenders"
+	echo "$imports"
+	fail=1
+fi
+
+mentions=$(grep -rl --include='*.go' 'go.uber.org/dig' . \
+	| grep -v '^\./di/' | grep -v '^\./internal/panics/' | grep -v '_test\.go$' || true)
+if [ -n "$mentions" ]; then
+	echo "invariant 2: go.uber.org/dig named in shipped code outside warren/di:"
+	echo "$mentions"
+	echo "  Only warren/di wraps it, and only warren/internal/panics may name it —"
+	echo "  its frame filter exists to drop dig's frames before a user sees them."
 	fail=1
 fi
 

@@ -1,0 +1,15 @@
+✗ lifecycle hook panicked
+
+    send on closed channel
+
+  Hook "warren/broker/kafka" panicked during OnStop. The remaining hooks were
+  stopped anyway — shutdown does not abandon the drain because one hook
+  failed — and this is reported with whatever else failed on the way down.
+
+  A panic here is one of two things: a refusal Warren raises on purpose — the
+  message above says so when it is — or a bug in the hook. The resources this
+  hook owns may not have been released.
+
+  Where it came from:
+
+    <frames elided>

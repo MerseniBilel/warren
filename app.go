@@ -17,6 +17,7 @@ import (
 	"github.com/MerseniBilel/warren/app"
 	"github.com/MerseniBilel/warren/di"
 	"github.com/MerseniBilel/warren/health"
+	"github.com/MerseniBilel/warren/internal/panics"
 	"github.com/MerseniBilel/warren/lifecycle"
 	"github.com/MerseniBilel/warren/transport"
 	"github.com/MerseniBilel/warren/validate"
@@ -416,11 +417,25 @@ func (a *App) Start(ctx context.Context) error {
 		bopts = append(bopts, transport.WithTelemetry(telemetry))
 	}
 	b := transport.NewBuilder(bopts...)
+	// The containment is PER CONTROLLER, inside the inner loop, so several
+	// broken controllers report together — the property this step already
+	// claims, and the one an uncontained panic destroyed after the first one.
+	var panicked []error
 	for _, ep := range built {
 		r := b.For(ep.module)
 		for _, c := range ep.controllers {
-			c.Register(r)
+			if caught := panics.Do(func() { c.Register(r) }); caught != nil {
+				panicked = append(panicked, errRegisterPanicked(ep.module, c, caught))
+			}
 		}
+	}
+	if len(panicked) > 0 {
+		// The consequence checks are SKIPPED. A controller that panicked
+		// halfway through Register left a partial route table, so "no adapter
+		// serves protocol EVENT" and "a route nobody serves" are artefacts of
+		// the panic rather than independent facts — and printing them buries
+		// the one block the reader can act on under two they cannot.
+		return errors.Join(errors.Join(panicked...), b.Failures())
 	}
 	if err := b.Fill(table); err != nil {
 		return err
@@ -709,6 +724,33 @@ func errControllerNotRegistered(m Module, t reflect.Type, _ transport.Controller
 			"  and drop the warren.Eager — Controllers instantiates it already.",
 		m.name, m.declared, t, "New"+shortTypeName([]reflect.Type{t})))
 }
+
+// errRegisterPanicked presents a controller whose Register panicked at boot
+// step 5.
+//
+// It reads as a registration failure because that is what it is: this
+// controller's registration did not work, exactly as a duplicate route or a
+// method written into a pattern did not work, and one boot reports them
+// together. The stack matters here as much as it does for a constructor — the
+// usual cause is a nil field, and a nil dereference with no frames is
+// unfindable.
+func errRegisterPanicked(module string, c transport.Controller, caught *panics.Caught) error {
+	detail := fmt.Sprintf("%T panicked while module %q was registering its routes\n", c, module) +
+		"at boot step 5. The routes it had already registered are discarded and the\n" +
+		"boot is abandoned; no adapter was built and nothing listened.\n" +
+		"\n" +
+		"The usual cause is a controller field the constructor does not assign: the\n" +
+		"struct literal in NewController omits it, the field is nil, and Register\n" +
+		"hands that nil to a route. Check that every handler NewController takes is\n" +
+		"assigned to a field, and that every field Register reads is one of them."
+	// The bootstrapper's own frames are the plumbing that called Register.
+	return caught.Diagnostic("controller registration panicked", detail, selfPrefix)
+}
+
+// selfPrefix is this package's import path — the boot frames
+// errRegisterPanicked hides. The trailing dot matters: it must not match
+// warren/transport or warren/di, whose frames a reader may well need.
+const selfPrefix = "github.com/MerseniBilel/warren."
 
 // shortTypeName renders the first output's bare type name for the example
 // receiver in the diagnostic above — "*user.Controller" reads badly inside a

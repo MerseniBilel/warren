@@ -1,0 +1,12 @@
+✗ constructor panicked
+
+    warren: a deliberate refusal, raised while composing
+
+  di_test.newPanickingService panicked while the graph for scope "root" was being built.
+  A panic during boot is one of two things: a refusal Warren raises on
+  purpose — the message above says so when it is — or a bug in the
+  constructor. Either way the process never served a request.
+
+  Where it came from:
+
+    <frames elided>

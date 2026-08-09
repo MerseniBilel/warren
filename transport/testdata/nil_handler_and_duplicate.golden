@@ -1,0 +1,21 @@
+✗ route registration failed
+
+  ✗ nil handler
+
+      POST /users was registered with a nil handler
+        in module "user"
+
+    transport.Post was given a nil app.Handler[Req, Res]. The usual cause is a
+    controller field the constructor does not assign: the struct literal in
+    NewController omits it, so the field is nil and Register passes that nil
+    straight through.
+
+    Check that every handler NewController takes is assigned to a field, and
+    that every field Register reads is one of them.
+
+  ✗ duplicate route
+
+      GET /users/{id} is registered twice.
+
+    One registration would silently shadow the other — remove one, or give
+    them distinct patterns.

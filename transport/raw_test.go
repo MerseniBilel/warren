@@ -106,16 +106,22 @@ func TestRawRefusesEmptyPattern(t *testing.T) {
 	}
 }
 
-func TestRawNilHandlerPanicsAtRegistration(t *testing.T) {
+// TestRawNilHandlerIsARegistrationFailure — Raw's nil check was a panic for
+// the same unargued reason the typed ones were, in the same function shape,
+// three lines from the reg.fail its empty-pattern sibling above already uses.
+func TestRawNilHandlerIsARegistrationFailure(t *testing.T) {
 	t.Parallel()
 
 	defer func() {
-		if recover() == nil {
-			t.Fatal("a nil raw handler must panic at composition")
+		if r := recover(); r != nil {
+			t.Fatalf("a nil raw handler panicked: %v", r)
 		}
 	}()
 	b := transport.NewBuilder()
 	transport.Raw(b.For("user"), transport.ProtocolHTTP, "POST /uploads", nil)
+	if _, err := b.Table(); err == nil {
+		t.Fatal("a nil raw handler built a table")
+	}
 }
 
 // TestFillReusesTheBootTable is the seam boot step 5 needs: the Table is

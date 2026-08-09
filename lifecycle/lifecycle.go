@@ -17,12 +17,27 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/MerseniBilel/warren/internal/panics"
 )
 
 // Hook is one participant in the application lifecycle. OnStart runs in
 // dependency order during boot step 6; OnStop runs in the exact reverse
 // during shutdown step 10. A nil OnStart or OnStop makes a stop-only or
 // start-only hook; the nil side is skipped.
+//
+// A hook that PANICS is contained and behaves exactly as one that returns an
+// error. A panic in OnStart stops the already-started hooks in reverse, so
+// the rollback guarantee holds, and readiness never opens; a panic in OnStop
+// does not abandon the drain — the remaining hooks still stop and the panic
+// joins the returned errors. Either way the process exits through the
+// application's own error path with a "✗ lifecycle hook panicked" block, not
+// through a Go stack dump.
+//
+// A panic in a goroutine the hook SPAWNED is not Warren's to catch — Go
+// gives no one but that goroutine the chance — so a hook that starts a loop
+// recovers inside it or the process dies. This is the same goroutine whose
+// context OnStart's documentation below tells you how to derive.
 type Hook struct {
 	// Name identifies the hook in logs and in lifecycle errors.
 	Name string
@@ -266,12 +281,30 @@ func runHook(ctx context.Context, h Hook, fn func(context.Context) error, phase 
 	}
 
 	done := make(chan error, 1)
-	go func() { done <- fn(hctx) }()
+	go func() {
+		// The containment is INSIDE the goroutine because that is the only
+		// place the panic can be caught: it is raised on a stack Warren
+		// created, and the user's own main never sees it. Without this a
+		// panicking OnStart skipped the rollback three documents guarantee and
+		// a panicking OnStop abandoned the rest of the drain — the process
+		// died holding whatever the hooks below it had acquired.
+		var err error
+		if caught := panics.Do(func() { err = fn(hctx) }); caught != nil {
+			err = errHookPanicked(h.Name, phase, caught)
+		}
+		done <- err
+	}()
 
 	classify := func(err error) error {
+		var panicked *hookPanickedError
 		switch {
 		case err == nil:
 			return nil
+		case errors.As(err, &panicked):
+			// Already the diagnostic, and already the right classification:
+			// the goroutine RETURNED, so this is neither a timeout nor an
+			// abandonment, and wrapping it would bury the block.
+			return err
 		case errors.Is(err, context.DeadlineExceeded) && h.Timeout > 0 && ctx.Err() == nil:
 			// The hook's own deadline, not an expired parent propagating
 			// through.
@@ -325,6 +358,47 @@ func (e *hookFailedError) Unwrap() error { return e.cause }
 
 func errHookFailed(name, phase string, cause error) error {
 	return &hookFailedError{name: name, phase: phase, cause: cause}
+}
+
+// hookPanickedError is a hook that panicked rather than returning. Its
+// message is the whole rendered diagnostic — it is not wrapped in "hook %q
+// failed", because the block already says which hook, which phase, and what
+// the process did about it.
+type hookPanickedError struct {
+	name  string
+	phase string
+	text  string
+}
+
+func (e *hookPanickedError) Error() string { return e.text }
+
+// errHookPanicked renders a hook's panic as the boot- or drain-time
+// diagnostic. The two phases differ in one paragraph, and the difference is
+// the whole point: OnStart rolled back, OnStop did not abandon the rest.
+func errHookPanicked(name, phase string, caught *panics.Caught) error {
+	var detail string
+	if phase == "OnStop" {
+		detail = fmt.Sprintf("Hook %q panicked during OnStop. The remaining hooks were\n", name) +
+			"stopped anyway — shutdown does not abandon the drain because one hook\n" +
+			"failed — and this is reported with whatever else failed on the way down.\n" +
+			"\n" +
+			"A panic here is one of two things: a refusal Warren raises on purpose — the\n" +
+			"message above says so when it is — or a bug in the hook. The resources this\n" +
+			"hook owns may not have been released."
+	} else {
+		detail = fmt.Sprintf("Hook %q panicked during %s, so Warren stopped the hooks that had\n", name, phase) +
+			"already started, in reverse order, and the process never opened readiness.\n" +
+			"A hook that RETURNS an error gets the same rollback; this one did not get\n" +
+			"the chance to return.\n" +
+			"\n" +
+			"A panic here is one of two things: a refusal Warren raises on purpose — the\n" +
+			"message above says so when it is — or a bug in the hook. Either way the\n" +
+			"process never served a request."
+	}
+	// This package's own frames are the goroutine that ran the hook, which is
+	// never the answer to "where did this come from".
+	block := caught.Diagnostic("lifecycle hook panicked", detail, "github.com/MerseniBilel/warren/lifecycle.")
+	return &hookPanickedError{name: name, phase: phase, text: block.Error()}
 }
 
 type hookTimeoutError struct {
