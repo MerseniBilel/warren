@@ -7,8 +7,16 @@ import "time"
 // required value fails the boot naming the variable — never a nil-pointer
 // panic on the first request.
 type Config struct {
-	// Name is required: run with {{.EnvPrefix}}_NAME set.
-	Name string `config:"name" validate:"required"`
+	// Name defaults to the name this app was scaffolded under, so the first
+	// `go run ./cmd/{{.Name}}` works with no environment set at all.
+	//
+	// There is deliberately no `validate:"required"` on it: a field with a
+	// default can never be unset, so the tag could not fire. Note that
+	// setting {{.EnvPrefix}}_NAME to the EMPTY string does override the
+	// default with empty — warren/config counts an empty variable as set,
+	// because emptiness is a value — so `{{.EnvPrefix}}_NAME=$UNSET_VAR`
+	// leaves you a nameless app. Give it a real value per environment.
+	Name string `config:"name" default:"{{.Name}}"`
 
 	// Env is the deployment environment.
 	Env string `config:"env" default:"development"`

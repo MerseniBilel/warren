@@ -4,6 +4,7 @@ import (
 	stderrors "errors"
 	"reflect"
 	"runtime"
+	"runtime/debug"
 	"slices"
 	"strconv"
 	"strings"
@@ -138,11 +139,23 @@ func (c *container) Provide(constructor any, opts ...ProvideOption) error {
 	return nil
 }
 
-func (c *container) Invoke(fn any) error {
+func (c *container) Invoke(fn any) (err error) {
 	v := reflect.ValueOf(fn)
 	if !v.IsValid() || v.Kind() != reflect.Func {
 		return errNonConstructor(fn)
 	}
+
+	// A constructor may PANIC rather than return, and several of Warren's own
+	// composition functions do so deliberately. dig calls the constructor, so
+	// without this the panic leaves through dig's frames and invariant 2 is
+	// broken by a stack trace instead of a message. Converting it to an error
+	// also routes it through App.Run, which prints Warren's multi-line blocks
+	// the way every other boot failure is printed.
+	defer func() {
+		if r := recover(); r != nil {
+			err = errConstructorPanicked(c.name, r, string(debug.Stack()))
+		}
+	}()
 
 	// Pre-check the whole subgraph this call needs, so any resolution failure
 	// is Warren's diagnostic and anything left for dig to report is a

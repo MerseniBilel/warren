@@ -46,10 +46,43 @@ func TestNewScaffolds(t *testing.T) {
 	}
 	// The next steps must be printed: a scaffold you have to guess how to
 	// run is a scaffold nobody runs.
-	for _, want := range []string{"MYAPP_NAME", "go run ./cmd/myapp", "go test ./..."} {
+	for _, want := range []string{"go run ./cmd/myapp", "go test ./..."} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output does not tell the user how to run it (%q):\n%s", want, out)
 		}
+	}
+	// And they must be the steps that WORK. The printed line used to set
+	// MYAPP_NAME, a value the scaffolder itself chose; the generated config
+	// defaults it now, so asking for it would be asking the user to supply
+	// what the tool already knew.
+	if strings.Contains(out, "MYAPP_NAME") {
+		t.Errorf("the run step still demands a variable the config defaults:\n%s", out)
+	}
+}
+
+// TestNewOnPostgresPrintsTheStepsThatActuallyRunIt covers the other half of
+// the same defect: on --db postgres the printed steps stopped at `go run`,
+// and a user who followed them verbatim hit a boot failure on the DSN and
+// then, having supplied it, an empty schema. The DSN and the migration are
+// not optional extras — they are what stands between a fresh scaffold and a
+// service that answers.
+func TestNewOnPostgresPrintsTheStepsThatActuallyRunIt(t *testing.T) {
+	t.Parallel()
+
+	dir := filepath.Join(t.TempDir(), "shop")
+	out, err := run(t, "new", "shop", "--module", "example.com/shop", "--db", "postgres", "--dir", dir)
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	for _, want := range []string{"SHOP_DATABASE_URL", "go run ./cmd/migrate", "go run ./cmd/shop"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output omits a step the app cannot start without (%q):\n%s", want, out)
+		}
+	}
+	// Order matters: migrating after the app has started is the deploy
+	// mistake cmd/migrate's own comment exists to prevent.
+	if strings.Index(out, "go run ./cmd/migrate") > strings.Index(out, "go run ./cmd/shop") {
+		t.Errorf("the migration step is printed after the run step:\n%s", out)
 	}
 }
 

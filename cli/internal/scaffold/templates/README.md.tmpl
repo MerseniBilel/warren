@@ -19,7 +19,7 @@ Then:
 {{- if eq .Broker "kafka" }}
 export {{.EnvPrefix}}_KAFKA_BROKERS=localhost:9092
 {{- end }}
-{{.EnvPrefix}}_NAME={{.Name}} go run ./cmd/{{.Name}}
+go run ./cmd/{{.Name}}
 ```
 
 It listens on 8080; `{{.EnvPrefix}}_HTTP_PORT` moves it, which is what lets a
@@ -27,19 +27,22 @@ second replica run on the same host.
 
 It boots the module graph, opens the pool, starts the outbox relay and the
 notification consumer, opens readiness, and drains cleanly on SIGTERM.
-Without `{{.EnvPrefix}}_NAME` or `{{.EnvPrefix}}_DATABASE_URL`{{if eq .Broker "kafka"}} or
+Without `{{.EnvPrefix}}_DATABASE_URL`{{if eq .Broker "kafka"}} or
 `{{.EnvPrefix}}_KAFKA_BROKERS`{{end}} it fails at boot naming the variable — every
 error the framework can detect surfaces at boot, never on request 1.
+`{{.EnvPrefix}}_NAME` needs no value here: it defaults to `{{.Name}}`, so a
+fresh checkout runs. Set it per environment.
 {{- else }}
 
 ```bash
-{{.EnvPrefix}}_NAME={{.Name}} go run ./cmd/{{.Name}}
+go run ./cmd/{{.Name}}
 ```
 
 It boots the module graph, starts the outbox relay and the notification
-consumer, opens readiness, and drains cleanly on SIGTERM. Without
-`{{.EnvPrefix}}_NAME` it fails at boot naming the variable — every error the
-framework can detect surfaces at boot, never on request 1.
+consumer, opens readiness, and drains cleanly on SIGTERM. It needs no
+environment at all to start: `{{.EnvPrefix}}_NAME` defaults to `{{.Name}}`.
+Every error the framework *can* detect still surfaces at boot, never on
+request 1.
 {{- end }}
 
 ## Test it

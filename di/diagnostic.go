@@ -214,6 +214,14 @@ func errAmbiguous(t fmt.Stringer, scope string, providers []*provider) error {
 	fmt.Fprintf(&b, "    %s has %d providers visible from scope %q:\n", t, len(providers), scope)
 	for _, p := range providers {
 		fmt.Fprintf(&b, "      • %s — registered in scope %q at %s\n", p.name, p.scope.name, p.declarationSite())
+		// Two providers declared by the SAME module share one DeclaredAt —
+		// the NewModule line — so the location above is identical on both
+		// bullets and points at neither constructor. The definition site is
+		// the one thing that always differs, and it is where the reader is
+		// going anyway.
+		if p.site != "" && p.site != p.declarationSite() {
+			fmt.Fprintf(&b, "        defined at %s\n", p.site)
+		}
 	}
 	b.WriteString("\n  Keep one, or move the extra binding into the module that needs it.")
 	return &diagnostic{text: b.String()}
@@ -251,6 +259,112 @@ func errConstructorFailed(scope string, cause error) error {
 			"✗ constructor failed\n\n    %v\n\n  %s returned this error while the graph for scope %q was\n  being built. Fix the constructor, or the configuration it read.", cause, who, scope),
 		cause: cause,
 	}
+}
+
+// errConstructorPanicked presents a constructor that panicked rather than
+// returning an error.
+//
+// This is the path that escaped invariant 2 for a whole release. A panic
+// unwinds through dig's own frames, so a user who hit one of Warren's
+// DELIBERATE refusals — app.Chain's transaction-ordering panic, say — was
+// handed a stack trace whose middle nine frames were module-cache paths into
+// go.uber.org/dig, immediately after ten diagnostics that had told them
+// exactly what to fix. The refusal's message is excellent; the frames around
+// it undid it.
+//
+// The panic value is reproduced verbatim, because for a Warren refusal the
+// value IS the diagnostic — several paragraphs of it. The stack is kept too,
+// with the container's plumbing removed: a panic is as often a genuine bug in
+// the constructor (a nil map, an index) as a refusal, and a bug with no
+// frames is unfindable.
+func errConstructorPanicked(scope string, value any, stack string) error {
+	frames := cleanStack(stack)
+	who := "A constructor"
+	if len(frames) > 0 {
+		who = frames[0].fn
+	}
+
+	var b strings.Builder
+	b.WriteString("✗ constructor panicked\n\n")
+	for _, line := range strings.Split(strings.TrimRight(fmt.Sprint(value), "\n"), "\n") {
+		b.WriteString("    " + line + "\n")
+	}
+	fmt.Fprintf(&b, "\n  %s panicked while the graph for scope %q was being built.\n", who, scope)
+	b.WriteString("  A panic during boot is one of two things: a refusal Warren raises on\n")
+	b.WriteString("  purpose — the message above says so when it is — or a bug in the\n")
+	b.WriteString("  constructor. Either way the process never served a request.\n")
+	if len(frames) > 0 {
+		b.WriteString("\n  Where it came from:\n\n")
+		for _, f := range frames {
+			b.WriteString("    " + f.fn + "\n        " + f.at + "\n")
+		}
+	}
+	return &diagnostic{text: strings.TrimRight(b.String(), "\n")}
+}
+
+type stackFrame struct{ fn, at string }
+
+// shortFuncName drops the module path from a stack frame's function, leaving
+// the package and the function — "user/application.NewRegisterUserHandler"
+// rather than 60 characters of forge, owner and repository that are the same
+// on every line.
+func shortFuncName(fn string) string {
+	dot := strings.LastIndexByte(fn, '.')
+	if dot < 0 {
+		return fn
+	}
+	pkg := fn[:dot]
+	if slash := strings.LastIndexByte(pkg, '/'); slash >= 0 {
+		pkg = pkg[slash+1:]
+	}
+	return pkg + fn[dot:]
+}
+
+// cleanStack turns debug.Stack's output into the frames a user can act on.
+//
+// It drops three kinds of noise: the panic machinery (runtime.gopanic and the
+// deferred recover that captured this), dig's frames — which invariant 2
+// forbids showing — and this package's own. What is left starts at the code
+// that actually panicked.
+func cleanStack(stack string) []stackFrame {
+	lines := strings.Split(stack, "\n")
+	var out []stackFrame
+	// Frames come in pairs: a function line, then a tab-indented file:line.
+	for i := 0; i+1 < len(lines); i++ {
+		fn := lines[i]
+		at := strings.TrimSpace(lines[i+1])
+		if fn == "" || !strings.HasPrefix(lines[i+1], "\t") {
+			continue
+		}
+		i++ // the file:line belongs to this frame, never to the next
+		switch {
+		case strings.HasPrefix(fn, "go.uber.org/dig"), strings.Contains(at, "go.uber.org/dig"):
+		case strings.HasPrefix(fn, "panic("), strings.HasPrefix(fn, "runtime/debug.Stack"):
+		case strings.HasPrefix(fn, "runtime."), strings.HasPrefix(fn, "created by "):
+		case strings.HasPrefix(fn, "github.com/MerseniBilel/warren/di."):
+		// reflect is how the container calls a constructor at all. Those two
+		// frames sit between the caller and the constructor in every single
+		// trace and say nothing about this one.
+		case strings.HasPrefix(fn, "reflect."):
+		default:
+			// The argument list and the +0x.. offset are compiler detail that
+			// helps nobody reading a boot failure. Cut at the LAST paren and
+			// only when one closes the line: a method's frame is printed
+			// "warren.(*App).Start.func1(0x14000)", whose FIRST paren opens
+			// the receiver — cutting there left the frame reading "warren."
+			// and nothing else.
+			if strings.HasSuffix(fn, ")") {
+				if p := strings.LastIndexByte(fn, '('); p > 0 {
+					fn = fn[:p]
+				}
+			}
+			if p := strings.LastIndex(at, " +0x"); p > 0 {
+				at = at[:p]
+			}
+			out = append(out, stackFrame{fn: shortFuncName(fn), at: at})
+		}
+	}
+	return out
 }
 
 // errInternal is the sanitized fallback for a container failure this package

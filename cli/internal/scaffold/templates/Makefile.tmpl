@@ -6,12 +6,12 @@ migrate:
 	go run ./cmd/migrate
 
 run:
-	{{.EnvPrefix}}_NAME={{.Name}} go run ./cmd/{{.Name}}
+	go run ./cmd/{{.Name}}
 {{- else }}
 .PHONY: run test fmt vet
 
 run:
-	{{.EnvPrefix}}_NAME={{.Name}} go run ./cmd/{{.Name}}
+	go run ./cmd/{{.Name}}
 {{- end }}
 
 test:

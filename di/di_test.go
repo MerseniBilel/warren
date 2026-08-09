@@ -197,6 +197,45 @@ func TestAmbiguousBinding(t *testing.T) {
 	})
 }
 
+// TestAmbiguousBindingDistinguishesTheTwoProviders covers a field-test
+// finding: when both providers belong to the same module, every bullet
+// carried the module's own NewModule line, so the diagnostic printed the same
+// file:line twice. A location that is identical for both candidates is not a
+// location — it is noise shaped like one, and it sends a reader to a line
+// where neither constructor is written.
+func TestAmbiguousBindingDistinguishesTheTwoProviders(t *testing.T) {
+	t.Parallel()
+
+	root := di.New()
+	// Both providers declared by one module, exactly as warren.NewModule does
+	// it: one DeclaredAt for the whole Providers list.
+	if err := root.Provide(postgres.NewUserRepository, di.DeclaredAt("platform/module.go", 75)); err != nil {
+		t.Fatalf("first Provide: %v", err)
+	}
+	err := root.Provide(secondUserRepository, di.DeclaredAt("platform/module.go", 75))
+	if err == nil {
+		t.Fatal("second Provide of the same type in one scope succeeded")
+	}
+	got := err.Error()
+	if !strings.Contains(got, "secondUserRepository") {
+		t.Errorf("the diagnostic does not name the second provider:\n%s", got)
+	}
+	// The module line is still worth printing — it is where the Providers
+	// list that needs editing lives. What must ALSO be there is something
+	// that differs between the two.
+	if !strings.Contains(got, "di_test.go:") {
+		t.Errorf("neither bullet gives a location distinct from the module's:\n%s", got)
+	}
+	if strings.Count(got, "platform/module.go:75") == 2 && !strings.Contains(got, "postgres.go:") {
+		t.Errorf("both bullets carry the same location and nothing else:\n%s", got)
+	}
+	assertNoDigLeak(t, err)
+}
+
+// secondUserRepository is the rival binding: a distinct constructor, in a
+// distinct file, that the module declares on the same line as the first.
+func secondUserRepository() domain.UserRepository { return nil }
+
 type tDep struct{}
 
 type rootThing struct{}
@@ -871,3 +910,79 @@ func newFailingService() (*user.UserService, error) {
 }
 
 var errFailingService = stderrors.New("EOF")
+
+// TestAPanickingConstructorIsADiagnosticNotACrash covers the one path that
+// escaped invariant 2 for a whole release: a constructor that PANICS rather
+// than returning an error. dig calls the constructor, so the panic unwinds
+// through nine dig frames on its way out, and a user who composed
+// app.Transactional outside app.Retrying — a refusal Warren raises
+// deliberately — was reading module-cache paths into go.uber.org/dig to find
+// out what they had done.
+func TestAPanickingConstructorIsADiagnosticNotACrash(t *testing.T) {
+	t.Parallel()
+
+	root := di.New()
+	if err := root.Provide(newPanickingService); err != nil {
+		t.Fatalf("providing: %v", err)
+	}
+
+	_, err := di.Resolve[*user.UserService](root)
+	if err == nil {
+		t.Fatal("Resolve through a panicking constructor succeeded")
+	}
+	got := err.Error()
+	if !strings.Contains(got, "newPanickingService") {
+		t.Errorf("the diagnostic does not name the constructor that panicked:\n%s", got)
+	}
+	// The panic's own message is the whole point — for a Warren refusal it IS
+	// the diagnostic, several paragraphs of it.
+	if !strings.Contains(got, "a deliberate refusal") {
+		t.Errorf("the panic value was lost:\n%s", got)
+	}
+	// The user's own frame survives, or a genuine constructor bug — a nil map
+	// write, say — becomes unfindable.
+	if !strings.Contains(got, "di_test.go:") {
+		t.Errorf("the diagnostic drops the user's own stack frames:\n%s", got)
+	}
+	assertNoDigLeak(t, err)
+}
+
+// newPanickingService stands in for app.Chain's ordering refusal: a
+// composition function that panics from inside a constructor.
+func newPanickingService() *user.UserService {
+	panic("warren: a deliberate refusal, raised while composing")
+}
+
+// TestPanicFramesSurviveAMethodReceiver pins a defect found by running a real
+// scaffolded app rather than this test suite: a method's frame prints as
+// "warren.(*App).Start.func1(0x14000)", whose FIRST parenthesis opens the
+// RECEIVER. Cutting the argument list there left two frames rendering as the
+// bare word "warren." — a location naming no function at all.
+func TestPanicFramesSurviveAMethodReceiver(t *testing.T) {
+	t.Parallel()
+
+	root := di.New()
+	if err := root.Provide((&panickingBuilder{}).build); err != nil {
+		t.Fatalf("providing: %v", err)
+	}
+	if _, err := di.Resolve[*user.UserService](root); err == nil {
+		t.Fatal("Resolve through a panicking method succeeded")
+	} else {
+		got := err.Error()
+		if !strings.Contains(got, "panickingBuilder") {
+			t.Errorf("the receiver's frame lost its name:\n%s", got)
+		}
+		for _, line := range strings.Split(got, "\n") {
+			if strings.TrimSpace(line) == "di_test." || strings.TrimSpace(line) == "warren." {
+				t.Errorf("a frame rendered as a bare package name:\n%s", got)
+			}
+		}
+		assertNoDigLeak(t, err)
+	}
+}
+
+type panickingBuilder struct{}
+
+func (*panickingBuilder) build() *user.UserService {
+	panic("warren: a deliberate refusal from a method")
+}

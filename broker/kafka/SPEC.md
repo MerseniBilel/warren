@@ -428,7 +428,7 @@ drain-before-close ordering, and DLQ production. The suite reads
 group join; if so they are raised in the SUITE first and the drivers follow —
 never weakened in a driver to fit.
 
-## Open questions## Open questions
+## Open questions — ALL CLOSED by the rulings above, kept for the audit trail
 
 1. **`SASL(sasl.Mechanism)` puts a franz-go type in an exported signature.**
    `sasl.Mechanism` is `github.com/twmb/franz-go/pkg/sasl`. AGENT.md invariant 3

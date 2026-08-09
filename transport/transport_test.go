@@ -142,6 +142,45 @@ func TestDecodeFailureIsInvalid(t *testing.T) {
 	}
 }
 
+// TestDecodeFailureNamesTheFieldNotTheGoType pins the wire contract for a
+// type mismatch. encoding/json's own wording is
+//
+//	json: cannot unmarshal number into Go struct field RegisterUser.email of type string
+//
+// which puts an internal Go type name in a 400 body a stranger reads. The
+// repository diagnostics already hold to this rule — a NOT_FOUND names "the
+// value the caller asked by, never the Go type, which a client has no
+// business seeing" — and the codec was the one place that did not.
+func TestDecodeFailureNamesTheFieldNotTheGoType(t *testing.T) {
+	t.Parallel()
+
+	for _, codec := range []transport.Codec{transport.JSON(), transport.StrictJSON()} {
+		t.Run(codec.Name(), func(t *testing.T) {
+			tbl := build(t, &userController{})
+			invoke := tbl.HTTP()[0].Bind(codec)
+
+			_, err := invoke(context.Background(), []byte(`{"email":123,"name":"X"}`))
+			if !werrors.Is(err, werrors.CodeInvalid) {
+				t.Fatalf("err = %v, want INVALID", err)
+			}
+			got := err.Error()
+			for _, leak := range []string{"registerUser", "RegisterUser", "Go struct field", "cannot unmarshal"} {
+				if strings.Contains(got, leak) {
+					t.Errorf("the 400 body leaks %q to the client:\n%s", leak, got)
+				}
+			}
+			// Naming the offending field is the whole point of replacing the
+			// message — a 400 that says only "invalid" is worse than the leak.
+			if !strings.Contains(got, "email") {
+				t.Errorf("the diagnostic does not name the offending field:\n%s", got)
+			}
+			if !strings.Contains(got, "string") || !strings.Contains(got, "number") {
+				t.Errorf("the diagnostic says neither what was wanted nor what arrived:\n%s", got)
+			}
+		})
+	}
+}
+
 func TestValidationRunsBeforeTheHandler(t *testing.T) {
 	t.Parallel()
 

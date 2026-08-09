@@ -144,11 +144,11 @@ func newCmd() *cobra.Command {
 			}
 			abs, _ := filepath.Abs(opts.Dir)
 			_, err := fmt.Fprintf(cmd.OutOrStdout(),
-				"Created %s\n\n%s  cd %s\n  go mod tidy\n  %s_NAME=%s go run ./cmd/%s\n  go test ./...\n\n"+
+				"Created %s\n\n%s  cd %s\n  go mod tidy\n%s  go run ./cmd/%s\n  go test ./...\n\n"+
 					"It serves POST /users, /healthz and /readyz on :8080.\n"+
 					"README.md says what is there and what is not.\n",
 				abs, unpublishedNotice(opts.FrameworkPath), opts.Dir,
-				envPrefix(opts.Name), opts.Name, opts.Name)
+				firstRunSteps(opts), opts.Name)
 			return err
 		},
 	}
@@ -168,6 +168,27 @@ func newCmd() *cobra.Command {
 // the fix.
 //
 // Delete this when v0.1.0 is tagged and the require resolves on its own.
+// firstRunSteps is what has to happen between `go mod tidy` and `go run`.
+//
+// It used to be one line, `<PREFIX>_NAME=<name> go run ./cmd/<name>`, and it
+// was wrong twice over. The scaffolder already knows the app's name — making
+// the very first command a user types fail on a value the tool had in its
+// hand is a poor introduction — so the generated config now defaults it and
+// the variable is gone from here. And on a `--db postgres` project the line
+// omitted the two steps that actually stood between the user and a running
+// service: the DSN, and the migration that is a deploy step rather than a
+// boot hook. Following the printed steps verbatim failed on the next
+// variable instead.
+func firstRunSteps(opts scaffold.Options) string {
+	if opts.DB != "postgres" {
+		return ""
+	}
+	prefix := envPrefix(opts.Name)
+	return fmt.Sprintf(
+		"  export %s_DATABASE_URL='postgres://user:pass@localhost:5432/%s?sslmode=disable'\n"+
+			"  go run ./cmd/migrate\n", prefix, opts.Name)
+}
+
 func unpublishedNotice(frameworkPath string) string {
 	if frameworkPath != "" {
 		return ""

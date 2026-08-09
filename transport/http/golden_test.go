@@ -71,6 +71,10 @@ func TestErrorBodiesAreGolden(t *testing.T) {
 	record("no content", "DELETE", "/users/u-1", "")
 	record("validation", "POST", "/users", `{"name":"Bob"}`)
 	record("malformed body", "POST", "/users", `{not json`)
+	// Well-formed JSON, wrong type. Recorded because the wire text is the
+	// contract: encoding/json's own wording for this names an internal Go
+	// struct field, and a 400 a stranger reads must not.
+	record("wrong field type", "POST", "/users", `{"email":123}`)
 	record("invalid", "POST", "/fail", `{"code":"INVALID"}`)
 	record("not found", "POST", "/fail", `{"code":"NOT_FOUND"}`)
 	record("conflict", "POST", "/fail", `{"code":"CONFLICT"}`)

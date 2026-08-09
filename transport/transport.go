@@ -24,6 +24,7 @@ import (
 	"encoding/json"
 	stderrors "errors"
 	"fmt"
+	"io"
 	"reflect"
 	"runtime"
 	"strings"
@@ -90,6 +91,65 @@ type jsonCodec struct{}
 func (jsonCodec) Name() string                    { return "application/json" }
 func (jsonCodec) Decode(data []byte, v any) error { return json.Unmarshal(data, v) }
 func (jsonCodec) Encode(v any) ([]byte, error)    { return json.Marshal(v) }
+
+// decodeFailure restates a codec's error for a stranger reading a 400.
+//
+// encoding/json says "cannot unmarshal number into Go struct field
+// registerUser.email of type string", which names an unexported Go type on
+// the public wire. Warren holds every other diagnostic to the opposite rule —
+// a NOT_FOUND names the value the caller asked by, never the Go type — and
+// this was the one place that did not. The field name and the two JSON kinds
+// are the whole of what a client can act on; the Go type is what they cannot.
+//
+// It runs on the failure path only, so it costs the request budget nothing.
+func decodeFailure(err error) error {
+	var typeErr *json.UnmarshalTypeError
+	if stderrors.As(err, &typeErr) {
+		if typeErr.Field == "" {
+			return fmt.Errorf("the body must be %s, got %s", jsonKind(typeErr.Type), typeErr.Value)
+		}
+		return fmt.Errorf("field %q must be %s, got %s", typeErr.Field, jsonKind(typeErr.Type), typeErr.Value)
+	}
+	var syntaxErr *json.SyntaxError
+	if stderrors.As(err, &syntaxErr) {
+		// Kept verbatim, with the position added. A syntax error names JSON
+		// grammar and no Go type at all, so there is nothing here to hide —
+		// replacing it with a bare offset would have thrown away the only
+		// sentence that says WHAT was wrong.
+		return fmt.Errorf("%s (at byte %d)", err, syntaxErr.Offset)
+	}
+	if stderrors.Is(err, io.ErrUnexpectedEOF) || stderrors.Is(err, io.EOF) {
+		return stderrors.New("the body ends in the middle of a JSON value")
+	}
+	// What is left is this package's own wording — trailing data, an unknown
+	// member — which names JSON, never Go.
+	return err
+}
+
+// jsonKind names a Go type the way the wire format does, with its article, so
+// a client is told "must be a string" rather than the name of a Go kind they
+// cannot see.
+func jsonKind(t reflect.Type) string {
+	if t == nil {
+		return "a different type"
+	}
+	switch t.Kind() {
+	case reflect.String:
+		return "a string"
+	case reflect.Bool:
+		return "a boolean"
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64,
+		reflect.Float32, reflect.Float64:
+		return "a number"
+	case reflect.Slice, reflect.Array:
+		return "an array"
+	case reflect.Map, reflect.Struct:
+		return "an object"
+	default:
+		return "a different type"
+	}
+}
 
 // StrictJSON returns a codec that rejects a body carrying a member the target
 // type does not declare — so a misspelled field is a 400 naming it, not a 200
@@ -722,7 +782,7 @@ func buildInvoker[Req, Res any](c Codec, h app.Handler[Req, Res], rule func(*Req
 		var req Req
 		if len(raw) > 0 {
 			if err := c.Decode(raw, &req); err != nil {
-				return nil, errors.Invalid("body", err)
+				return nil, errors.Invalid("body", decodeFailure(err))
 			}
 		}
 		if len(setters) > 0 {

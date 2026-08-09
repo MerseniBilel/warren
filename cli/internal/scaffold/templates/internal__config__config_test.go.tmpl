@@ -2,7 +2,9 @@ package config_test
 
 import (
 	"os"
+{{- if eq .DB "postgres" }}
 	"strings"
+{{- end }}
 	"testing"
 	"time"
 
@@ -12,7 +14,6 @@ import (
 )
 
 func TestDefaults(t *testing.T) {
-	t.Setenv("{{.EnvPrefix}}_NAME", "{{.Name}}")
 {{- if eq .DB "postgres" }}
 	// Required, so it has to be set for the OTHER defaults to be reachable.
 	// The value is never connected to here — Load only reads and validates.
@@ -26,27 +27,61 @@ func TestDefaults(t *testing.T) {
 	if cfg.Env != "development" || cfg.Outbox.PollInterval != time.Second || cfg.Outbox.BatchSize != 100 {
 		t.Errorf("defaults not applied: %+v", cfg)
 	}
-}
-
-func TestNameIsRequired(t *testing.T) {
-	// Unset, not merely absent. The README tells you to run
-	// `{{.EnvPrefix}}_NAME={{.Name}} go run ./cmd/{{.Name}}`, so the variable
-	// is exported in exactly the shell this test runs in — and a test that
-	// passes only on a machine where it was never set is a test that fails
-	// for everyone who followed the instructions.
-	t.Setenv("{{.EnvPrefix}}_NAME", "")
+	// The point of the default: a checkout with no environment set still
+	// boots. Unset, not merely absent — a test that passes only on a machine
+	// where the variable was never exported is a test that fails for
+	// everyone who ran the app first.
 	if err := os.Unsetenv("{{.EnvPrefix}}_NAME"); err != nil {
 		t.Fatalf("unsetting: %v", err)
 	}
+	cfg, err = wconfig.Load[config.Config](wconfig.WithEnvPrefix("{{.EnvPrefix}}"))
+	if err != nil {
+		t.Fatalf("Load with no {{.EnvPrefix}}_NAME set: %v", err)
+	}
+	if cfg.Name != "{{.Name}}" {
+		t.Errorf("Name = %q with nothing set, want the scaffolded default %q", cfg.Name, "{{.Name}}")
+	}
+}
+
+// TestARequiredVariableNamesItself is the boot failure you are most likely to
+// meet, and it is worth knowing the shape of it: warren/config collects every
+// missing value and names the exact variable that supplies each one.
+func TestARequiredVariableNamesItself(t *testing.T) {
+{{- if eq .DB "postgres" }}
+	if err := os.Unsetenv("{{.EnvPrefix}}_DATABASE_URL"); err != nil {
+		t.Fatalf("unsetting: %v", err)
+	}
+	_, err := wconfig.Load[config.Config](wconfig.WithEnvPrefix("{{.EnvPrefix}}"))
+	if err == nil {
+		t.Fatal("Load succeeded without {{.EnvPrefix}}_DATABASE_URL")
+	}
+	if !strings.Contains(err.Error(), "{{.EnvPrefix}}_DATABASE_URL") {
+		t.Errorf("error does not name the variable: %v", err)
+	}
+{{- else }}
+	// Every field in this Config has a default, so there is no required
+	// variable to demonstrate yet. Add one — a required field with no
+	// `default` tag — and it fails the boot naming itself.
+	t.Skip("no required field in this configuration")
+{{- end }}
+}
+
+// TestAnEmptyVariableIsAValue documents a semantic that surprises people, so
+// it is pinned here rather than learned in production: warren/config treats a
+// variable that is SET BUT EMPTY as set. `{{.EnvPrefix}}_NAME=` therefore
+// overrides the default with the empty string rather than falling back to it
+// — and `{{.EnvPrefix}}_NAME=$SOME_UNSET_VAR` is that, in the shell's
+// favourite disguise.
+func TestAnEmptyVariableIsAValue(t *testing.T) {
+	t.Setenv("{{.EnvPrefix}}_NAME", "")
 {{- if eq .DB "postgres" }}
 	t.Setenv("{{.EnvPrefix}}_DATABASE_URL", "postgres://localhost:5432/{{.Name}}?sslmode=disable")
 {{- end }}
-	_, err := wconfig.Load[config.Config](wconfig.WithEnvPrefix("{{.EnvPrefix}}"))
-	if err == nil {
-		t.Fatal("Load succeeded without {{.EnvPrefix}}_NAME")
+	cfg, err := wconfig.Load[config.Config](wconfig.WithEnvPrefix("{{.EnvPrefix}}"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
 	}
-	// The diagnostic names the exact variable to set.
-	if !strings.Contains(err.Error(), "{{.EnvPrefix}}_NAME") {
-		t.Errorf("error does not name the variable: %v", err)
+	if cfg.Name != "" {
+		t.Errorf("Name = %q, want the explicitly empty value", cfg.Name)
 	}
 }
