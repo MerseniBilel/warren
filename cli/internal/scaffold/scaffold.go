@@ -334,7 +334,11 @@ func checkModulePath(path, name string) error {
 // Warren's modules are tagged in lockstep: core is vX.Y.Z and every adapter
 // is <module>/vX.Y.Z, which is why one string pins all six. TestDefaultVersionIsTagged
 // checks that against git rather than trusting this comment.
-const DefaultVersion = "v0.2.0"
+//
+// RELEASING: bump this line FIRST, commit, and tag that commit. Tagging first
+// leaves the tag's own source pinning the previous release — which is exactly
+// what happened at v0.2.1, and what that test caught within the minute.
+const DefaultVersion = "v0.2.1"
 
 // frameworkModules is every Warren module, as a path suffix. EVERY one, not
 // only those a given scaffold requires today: a replace for an unrequired
