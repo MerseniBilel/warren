@@ -1147,3 +1147,132 @@ func TestBothRepositoryDriversOfferTheSameSurface(t *testing.T) {
 		t.Errorf("methods = %v, want FindByID, Save and Delete", mem)
 	}
 }
+
+// TestGeneratedDeleteEnlistsItsAggregate — the generated Delete used to call
+// postgres.RequireTx, which checks for a transaction and nothing else, so the
+// aggregate's events were never enlisted. Measured against real Postgres:
+// load, Raise(Closed{}), Delete inside uow.Do published ONE outbox row where
+// persistence.Write around the same DELETE published two. The row went, the
+// request answered 204, and the fact evaporated with no error, no outbox row
+// and no log line.
+//
+// The assertions are on the CALL, never on a word in a comment: this project
+// has twice paid for a test that passed because a template's prose mentioned
+// the thing it was not doing.
+func TestGeneratedDeleteEnlistsItsAggregate(t *testing.T) {
+	t.Parallel()
+
+	for _, driver := range []string{"memory", "postgres"} {
+		t.Run(driver, func(t *testing.T) {
+			t.Parallel()
+			dir := app(t)
+			if _, err := generate.Entity(generate.Options{Dir: dir, Module: "user", Name: "Order"}); err != nil {
+				t.Fatalf("Entity: %v", err)
+			}
+			if _, err := generate.Repository(generate.Options{
+				Dir: dir, Module: "user", Name: "Order", Driver: driver,
+			}); err != nil {
+				t.Fatalf("Repository: %v", err)
+			}
+			src := read(t, dir, "internal/modules/user/infrastructure/order_repository.go")
+
+			// The root, not an id. Load-then-delete inside Delete cannot fix
+			// this: the pending events live on the CALLER's instance, so a
+			// re-loaded aggregate is a different object with zero events.
+			if !strings.Contains(src, "func (r *OrderRepository) Delete(ctx context.Context, order *domain.Order) error") {
+				t.Errorf("Delete does not take the aggregate root:\n%s", src)
+			}
+			// The memory driver delegates to persistence.MemoryRepository,
+			// whose Delete Tracks — the same shape its Save already has. The
+			// Postgres one makes the write itself, so it is the one that has
+			// to carry persistence.Write.
+			if driver == "postgres" && !strings.Contains(src, `persistence.Write(ctx, "delete order", order,`) {
+				t.Errorf("Delete does not go through persistence.Write:\n%s", src)
+			}
+			if driver == "memory" && !strings.Contains(src, "return r.inner.Delete(ctx, order)") {
+				t.Errorf("Delete does not hand the aggregate to the enlisting driver:\n%s", src)
+			}
+			// RequireTx appears nowhere else in either template, so this is a
+			// call-level assertion and not a comment-level one.
+			if strings.Contains(src, "postgres.RequireTx") {
+				t.Errorf("Delete still uses postgres.RequireTx, which makes the transaction check and drops the enlistment:\n%s", src)
+			}
+			// The comment that told the user to declare the port method has
+			// to agree with the method that was generated.
+			if strings.Contains(src, "Delete(ctx context.Context, id "+"OrderID) error") {
+				t.Errorf("the port-declaration comment still names the id-shaped Delete:\n%s", src)
+			}
+		})
+	}
+}
+
+// TestGeneratedRepositoryHasAContractTest — `go test ./...` was green over a
+// repository with persistence.Write deleted, because the only generated test
+// was the module boot test and it skips without a DSN. persistence.RunContract
+// asserts that Save and Delete ENLIST; nothing generated called it.
+func TestGeneratedRepositoryHasAContractTest(t *testing.T) {
+	t.Parallel()
+
+	for _, driver := range []string{"memory", "postgres"} {
+		t.Run(driver, func(t *testing.T) {
+			t.Parallel()
+			dir := app(t)
+			if _, err := generate.Entity(generate.Options{Dir: dir, Module: "user", Name: "Order"}); err != nil {
+				t.Fatalf("Entity: %v", err)
+			}
+			if _, err := generate.Repository(generate.Options{
+				Dir: dir, Module: "user", Name: "Order", Driver: driver,
+			}); err != nil {
+				t.Fatalf("Repository: %v", err)
+			}
+			src := read(t, dir, "internal/modules/user/infrastructure/order_repository_test.go")
+			if !strings.Contains(src, "persistence.RunContract(") {
+				t.Errorf("the generated test does not run the contract suite:\n%s", src)
+			}
+			if !strings.Contains(src, "persistence.RunVersionedContract(") {
+				t.Errorf("the generated entity embeds VersionedRoot, so the versioned suite must run too:\n%s", src)
+			}
+		})
+	}
+}
+
+// TestPostgresContractTestSkipNamesTheGuarantee — "this test needs a database"
+// teaches people to ignore red; it does not tell them what stopped being
+// checked. The skip has to name the guarantee that went unverified.
+func TestPostgresContractTestSkipNamesTheGuarantee(t *testing.T) {
+	t.Parallel()
+
+	dir := app(t)
+	if _, err := generate.Entity(generate.Options{Dir: dir, Module: "user", Name: "Order"}); err != nil {
+		t.Fatalf("Entity: %v", err)
+	}
+	if _, err := generate.Repository(generate.Options{
+		Dir: dir, Module: "user", Name: "Order", Driver: "postgres",
+	}); err != nil {
+		t.Fatalf("Repository: %v", err)
+	}
+	src := read(t, dir, "internal/modules/user/infrastructure/order_repository_test.go")
+	skip := skipMessage(src)
+	if skip == "" {
+		t.Fatalf("the generated postgres test has no t.Skip:\n%s", src)
+	}
+	for _, want := range []string{"enlist", "contract"} {
+		if !strings.Contains(strings.ToLower(skip), want) {
+			t.Errorf("the skip message does not name what went unverified (%q missing):\n%s", want, skip)
+		}
+	}
+}
+
+// skipMessage returns the text of the first t.Skip in src.
+func skipMessage(src string) string {
+	i := strings.Index(src, "t.Skip(")
+	if i < 0 {
+		return ""
+	}
+	rest := src[i:]
+	end := strings.Index(rest, "\n\t\t}")
+	if end < 0 {
+		end = len(rest)
+	}
+	return rest[:end]
+}

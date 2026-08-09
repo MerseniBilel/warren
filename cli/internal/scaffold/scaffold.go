@@ -168,10 +168,11 @@ type driverTemplate struct {
 }
 
 var driverOnly = map[string]driverTemplate{
-	"cmd__migrate__main.go.tmpl":                                       {db: "postgres"},
-	"db__migrations__00001_users.sql.tmpl":                             {db: "postgres"},
-	"internal__platform__module.go.tmpl":                               {db: "memory"},
-	"internal__modules__user__infrastructure__user_repository.go.tmpl": {db: "memory"},
+	"cmd__migrate__main.go.tmpl":                                            {db: "postgres"},
+	"db__migrations__00001_users.sql.tmpl":                                  {db: "postgres"},
+	"internal__platform__module.go.tmpl":                                    {db: "memory"},
+	"internal__modules__user__infrastructure__user_repository.go.tmpl":      {db: "memory"},
+	"internal__modules__user__infrastructure__user_repository_test.go.tmpl": {db: "memory"},
 
 	// The postgres variants land at the SAME paths as the memory ones they
 	// replace, so nothing downstream — g repository, lint arch, the reader —
@@ -181,6 +182,12 @@ var driverOnly = map[string]driverTemplate{
 	},
 	"internal__modules__user__infrastructure__user_repository_postgres.go.tmpl": {
 		db: "postgres", as: "internal__modules__user__infrastructure__user_repository.go.tmpl",
+	},
+	// The contract test travels with the repository it certifies, at the same
+	// path under either driver: a scaffold whose Save loses events is a green
+	// build without it, which is the gap this pair closes.
+	"internal__modules__user__infrastructure__user_repository_postgres_test.go.tmpl": {
+		db: "postgres", as: "internal__modules__user__infrastructure__user_repository_test.go.tmpl",
 	},
 }
 

@@ -1,0 +1,54 @@
+package infrastructure
+
+import (
+	"testing"
+	"time"
+
+	"github.com/MerseniBilel/warren/persistence"
+
+	"{{.Module}}/internal/modules/user/domain"
+)
+
+// TestUserRepositoryContract runs the framework's own repository contract
+// against this implementation.
+//
+// It is scaffolded because passing it is not optional and failing to run it
+// is invisible. persistence.Track — and persistence.Write, in the Postgres
+// variant of this file — cannot make itself be called: a Save that writes
+// directly compiles, vets, serves traffic, answers 201, and loses every event
+// the aggregate raised, with no error, no outbox row and no log line.
+// RunContract asserts that Save and Delete ENLIST the aggregate, which is the
+// one rule in this package no compiler checks.
+//
+// Delete it and you are back to a green build over a repository that silently
+// drops events. Edit the repository and re-run this first.
+//
+// It is an in-package test on purpose: NewUserRepository returns the domain
+// PORT, and the contract covers the whole Repository surface — including the
+// Delete the port does not declare.
+func TestUserRepositoryContract(t *testing.T) {
+	t.Parallel()
+	persistence.RunContract(t, newUserRepositoryForContract, newUserForContract,
+		domain.UserID("contract-1"), domain.UserID("contract-2"))
+}
+
+// newUserRepositoryForContract builds a fresh store for one subtest. The type
+// assertion is what gives the suite the full Repository surface back after the
+// constructor narrowed it to the domain port.
+func newUserRepositoryForContract(t *testing.T) (persistence.UnitOfWork, persistence.Repository[*domain.User, domain.UserID]) {
+	t.Helper()
+	uow := persistence.NewMemoryUnitOfWork()
+	return uow, NewUserRepository(uow).(*UserRepository)
+}
+
+// newUserForContract builds a user with a pending event. The pending event is
+// the measurement: the suite asserts it is gone after a commit, which is only
+// true if the repository enlisted the aggregate.
+//
+// The address is derived from the identity so that two aggregates never share
+// one. Email is unique — that is what makes a duplicate registration a
+// CONFLICT — and a fixed address would fail the suite for a reason that has
+// nothing to do with what it is measuring.
+func newUserForContract(id domain.UserID) *domain.User {
+	return domain.NewUser(id, domain.Email(id.String()+"@example.test"), id.String(), time.Unix(1, 0).UTC())
+}

@@ -23,6 +23,7 @@ var Module = sync.OnceValue(func() warren.Module {
 		warren.Controllers(NewController),
 		warren.Providers(
 			infrastructure.NewInvoiceRepository,
+			infrastructure.NewPaymentRepository,
 			application.NewVoidInvoiceHandler,
 			application.NewOnPaymentReceivedHandler,
 			newPaymentReceivedSubscription,

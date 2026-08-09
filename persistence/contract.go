@@ -118,15 +118,47 @@ func RunContract[T domain.Root[K], K domain.ID](t *testing.T, newDriver NewDrive
 			t.Fatalf("Do: %v", err)
 		}
 		if err := uow.Do(context.Background(), func(ctx context.Context) error {
-			return repo.Delete(ctx, agg.ID())
+			return repo.Delete(ctx, agg)
 		}); err != nil {
 			t.Fatalf("Delete: %v", err)
 		}
 		err := uow.Do(context.Background(), func(ctx context.Context) error {
-			return repo.Delete(ctx, agg.ID())
+			return repo.Delete(ctx, agg)
 		})
 		if !errors.Is(err, errors.CodeNotFound) {
 			t.Errorf("second Delete = %v, want CodeNotFound — silent success hides bugs", err)
+		}
+	})
+
+	// DELETE ENLISTS, FOR THE SAME REASON SAVE DOES.
+	//
+	// Removing an aggregate is exactly when OrderCancelled or AccountClosed is
+	// raised, and those events live on the caller's instance. A Delete that
+	// does not enlist drops them: the row goes, the request answers 204, and
+	// the fact evaporates with no error, no outbox row and no log line.
+	//
+	// This is why Delete takes the ROOT and not an identifier. Re-loading the
+	// aggregate inside Delete cannot repair it — the reloaded object is a
+	// different object with zero pending events, so enlisting THAT publishes
+	// nothing.
+	t.Run("Delete enlists the aggregate it removes", func(t *testing.T) {
+		uow, repo := newDriver(t)
+		if err := uow.Do(context.Background(), func(ctx context.Context) error {
+			return repo.Save(ctx, newAggregate(first))
+		}); err != nil {
+			t.Fatalf("Do: %v", err)
+		}
+		// A SECOND instance, still carrying pending events — the shape of a
+		// handler that loaded the aggregate, raised its farewell fact, and
+		// then asked for the row to go.
+		victim := newAggregate(first)
+		if err := uow.Do(context.Background(), func(ctx context.Context) error {
+			return repo.Delete(ctx, victim)
+		}); err != nil {
+			t.Fatalf("Delete: %v", err)
+		}
+		if pending := victim.PullEvents(); len(pending) != 0 {
+			t.Errorf("%d event(s) were still pending after the delete committed — Delete did not enlist the aggregate, so the fact it was deleted never reached the outbox", len(pending))
 		}
 	})
 
@@ -280,7 +312,10 @@ func RunVersionedContract[T domain.Root[K], K domain.ID](t *testing.T, newDriver
 		}
 	})
 
-	t.Run("a stale write is CONFLICT, not a silent overwrite", func(t *testing.T) {
+	// The name used to say CONFLICT while the assertion said CONTENTION, which
+	// is the same drift the port's own doc comment carried. A subtest whose
+	// name contradicts its assertion is read far more often than it is run.
+	t.Run("a stale write is CONTENTION, not a silent overwrite", func(t *testing.T) {
 		uow, repo := newDriver(t)
 		id := next()
 		if err := save(uow, repo, newAggregate(id)); err != nil {

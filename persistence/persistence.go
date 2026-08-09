@@ -35,17 +35,36 @@ type Repository[T domain.Root[K], K domain.ID] interface {
 	//
 	// If root implements domain.Versioned, the write is CONDITIONAL on the
 	// version the aggregate was loaded at. A write whose version the store has
-	// moved past returns CodeConflict and changes nothing — it is the only
+	// moved past returns CodeContention and changes nothing — it is the only
 	// thing standing between two concurrent requests and a lost update, and
-	// RunVersionedContract certifies it. An aggregate that does not implement
-	// domain.Versioned is written unconditionally, as before.
+	// RunVersionedContract certifies the code, not merely that it errored. An
+	// aggregate that does not implement domain.Versioned is written
+	// unconditionally, as before.
+	//
+	// CONTENTION and not CONFLICT, and the difference is not cosmetic: this
+	// port doc said CodeConflict while errors.go, the postgres driver, the
+	// memory driver and warren.md §3.3 all said CONTENTION — in the first
+	// place a driver author reads. Nothing was written, so the next attempt
+	// re-reads and usually wins; app.Retrying covers CONTENTION and does not
+	// cover CONFLICT, and on a CONSUMER the CONFLICT column ACKS, which
+	// destroys the message with its work not done. An INSERT that collides
+	// with an existing row is the other answer — that one really is
+	// CodeConflict, because a retry finds the row still there for ever.
 	Save(ctx context.Context, root T) error
 
 	// Delete removes the aggregate, or returns CodeNotFound. Deleting what
 	// is not there is an error rather than a silent success: an idempotent
 	// replay acks on NOT_FOUND anyway (§2.6), and succeeding silently hides
 	// bugs.
-	Delete(ctx context.Context, id K) error
+	//
+	// It takes the ROOT, not an identifier, and enlists it exactly as Save
+	// does. Removing an aggregate is precisely when OrderCancelled or
+	// AccountClosed is raised, and those events live on the caller's
+	// instance. Taking an id cannot be repaired by loading the aggregate
+	// inside Delete: the reloaded object is a DIFFERENT object with zero
+	// pending events, so enlisting it publishes nothing. The contract suite
+	// asserts the enlistment.
+	Delete(ctx context.Context, root T) error
 }
 
 // UnitOfWork runs a function inside one transaction and makes the state that
@@ -146,7 +165,22 @@ func Track(ctx context.Context, aggregates ...domain.Aggregate) {
 // the write, and a separate statement is a statement that can be deleted. A
 // field test deleted it: the row committed, the request returned 201, and the
 // event evaporated with no error, no outbox row and no log line — the exact
-// loss the outbox subsystem exists to prevent. There is now no such line.
+// loss the outbox subsystem exists to prevent.
+//
+// Be precise about what that buys, because the earlier wording ("Write is
+// rule 1 and rule 3 fused, so there is no longer a line to delete") claimed
+// more than is true. What Write guarantees is that it CANNOT BE HALF
+// PERFORMED: every call checks the transaction before the write and enlists
+// after it, and no call site can keep one half and drop the other. What it
+// cannot do is make itself be called. A repository whose Save runs the SQL
+// directly compiles, passes `go vet`, serves traffic, and loses every event —
+// deleting the whole call is as easy as deleting the old Track line was.
+//
+// The thing that catches THAT is the contract suite: persistence.RunContract
+// asserts a driver's Save enlists, and `warren g repository` now generates a
+// test that runs it, so a repository that drops Write goes red instead of
+// green. A lint rule is deferred on capability, not on precision — `warren
+// lint arch` is import-graph only by design.
 //
 //	func (r *UserRepository) Save(ctx context.Context, u *domain.User) error {
 //	    return persistence.Write(ctx, "user.Save", u, func(ctx context.Context) error {

@@ -377,8 +377,13 @@ var ErrNoRows = pgx.ErrNoRows
 type txKey struct{}
 
 // RequireTx returns a diagnostic unless a Postgres transaction is in scope on
-// ctx. Every repository Save and Delete calls it first, and so does
-// Store.Append.
+// ctx. It is the aggregate-free half of the rule: Store.Append and any write
+// that carries no root call it directly.
+//
+// A repository Save or Delete does NOT call it. Those go through
+// persistence.Write, which makes this same check AND enlists the aggregate —
+// the two were separate statements until a field test deleted the second one
+// and the row committed while the event evaporated.
 //
 // Reads outside UnitOfWork.Do are fine and go to the pool — the persistence
 // contract suite depends on it. Writes are not: the row would autocommit

@@ -725,3 +725,52 @@ func TestWriteRefusesAndEnlists(t *testing.T) {
 		}
 	})
 }
+
+// TestVersionedContractReturnsContention pins the CODE a lost versioned write
+// carries, not merely that it errored.
+//
+// The port's own doc comment promised CodeConflict while errors.go, the
+// postgres driver, the memory driver and warren.md §3.3 all said CONTENTION —
+// and the doc comment is the first place a driver author reads. The two codes
+// are different columns of the error table, so getting it wrong is not
+// cosmetic: app.Retrying covers CONTENTION and not CONFLICT, and on a consumer
+// the CONFLICT column ACKS, destroying the message with its work not done.
+func TestVersionedContractReturnsContention(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	uow := persistence.NewMemoryUnitOfWork()
+	repo := persistence.NewMemoryRepository[*payment, orderID](uow)
+	save := func(p *payment) error {
+		return uow.Do(ctx, func(ctx context.Context) error { return repo.Save(ctx, p) })
+	}
+
+	if err := save(newPayment("lost-update", 1)); err != nil {
+		t.Fatalf("first save: %v", err)
+	}
+	one, err := repo.FindByID(ctx, "lost-update")
+	if err != nil {
+		t.Fatalf("FindByID: %v", err)
+	}
+	two, err := repo.FindByID(ctx, "lost-update")
+	if err != nil {
+		t.Fatalf("FindByID: %v", err)
+	}
+	if err := save(one); err != nil {
+		t.Fatalf("the first writer must win: %v", err)
+	}
+
+	err = save(two)
+	if err == nil {
+		t.Fatal("the second writer committed from a version the store had moved past — that is the lost update the version exists to prevent")
+	}
+	if !werrors.Is(err, werrors.CodeContention) {
+		t.Errorf("the loser got %v, want CodeContention — nothing was written, so app.Retrying must re-run the handler", err)
+	}
+	// The negative half is the one that has teeth. Asserting CONTENTION alone
+	// would still pass if the two codes were aliases, and CONFLICT is exactly
+	// what the port doc used to promise.
+	if werrors.Is(err, werrors.CodeConflict) {
+		t.Errorf("the loser got %v, which is ALSO CodeConflict — a consumer acks that code, so the message would be destroyed with its work not done", err)
+	}
+}

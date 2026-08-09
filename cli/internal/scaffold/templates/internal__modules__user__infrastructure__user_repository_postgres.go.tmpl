@@ -19,13 +19,16 @@ import (
 //
 // Two rules hold it together:
 //
-//  1. persistence.Write around a write that carries an aggregate. It refuses
-//     outside a unit of work — where the row would autocommit while the
-//     aggregate's events stayed pending on an object about to go out of
-//     scope — and it enlists the aggregate on success, which is what puts
-//     its events in the same commit. A write with NO aggregate (Delete) uses
-//     postgres.RequireTx instead, which makes the first check and not the
-//     second.
+//  1. persistence.Write around EVERY write — Save and Delete alike. It
+//     refuses outside a unit of work — where the row would autocommit while
+//     the aggregate's events stayed pending on an object about to go out of
+//     scope — and it enlists the aggregate on success, which is what puts its
+//     events in the same commit. Delete used to be exempted as "a write with
+//     no aggregate", behind postgres.RequireTx, which makes the first check
+//     and not the second; that premise was false. Deleting an aggregate is
+//     exactly when the farewell fact is raised, and measured against real
+//     Postgres the exemption published ONE event where the same DELETE under
+//     persistence.Write published two.
 //  2. r.db(ctx) for the handle — never a stored pool. It returns the ambient
 //     transaction if one is in scope and the pool otherwise, so a read works
 //     outside a unit of work and a write does not.
@@ -34,6 +37,11 @@ import (
 // write". A field test deleted that one line and the service returned 201
 // with the event silently gone. Write is rule 1 and rule 3 fused, so there is
 // no longer a line to delete.
+//
+// Write still cannot make itself be CALLED, though — a Save that runs the SQL
+// directly compiles, vets, serves traffic and loses every event. The
+// generated user_repository_test.go is what catches that: it runs
+// persistence.RunContract, which asserts that Save and Delete enlist. Keep it.
 //
 // This aggregate is NOT versioned: uniqueness on email is what makes a
 // duplicate registration a CONFLICT, and there is no read-modify-write to
@@ -106,6 +114,36 @@ func (r *UserRepository) Save(ctx context.Context, u *domain.User) error {
 		}
 		if n == 0 {
 			return werrors.Conflict("user %s is already registered", u.Email)
+		}
+		return nil
+	})
+}
+
+// Delete removes the user, and enlists it. The domain's UserRepository port
+// does NOT declare this — see the note on the in-memory implementation. Add
+// `Delete(ctx context.Context, u *User) error` to the port when you need it.
+//
+// It takes the AGGREGATE, not an identifier, and goes through
+// persistence.Write for the same reason Save does. Deleting a user is exactly
+// when UserClosed or UserDeactivated is raised, and that event lives on the
+// object the caller is holding:
+//
+//	u.Close()                    // raises the fact
+//	return r.repo.Delete(ctx, u) // the row goes, the fact is published
+//
+// Loading the user in here instead would not help — that would be a different
+// object with no pending events, and enlisting it would publish nothing.
+func (r *UserRepository) Delete(ctx context.Context, u *domain.User) error {
+	return persistence.Write(ctx, "user.Delete", u, func(ctx context.Context) error {
+		// Exec returns the rows affected, and a DELETE that matched nothing is
+		// a NOT_FOUND — the persistence contract suite deletes twice and
+		// requires the second to fail. Silent success hides bugs.
+		n, err := r.db(ctx).Exec(ctx, `DELETE FROM users WHERE id = $1`, string(u.ID()))
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return werrors.NotFound("user", u.ID())
 		}
 		return nil
 	})

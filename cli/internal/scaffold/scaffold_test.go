@@ -43,6 +43,7 @@ func TestNewWritesTheWholeTree(t *testing.T) {
 		"internal/modules/user/application/register_user.go",
 		"internal/modules/user/application/register_user_test.go",
 		"internal/modules/user/infrastructure/user_repository.go",
+		"internal/modules/user/infrastructure/user_repository_test.go",
 		"internal/modules/notification/module.go",
 		"internal/modules/notification/application/on_user_registered.go",
 	}
@@ -556,4 +557,96 @@ func TestEveryRequiredFrameworkModuleHasAReplace(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestScaffoldedRepositoryCarriesItsContractTest — `warren new` emits the
+// first repository every user reads, and until 2026-08-09 it emitted no
+// contract test beside it.
+//
+// `warren g repository` generates persistence.RunContract with every
+// repository precisely because persistence.Write cannot make itself be
+// called: a Save or a Delete that runs its statement directly compiles, vets,
+// serves traffic, answers 201 — and loses every event the aggregate raised,
+// with no error, no outbox row and no log line. The scaffold had exactly that
+// gap, in the one repository a new user edits first.
+//
+// Every assertion here is on a CALL, never on a word in a comment. The
+// templates NAME persistence.Write and postgres.RequireTx in prose, and a
+// substring check over the raw file reads that prose as wiring — a mistake
+// this project has already paid for twice.
+func TestScaffoldedRepositoryCarriesItsContractTest(t *testing.T) {
+	t.Parallel()
+
+	const repoTest = "internal/modules/user/infrastructure/user_repository_test.go"
+	const repoFile = "internal/modules/user/infrastructure/user_repository.go"
+
+	for _, db := range []string{"memory", "postgres"} {
+		t.Run(db, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			if err := scaffold.New(scaffold.Options{
+				Dir: dir, Name: "app", ModulePath: "example.com/app", Version: "v0.1.0", DB: db,
+			}); err != nil {
+				t.Fatalf("New --db %s: %v", db, err)
+			}
+
+			test := stripComments(read(t, dir, repoTest))
+			if !strings.Contains(test, "persistence.RunContract(") {
+				t.Errorf("--db %s scaffolds no contract test — a hand-edited Save that drops persistence.Write is invisible:\n%s", db, test)
+			}
+
+			// Delete takes the ROOT. Pending events live on the caller's
+			// instance, so a Delete taking an id could not enlist them even if
+			// it tried: the aggregate it reloaded is a different object with
+			// nothing pending.
+			repo := stripComments(read(t, dir, repoFile))
+			del := funcBody(t, repo, "func (r *UserRepository) Delete(")
+			if !strings.Contains(del, "u *domain.User") {
+				t.Errorf("--db %s: Delete does not take the aggregate root:\n%s", db, del)
+			}
+			if db != "postgres" {
+				return
+			}
+
+			// The postgres write path: persistence.Write, which refuses outside
+			// a unit of work AND enlists. postgres.RequireTx makes only the
+			// first check, and a Delete behind it publishes nothing.
+			for _, path := range []string{
+				"func (r *UserRepository) Save(",
+				"func (r *UserRepository) Delete(",
+			} {
+				body := funcBody(t, repo, path)
+				if !strings.Contains(body, "persistence.Write(") {
+					t.Errorf("%s does not call persistence.Write — its events never reach the outbox:\n%s", path, body)
+				}
+				if strings.Contains(body, "postgres.RequireTx(") {
+					t.Errorf("%s writes behind postgres.RequireTx, which checks for a transaction but does NOT enlist:\n%s", path, body)
+				}
+			}
+
+			// A skip that reads like an environment problem is a skip nobody
+			// acts on: it must name the guarantee that went unverified.
+			skip := read(t, dir, repoTest)
+			for _, want := range []string{"did NOT run", "ENLIST"} {
+				if !strings.Contains(skip, want) {
+					t.Errorf("the no-DSN skip does not say what stopped being checked (%q missing):\n%s", want, skip)
+				}
+			}
+		})
+	}
+}
+
+// funcBody returns the source of the function whose declaration starts with
+// sig, so an assertion about one method cannot be satisfied by another.
+func funcBody(t *testing.T, src, sig string) string {
+	t.Helper()
+	i := strings.Index(src, sig)
+	if i < 0 {
+		t.Fatalf("no %s in:\n%s", sig, src)
+	}
+	rest := src[i:]
+	if j := strings.Index(rest, "\n}\n"); j >= 0 {
+		return rest[:j+3]
+	}
+	return rest
 }

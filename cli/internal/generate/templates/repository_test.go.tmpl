@@ -1,0 +1,62 @@
+package infrastructure
+
+import (
+	"testing"
+	"time"
+
+	"github.com/MerseniBilel/warren/persistence"
+
+	"{{.Module}}/internal/modules/{{.Feature}}/domain"
+)
+
+// Test{{.Name}}RepositoryContract runs the framework's own repository
+// contract against this implementation.
+//
+// It is generated because passing it is not optional and failing to run it is
+// invisible. persistence.Write cannot make itself be called: a Save that runs
+// its statement directly compiles, vets, serves traffic, answers 201 — and
+// loses every event the aggregate raised, with no error, no outbox row and no
+// log line. RunContract asserts that Save and Delete ENLIST the aggregate,
+// which is the one rule in this package no compiler checks.
+//
+// Delete it and you are back to a green build over a repository that silently
+// drops events. Edit the repository and re-run this first.
+//
+// It is an in-package test on purpose: New{{.Name}}Repository returns the
+// domain PORT, and the contract covers the whole Repository surface —
+// including the Delete the port does not declare.
+func Test{{.Name}}RepositoryContract(t *testing.T) {
+	t.Parallel()
+	persistence.RunContract(t, new{{.Name}}RepositoryForContract, new{{.Name}}ForContract,
+		domain.{{.Name}}ID("contract-1"), domain.{{.Name}}ID("contract-2"))
+}
+
+// Test{{.Name}}RepositoryVersionedContract certifies the optimistic lock.
+// {{.Name}} embeds domain.VersionedRoot, so every write is conditional on the
+// version it was loaded at: two requests that both read version 3 cannot both
+// commit, and the loser gets CodeContention — never CodeConflict, which
+// app.Retrying does not retry and which a consumer ACKS.
+func Test{{.Name}}RepositoryVersionedContract(t *testing.T) {
+	t.Parallel()
+	persistence.RunVersionedContract(t, new{{.Name}}RepositoryForContract, new{{.Name}}ForContract,
+		domain.{{.Name}}ID("version-1"), domain.{{.Name}}ID("version-2"),
+		domain.{{.Name}}ID("version-3"), domain.{{.Name}}ID("version-4"),
+		domain.{{.Name}}ID("version-5"), domain.{{.Name}}ID("version-6"),
+		domain.{{.Name}}ID("version-7"))
+}
+
+// new{{.Name}}RepositoryForContract builds a fresh store for one subtest. The
+// type assertion is what gives the suite the full Repository surface back
+// after the constructor narrowed it to the domain port.
+func new{{.Name}}RepositoryForContract(t *testing.T) (persistence.UnitOfWork, persistence.Repository[*domain.{{.Name}}, domain.{{.Name}}ID]) {
+	t.Helper()
+	uow := persistence.NewMemoryUnitOfWork()
+	return uow, New{{.Name}}Repository(uow).(*{{.Name}}Repository)
+}
+
+// new{{.Name}}ForContract builds {{.Article}} {{.Lower}} with a pending event.
+// The pending event is the measurement: the suite asserts it is gone after a
+// commit, which is only true if the repository enlisted the aggregate.
+func new{{.Name}}ForContract(id domain.{{.Name}}ID) *domain.{{.Name}} {
+	return domain.New{{.Name}}(id, time.Unix(1, 0).UTC())
+}

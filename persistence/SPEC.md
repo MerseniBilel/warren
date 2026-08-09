@@ -104,8 +104,14 @@ type Repository[T domain.Root[ID], ID domain.ID] interface {
 	// Save persists the aggregate. The events it raised are drained and
 	// written to the outbox by the enclosing unit of work, not here.
 	Save(context.Context, T) error
-	// Delete removes the aggregate with the given identity.
-	Delete(context.Context, ID) error
+	// Delete removes the aggregate, or returns CodeNotFound. It takes the
+	// ROOT and not an identity, and enlists it exactly as Save does:
+	// removing an aggregate is precisely when OrderCancelled or
+	// AccountClosed is raised, and those events live on the caller's
+	// instance. Loading the aggregate inside Delete cannot repair an
+	// id-shaped signature — that is a different object with zero pending
+	// events, so enlisting it publishes nothing.
+	Delete(context.Context, T) error
 }
 
 // UnitOfWork runs a function inside one transaction, and makes the aggregate

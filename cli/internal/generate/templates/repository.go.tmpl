@@ -36,15 +36,28 @@ func (r *{{.Name}}Repository) Save(ctx context.Context, {{.Lower}} *domain.{{.Na
 	return r.inner.Save(ctx, {{.Lower}})
 }
 
-// Delete removes it. The domain's {{.Name}}Repository port does NOT declare
-// this — most aggregates are never deleted, and generating the method onto
-// every port would force one on all of them. It is here because the Postgres
-// implementation has it too, so the two drivers offer the same surface and
-// swapping one for the other is a change to the provider list alone.
+// Delete removes it, and enlists it. The domain's {{.Name}}Repository port
+// does NOT declare this — most aggregates are never deleted, and generating
+// the method onto every port would force one on all of them. It is here
+// because the Postgres implementation has it too, so the two drivers offer the
+// same surface and swapping one for the other is a change to the provider list
+// alone.
 //
-// To use it, add `Delete(ctx context.Context, id {{.Name}}ID) error` to the
-// port in the domain. Deleting an aggregate raises no event by itself: if
-// something downstream needs to know, raise one before you call this.
-func (r *{{.Name}}Repository) Delete(ctx context.Context, id domain.{{.Name}}ID) error {
-	return r.inner.Delete(ctx, id)
+// To use it, add `Delete(ctx context.Context, {{.Lower}} *{{.Name}}) error` to
+// the port in the domain.
+//
+// It takes the AGGREGATE, not an identifier, because deleting an aggregate is
+// exactly when {{.Name}}Cancelled or {{.Name}}Closed is raised — and those
+// events live on the object you are holding. Loading the {{.Lower}} in here
+// instead would not help: that would be a different object with no pending
+// events, and enlisting it would publish nothing.
+//
+//	{{.Lower}}.Cancel()                    // raises the fact
+//	return r.repo.Delete(ctx, {{.Lower}})  // the row goes, the fact is published
+//
+// The embedded repository calls persistence.Track, as it does in Save. The
+// Postgres implementation of this method calls persistence.Write instead,
+// because there the write is yours to make.
+func (r *{{.Name}}Repository) Delete(ctx context.Context, {{.Lower}} *domain.{{.Name}}) error {
+	return r.inner.Delete(ctx, {{.Lower}})
 }

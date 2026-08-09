@@ -491,13 +491,21 @@ func (r *MemoryRepository[T, K]) Save(ctx context.Context, root T) error {
 }
 
 // Delete removes the aggregate, or returns CodeNotFound.
-func (r *MemoryRepository[T, K]) Delete(ctx context.Context, id K) error {
+func (r *MemoryRepository[T, K]) Delete(ctx context.Context, root T) error {
 	if s, ok := ctx.Value(stagingKey{}).(*staging); ok && s.readOnly {
 		return errReadOnlyWrite("Delete")
 	}
+	id := root.ID()
 	if _, err := r.FindByID(ctx, id); err != nil {
 		return err
 	}
+	// Enlist for the same reason Save does, and only once the row is known to
+	// be there: the farewell fact a handler raised before asking for the
+	// delete lives on THIS object, and nothing else will ever drain it.
+	// Outside a transaction Track is a no-op and the events stay pending, as
+	// they do after an untransacted Save.
+	Track(ctx, root)
+
 	k := r.key(id)
 	if s, ok := ctx.Value(stagingKey{}).(*staging); ok {
 		s.mu.Lock()

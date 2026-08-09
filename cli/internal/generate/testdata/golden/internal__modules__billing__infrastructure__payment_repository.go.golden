@@ -9,10 +9,10 @@ import (
 	"github.com/MerseniBilel/warren/persistence"
 	"github.com/MerseniBilel/warren/persistence/postgres"
 
-	"{{.Module}}/internal/modules/{{.Feature}}/domain"
+	"example.com/myapp/internal/modules/billing/domain"
 )
 
-// {{.Name}}Repository is plain SQL over Postgres. There is no ORM, by
+// PaymentRepository is plain SQL over Postgres. There is no ORM, by
 // design: this file is yours to edit, and the only framework machinery in it
 // is postgres.DB.
 //
@@ -25,7 +25,7 @@ import (
 //     scope, and it enlists the aggregate on success, which is what puts its
 //     events in the outbox in the same commit. Delete used to be exempted as
 //     "a write with no aggregate", and that premise was false: deleting an
-//     aggregate is exactly when {{.Name}}Cancelled or {{.Name}}Closed is
+//     aggregate is exactly when PaymentCancelled or PaymentClosed is
 //     raised. Measured against real Postgres, the exemption published ONE
 //     event where the same DELETE under persistence.Write published two.
 //  2. r.db(ctx) for the handle — never a stored pool. It returns the ambient
@@ -43,58 +43,58 @@ import (
 //
 // Write still cannot make itself be CALLED, though — a Save that runs the SQL
 // directly compiles, vets, serves traffic and loses every event. The generated
-// {{.Snake}}_repository_test.go is what catches that: it runs
+// payment_repository_test.go is what catches that: it runs
 // persistence.RunContract, which asserts that Save and Delete enlist. Keep it.
-type {{.Name}}Repository struct{ db postgres.DB }
+type PaymentRepository struct{ db postgres.DB }
 
-// New{{.Name}}Repository returns the repository as its PORT, so the
+// NewPaymentRepository returns the repository as its PORT, so the
 // container resolves it by the type the application layer asks for.
-func New{{.Name}}Repository(db postgres.DB) domain.{{.Name}}Repository {
-	return &{{.Name}}Repository{db: db}
+func NewPaymentRepository(db postgres.DB) domain.PaymentRepository {
+	return &PaymentRepository{db: db}
 }
 
-// FindByID returns the {{.Lower}}, or an error carrying CodeNotFound.
+// FindByID returns the payment, or an error carrying CodeNotFound.
 //
 // A read needs no transaction: outside a unit of work it goes to the pool,
 // and inside one it sees that transaction's own uncommitted writes.
 //
-// It reconstitutes rather than calling the constructor. New{{.Name}} raises
-// {{.Name}}Created, so loading through it would republish a creation fact on
+// It reconstitutes rather than calling the constructor. NewPayment raises
+// PaymentCreated, so loading through it would republish a creation fact on
 // the next Save — and would reconstitute at version 0, which turns every
 // update into an insert.
-func (r *{{.Name}}Repository) FindByID(ctx context.Context, id domain.{{.Name}}ID) (*domain.{{.Name}}, error) {
+func (r *PaymentRepository) FindByID(ctx context.Context, id domain.PaymentID) (*domain.Payment, error) {
 	var (
 		createdAt time.Time
 		version   int64
 	)
 	err := r.db(ctx).QueryRow(ctx,
-		`SELECT created_at, version FROM {{.Plural}} WHERE id = $1`, id.String(),
+		`SELECT created_at, version FROM payments WHERE id = $1`, id.String(),
 	).Scan(&createdAt, &version)
 	if err != nil {
 		// postgres.ErrNoRows is re-exported precisely so a repository never
 		// imports pgx itself.
 		if errors.Is(err, postgres.ErrNoRows) {
-			return nil, werrors.NotFound("{{.Lower}}", id)
+			return nil, werrors.NotFound("payment", id)
 		}
 		return nil, err
 	}
-	return domain.Reconstitute{{.Name}}(id, createdAt, version), nil
+	return domain.ReconstitutePayment(id, createdAt, version), nil
 }
 
-// Save writes the {{.Lower}} and enlists it.
+// Save writes the payment and enlists it.
 //
-// The write is CONDITIONAL on the version this {{.Lower}} was loaded at. That
+// The write is CONDITIONAL on the version this payment was loaded at. That
 // is the whole point: without it, two requests that both read version 3 both
 // write, both return 201, and the second silently erases the first.
-func (r *{{.Name}}Repository) Save(ctx context.Context, {{.Lower}} *domain.{{.Name}}) error {
+func (r *PaymentRepository) Save(ctx context.Context, payment *domain.Payment) error {
 	// RULE 1 and RULE 3 in one call. persistence.Write refuses outside a unit
 	// of work — where this would autocommit and the aggregate's events would
 	// be lost with no error anywhere — and enlists the aggregate when, and
 	// only when, the write succeeded. The enlistment used to be a separate
 	// statement at the end, and a field test found that deleting it returned
 	// 201 with the event silently gone.
-	return persistence.Write(ctx, "save {{.Lower}}", {{.Lower}}, func(ctx context.Context) error {
-		expected := {{.Lower}}.Version()
+	return persistence.Write(ctx, "save payment", payment, func(ctx context.Context) error {
+		expected := payment.Version()
 		var n int64
 		var err error
 		if expected == 0 {
@@ -102,17 +102,17 @@ func (r *{{.Name}}Repository) Save(ctx context.Context, {{.Lower}} *domain.{{.Na
 			// is already there, two requests minted the same identity, and
 			// overwriting one with the other is the bug, not the fix.
 			n, err = r.db(ctx).Exec(ctx, `
-				INSERT INTO {{.Plural}} (id, created_at, version)
+				INSERT INTO payments (id, created_at, version)
 				VALUES ($1, $2, 1)
 				ON CONFLICT (id) DO NOTHING`,
-				{{.Lower}}.ID().String(), {{.Lower}}.CreatedAt,
+				payment.ID().String(), payment.CreatedAt,
 			)
 		} else {
 			n, err = r.db(ctx).Exec(ctx, `
-				UPDATE {{.Plural}}
+				UPDATE payments
 				SET created_at = $2, version = version + 1
 				WHERE id = $1 AND version = $3`,
-				{{.Lower}}.ID().String(), {{.Lower}}.CreatedAt, expected,
+				payment.ID().String(), payment.CreatedAt, expected,
 			)
 		}
 		if err != nil {
@@ -124,50 +124,50 @@ func (r *{{.Name}}Repository) Save(ctx context.Context, {{.Lower}} *domain.{{.Na
 				// The row is already there: two requests minted the same
 				// identity. CONFLICT — a retry re-reads and finds it still
 				// there, on this attempt and on every one after it.
-				return werrors.Conflict("{{.Lower}} %s already exists", {{.Lower}}.ID())
+				return werrors.Conflict("payment %s already exists", payment.ID())
 			}
 			// The version moved, or the row was deleted under us. NOTHING was
 			// written. CONTENTION — app.Retrying re-invokes the handler, which
 			// re-reads and usually wins the next round. Returning CONFLICT here
 			// is not a cosmetic mistake: on a CONSUMER that code ACKS, so the
 			// message would be destroyed with its work not done.
-			return werrors.Contention("{{.Lower}} %s was changed by another request since it was loaded (it was at version %d)", {{.Lower}}.ID(), expected)
+			return werrors.Contention("payment %s was changed by another request since it was loaded (it was at version %d)", payment.ID(), expected)
 		}
 		// Advance the in-memory aggregate to what was just written, so a
 		// second Save in the same request checks against the new version
 		// instead of conflicting with itself.
-		{{.Lower}}.SetVersion(expected + 1)
+		payment.SetVersion(expected + 1)
 		return nil
 	})
 }
 
-// Delete removes it, and enlists it. The domain's {{.Name}}Repository port
+// Delete removes it, and enlists it. The domain's PaymentRepository port
 // does NOT declare this — see the note on the in-memory implementation. Add
-// `Delete(ctx context.Context, {{.Lower}} *{{.Name}}) error` to the port when
+// `Delete(ctx context.Context, payment *Payment) error` to the port when
 // you need it.
 //
 // It takes the AGGREGATE, not an identifier, and goes through
 // persistence.Write for the same reason Save does. Deleting an aggregate is
-// exactly when {{.Name}}Cancelled or {{.Name}}Closed is raised, and that event
+// exactly when PaymentCancelled or PaymentClosed is raised, and that event
 // lives on the object the caller is holding:
 //
-//	{{.Lower}}.Cancel()                    // raises the fact
-//	return r.repo.Delete(ctx, {{.Lower}})  // the row goes, the fact is published
+//	payment.Cancel()                    // raises the fact
+//	return r.repo.Delete(ctx, payment)  // the row goes, the fact is published
 //
-// Loading the {{.Lower}} in here instead would not help — that would be a
+// Loading the payment in here instead would not help — that would be a
 // different object with no pending events, and enlisting it would publish
 // nothing.
-func (r *{{.Name}}Repository) Delete(ctx context.Context, {{.Lower}} *domain.{{.Name}}) error {
-	return persistence.Write(ctx, "delete {{.Lower}}", {{.Lower}}, func(ctx context.Context) error {
+func (r *PaymentRepository) Delete(ctx context.Context, payment *domain.Payment) error {
+	return persistence.Write(ctx, "delete payment", payment, func(ctx context.Context) error {
 		// Exec returns the rows affected, and a DELETE that matched nothing is
 		// a NOT_FOUND — the persistence contract suite deletes twice and
 		// requires the second to fail. Silent success hides bugs.
-		n, err := r.db(ctx).Exec(ctx, `DELETE FROM {{.Plural}} WHERE id = $1`, {{.Lower}}.ID().String())
+		n, err := r.db(ctx).Exec(ctx, `DELETE FROM payments WHERE id = $1`, payment.ID().String())
 		if err != nil {
 			return err
 		}
 		if n == 0 {
-			return werrors.NotFound("{{.Lower}}", {{.Lower}}.ID())
+			return werrors.NotFound("payment", payment.ID())
 		}
 		return nil
 	})

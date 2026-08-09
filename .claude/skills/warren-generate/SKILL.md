@@ -19,7 +19,7 @@ Run it from the project root (the directory holding `go.mod`), or pass
 |---|---|---|
 | `warren g module <name>` | `internal/modules/<name>/` with `module.go`, `module_test.go`, and a `doc.go` for each of the three layers | the module into `warren.New(...)` in `cmd/*/main.go` |
 | `warren g entity <module> <Name>` | the aggregate, its ID, its first event, and its repository **port**, in `domain/` | nothing — an aggregate is not a provider |
-| `warren g repository <module> <Name>` | the in-process implementation in `infrastructure/` | the constructor into `warren.Providers(...)` |
+| `warren g repository <module> <Name>` | the in-process implementation in `infrastructure/`, **and a contract test beside it** | the constructor into `warren.Providers(...)` |
 | `warren g command <module> <Name>` | an `app.Handler` and its test, in `application/` | the constructor into `warren.Providers(...)` |
 | `warren g consumer <module> <EventName>` | the handler in `application/`, and the subscription beside `module.go` | both the handler **and** the subscription (`warren.Consumers(...)`) |
 
@@ -115,13 +115,21 @@ Writes plain SQL over `postgres.DB`, the table's migration, and
 `cmd/migrate/main.go`. It exists because a Postgres repository has rules
 **no compiler enforces**, and getting them wrong loses data silently:
 
-1. **`persistence.Write(ctx, "save x", agg, func(ctx) error { … })` around a
-   write that carries an aggregate.** It refuses outside a unit of work —
-   where the row would autocommit while the aggregate's events stayed pending
-   on an object about to go out of scope, lost with no error anywhere — and
-   it enlists the aggregate when, and only when, the write succeeded. A write
-   with **no** aggregate (`Delete`) uses `postgres.RequireTx`, which makes the
-   first check and not the second.
+1. **`persistence.Write(ctx, "save x", agg, func(ctx) error { … })` around
+   EVERY write — `Save` and `Delete` alike.** It refuses outside a unit of
+   work — where the row would autocommit while the aggregate's events stayed
+   pending on an object about to go out of scope, lost with no error
+   anywhere — and it enlists the aggregate when, and only when, the write
+   succeeded.
+
+   `Delete` was exempted as "a write with no aggregate" and used
+   `postgres.RequireTx`, which makes the transaction check and not the
+   enlistment. That premise was false: deleting an aggregate is exactly when
+   `OrderCancelled` or `AccountClosed` is raised. Measured against real
+   Postgres, the exemption published **one** event where the same `DELETE`
+   under `persistence.Write` published **two** — the row went, the request
+   answered 204, and the fact evaporated with no error, no outbox row and no
+   log line.
 2. **`r.db(ctx)` for the handle**, never a stored pool. It returns the
    ambient transaction if one is in scope and the pool otherwise, which is
    what lets a read work outside a unit of work while a write does not.
@@ -130,12 +138,34 @@ There used to be a third — "call `persistence.Track` after a successful
 write" — and it is gone because a field test deleted that one line: the row
 committed, the request returned 201, and the event evaporated with no error
 and no outbox row. `Write` fuses it with the first rule, so there is no
-longer a statement to delete.
+longer a separate statement to delete.
 
-A `Delete` must also check rows-affected and return `NOT_FOUND` when it
-matched nothing: a bare `DELETE … WHERE id = $1` returns nil for a missing
-row, and the persistence contract suite deletes twice and requires the second
-to fail.
+**`Delete` takes the aggregate, not an id** —
+`Delete(ctx context.Context, order *domain.Order) error`. The pending events
+live on the caller's instance, so loading the aggregate inside `Delete` cannot
+repair it: that is a different object with zero events, and enlisting it
+publishes nothing. It must also check rows-affected and return `NOT_FOUND`
+when it matched nothing: a bare `DELETE … WHERE id = $1` returns nil for a
+missing row, and the contract suite deletes twice and requires the second to
+fail.
+
+## The generated contract test — do not delete it
+
+Both drivers get `<name>_repository_test.go` beside the implementation, and it
+calls `persistence.RunContract` (and `RunVersionedContract`, since the
+generated aggregate embeds `domain.VersionedRoot`).
+
+It is there because **`persistence.Write` cannot make itself be called**. A
+`Save` that runs its statement directly compiles, vets, serves traffic,
+answers 201 — and loses every event. `go test ./...` was green over exactly
+that repository, because the only generated test was the module boot test and
+it skips without a DSN. `RunContract` asserts that `Save` and `Delete` ENLIST,
+which is the one rule here no compiler checks.
+
+The memory variant runs with no database. The Postgres variant boots a pool
+from `<APP>_DATABASE_URL`, applies `postgres.Schema` and `db/migrations`, and
+skips when the variable is unset — with a message that names the guarantee
+that went unverified, not merely the variable that was missing.
 
 **It generates, it does not wire.** The repository needs `postgres.DB`, which
 means `main.go` must add `postgres.Module(postgres.DSN(...))` and the feature

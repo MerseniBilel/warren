@@ -118,6 +118,19 @@ func (e registered) EventName() string     { return "user.registered" }
 func (e registered) OccurredAt() time.Time { return e.At }
 func (e registered) AggregateID() string   { return e.User.String() }
 
+// closed is the farewell fact — the AccountClosed/OrderCancelled of the
+// defect. It exists to be raised on an aggregate that is about to be deleted,
+// which is the one moment a repository's Delete decides whether the event
+// survives.
+type closed struct {
+	User userID
+	At   time.Time
+}
+
+func (e closed) EventName() string     { return "user.closed" }
+func (e closed) OccurredAt() time.Time { return e.At }
+func (e closed) AggregateID() string   { return e.User.String() }
+
 type user struct {
 	domain.AggregateRoot[userID]
 	Email string
@@ -130,9 +143,12 @@ func newUser(id userID, email string) *user {
 	return u
 }
 
-// userRepo is the hand-written repository the suite drives — and the shape a
-// generated one must have: RequireTx first on every write, DB(ctx) for the
-// handle, persistence.Track to enlist.
+// userRepo is the hand-written repository the suite drives. Its Save keeps the
+// older two-statement shape — postgres.RequireTx, then persistence.Track — on
+// purpose, because TestWriteOutsideDoIsRefused drives it and the driver's own
+// stricter predicate still has to be exercised. The shape a GENERATED
+// repository has is persistence.Write around every write that carries an
+// aggregate, and invoiceRepo below is the fixture that mirrors it.
 type userRepo struct{ db postgres.DB }
 
 func (r userRepo) FindByID(ctx context.Context, id userID) (*user, error) {
@@ -165,22 +181,27 @@ func (r userRepo) Save(ctx context.Context, u *user) error {
 	return nil
 }
 
-func (r userRepo) Delete(ctx context.Context, id userID) error {
-	if err := postgres.RequireTx(ctx, "delete user"); err != nil {
-		return err
-	}
-	// Exec returns the rows affected, and a Delete that matched nothing is a
-	// NOT_FOUND — the contract suite deletes twice and requires the second to
-	// fail. Silent success hides bugs, and this is the line a generated
-	// repository must also carry.
-	n, err := r.db(ctx).Exec(ctx, `DELETE FROM users WHERE id = $1`, string(id))
-	if err != nil {
-		return err
-	}
-	if n == 0 {
-		return werrors.NotFound("user", id)
-	}
-	return nil
+// Delete carries an aggregate exactly as Save does, so it goes through
+// persistence.Write and not postgres.RequireTx. RequireTx checks the
+// transaction and nothing else, so the aggregate's farewell event — raised by
+// the handler that decided to delete it — was never enlisted and never
+// reached the outbox. Measured against a real server: one outbox row instead
+// of two, with no error anywhere.
+func (r userRepo) Delete(ctx context.Context, u *user) error {
+	return persistence.Write(ctx, "delete user", u, func(ctx context.Context) error {
+		// Exec returns the rows affected, and a Delete that matched nothing is
+		// a NOT_FOUND — the contract suite deletes twice and requires the
+		// second to fail. Silent success hides bugs, and this is the line a
+		// generated repository must also carry.
+		n, err := r.db(ctx).Exec(ctx, `DELETE FROM users WHERE id = $1`, u.ID().String())
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return werrors.NotFound("user", u.ID())
+		}
+		return nil
+	})
 }
 
 func isNoRows(err error) bool { return err != nil && strings.Contains(err.Error(), "no rows") }
@@ -246,58 +267,55 @@ func (r invoiceRepo) FindByID(ctx context.Context, id invoiceID) (*invoice, erro
 }
 
 func (r invoiceRepo) Save(ctx context.Context, inv *invoice) error {
-	if err := postgres.RequireTx(ctx, "save invoice"); err != nil {
-		return err
-	}
-	expected := inv.Version()
-	var (
-		n   int64
-		err error
-	)
-	if expected == 0 {
-		// DO NOTHING, not DO UPDATE: if the row is already there, two
-		// requests minted the same identity, and overwriting one with the
-		// other is the bug rather than the fix.
-		n, err = r.db(ctx).Exec(ctx, `
-			INSERT INTO invoices (id, total, version) VALUES ($1, $2, 1)
-			ON CONFLICT (id) DO NOTHING`,
-			string(inv.ID()), inv.Total)
-	} else {
-		n, err = r.db(ctx).Exec(ctx, `
-			UPDATE invoices SET total = $2, version = version + 1
-			WHERE id = $1 AND version = $3`,
-			string(inv.ID()), inv.Total, expected)
-	}
-	if err != nil {
-		return err
-	}
-	if n == 0 {
-		// The same split the generated repository makes, and the contract
-		// suite requires: an insert that matched nothing is two requests
-		// minting one identity, which no retry can fix; an update that
-		// matched nothing is a race, which the next attempt usually wins.
+	return persistence.Write(ctx, "save invoice", inv, func(ctx context.Context) error {
+		expected := inv.Version()
+		var (
+			n   int64
+			err error
+		)
 		if expected == 0 {
-			return werrors.Conflict("invoice %s already exists", inv.ID())
+			// DO NOTHING, not DO UPDATE: if the row is already there, two
+			// requests minted the same identity, and overwriting one with the
+			// other is the bug rather than the fix.
+			n, err = r.db(ctx).Exec(ctx, `
+				INSERT INTO invoices (id, total, version) VALUES ($1, $2, 1)
+				ON CONFLICT (id) DO NOTHING`,
+				string(inv.ID()), inv.Total)
+		} else {
+			n, err = r.db(ctx).Exec(ctx, `
+				UPDATE invoices SET total = $2, version = version + 1
+				WHERE id = $1 AND version = $3`,
+				string(inv.ID()), inv.Total, expected)
 		}
-		return werrors.Contention("invoice %s was changed by another request since it was loaded (it was at version %d)", inv.ID(), expected)
-	}
-	inv.SetVersion(expected + 1)
-	persistence.Track(ctx, inv)
-	return nil
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			// The same split the generated repository makes, and the contract
+			// suite requires: an insert that matched nothing is two requests
+			// minting one identity, which no retry can fix; an update that
+			// matched nothing is a race, which the next attempt usually wins.
+			if expected == 0 {
+				return werrors.Conflict("invoice %s already exists", inv.ID())
+			}
+			return werrors.Contention("invoice %s was changed by another request since it was loaded (it was at version %d)", inv.ID(), expected)
+		}
+		inv.SetVersion(expected + 1)
+		return nil
+	})
 }
 
-func (r invoiceRepo) Delete(ctx context.Context, id invoiceID) error {
-	if err := postgres.RequireTx(ctx, "delete invoice"); err != nil {
-		return err
-	}
-	n, err := r.db(ctx).Exec(ctx, `DELETE FROM invoices WHERE id = $1`, string(id))
-	if err != nil {
-		return err
-	}
-	if n == 0 {
-		return werrors.NotFound("invoice", id)
-	}
-	return nil
+func (r invoiceRepo) Delete(ctx context.Context, inv *invoice) error {
+	return persistence.Write(ctx, "delete invoice", inv, func(ctx context.Context) error {
+		n, err := r.db(ctx).Exec(ctx, `DELETE FROM invoices WHERE id = $1`, inv.ID().String())
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return werrors.NotFound("invoice", inv.ID())
+		}
+		return nil
+	})
 }
 
 // bootApp brings up a real application on an isolated schema and returns the
@@ -384,6 +402,56 @@ func TestStateAndEventsCommitTogether(t *testing.T) {
 	}
 	if pending[0].Topic != "user.registered" {
 		t.Errorf("topic = %q", pending[0].Topic)
+	}
+}
+
+// TestDeleteEnlistsTheAggregateItRemoves is the delete half of the claim
+// above, measured in outbox rows against a real server.
+//
+// A handler loads the aggregate, raises the fact that it is going, and asks
+// the repository to remove it. With RequireTx in place of persistence.Write
+// this run produced ONE outbox row: the row went, the request would have
+// answered 204, and the closure evaporated with no error, no outbox row and
+// no log line. Two is the correct number — the creation and the closure.
+func TestDeleteEnlistsTheAggregateItRemoves(t *testing.T) {
+	_, db, uow, store := bootApp(t)
+	repo := userRepo{db: db}
+	ctx := context.Background()
+
+	if err := uow.Do(ctx, func(ctx context.Context) error {
+		return repo.Save(ctx, newUser("u-del", "bob@example.com"))
+	}); err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+
+	u, err := repo.FindByID(ctx, "u-del")
+	if err != nil {
+		t.Fatalf("FindByID: %v", err)
+	}
+	u.Raise(closed{User: "u-del", At: time.Unix(2, 0).UTC()})
+
+	if err := uow.Do(ctx, func(ctx context.Context) error {
+		return repo.Delete(ctx, u)
+	}); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+
+	if _, err := repo.FindByID(ctx, "u-del"); !werrors.Is(err, werrors.CodeNotFound) {
+		t.Errorf("the row survived the delete: %v", err)
+	}
+	pending, err := store.Pending(ctx, 10)
+	if err != nil {
+		t.Fatalf("Pending: %v", err)
+	}
+	var topics []string
+	for _, p := range pending {
+		topics = append(topics, p.Topic)
+	}
+	if len(pending) != 2 {
+		t.Fatalf("outbox has %d rows (%v), want 2 — the aggregate's farewell event was dropped when its row was deleted", len(pending), topics)
+	}
+	if !slices.Contains(topics, "user.closed") {
+		t.Errorf("outbox topics = %v, want one of them to be user.closed", topics)
 	}
 }
 

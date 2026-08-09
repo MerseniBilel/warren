@@ -1,0 +1,126 @@
+package infrastructure
+
+import (
+	"context"
+	"os"
+	"testing"
+	"time"
+
+	"github.com/MerseniBilel/warren"
+	"github.com/MerseniBilel/warren/persistence"
+	"github.com/MerseniBilel/warren/persistence/postgres"
+
+	"{{.Module}}/internal/modules/user/domain"
+)
+
+// TestUserRepositoryContract runs the framework's own repository contract
+// against this implementation, on a real database.
+//
+// It is scaffolded because passing it is not optional and failing to run it
+// is invisible. persistence.Write cannot make itself be called: a Save that
+// runs its SQL directly compiles, vets, serves traffic, answers 201 — and
+// loses every event the aggregate raised, with no error, no outbox row and no
+// log line. RunContract asserts that Save and Delete ENLIST the aggregate,
+// which is the one rule in this file no compiler checks.
+//
+// Delete it and you are back to a green build over a repository that silently
+// drops events. Edit the SQL and re-run this first.
+//
+// It is an in-package test on purpose: NewUserRepository returns the domain
+// PORT, and the contract covers the whole Repository surface — including the
+// Delete the port does not declare.
+//
+// There is no RunVersionedContract here: this aggregate is not versioned.
+// Uniqueness on email is what makes a duplicate registration a CONFLICT, and
+// there is no read-modify-write to lose. `warren g entity` generates VERSIONED
+// aggregates, and `warren g repository --driver postgres` writes both the
+// optimistic-lock SQL and the versioned contract for them.
+func TestUserRepositoryContract(t *testing.T) {
+	persistence.RunContract(t, connectUserRepository(t), newUserForContract,
+		domain.UserID("contract-1"), domain.UserID("contract-2"))
+}
+
+// connectUserRepository boots a pool once, applies the migrations, and returns
+// the per-subtest factory the suite calls.
+//
+// It SKIPS when there is no database — and the message says what stopped being
+// checked, not merely what is missing, because a skip that reads like an
+// environment problem is a skip nobody acts on.
+func connectUserRepository(t *testing.T) persistence.NewDriver[*domain.User, domain.UserID] {
+	t.Helper()
+
+	dsn := os.Getenv("{{.EnvPrefix}}_DATABASE_URL")
+	if dsn == "" {
+		t.Skip(`{{.EnvPrefix}}_DATABASE_URL is not set, so the repository contract suite did NOT run.
+
+Nothing has verified that Save and Delete ENLIST the aggregate with the unit
+of work — a repository that drops every event it should have published would
+be just as green as this run was. Nor has anything verified that a missing
+user is a NOT_FOUND rather than a nil, that a rolled-back transaction leaves
+no row behind, or that deleting the same user twice fails the second time.
+
+To run it:
+
+    docker run --rm -d -p 5432:5432 -e POSTGRES_PASSWORD=warren postgres:17
+    export {{.EnvPrefix}}_DATABASE_URL='postgres://postgres:warren@localhost:5432/postgres?sslmode=disable'
+    go test ./...`)
+	}
+
+	ctx := context.Background()
+	// Warren's own tables first, then yours. Both record into
+	// warren_schema_migrations, keyed by bare filename.
+	if err := postgres.Migrate(ctx, dsn, postgres.Schema); err != nil {
+		t.Fatalf("migrating warren's schema: %v", err)
+	}
+	if err := postgres.Migrate(ctx, dsn, os.DirFS("../../../../db/migrations")); err != nil {
+		t.Fatalf("migrating db/migrations: %v", err)
+	}
+
+	// The pool comes from the container, as it does in production — a
+	// repository that only ever sees a hand-built handle is not the one the
+	// application runs.
+	var (
+		db  postgres.DB
+		uow *postgres.UnitOfWork
+	)
+	pg := postgres.Module(postgres.DSN(dsn))
+	probe := warren.NewModule("user_contract",
+		warren.Imports(pg),
+		warren.Providers(func(d postgres.DB, u *postgres.UnitOfWork) *userContractProbe {
+			db, uow = d, u
+			return &userContractProbe{}
+		}),
+		warren.Eager[*userContractProbe](),
+	)
+	a := warren.New(pg, probe)
+	if err := a.Start(ctx); err != nil {
+		t.Fatalf("boot: %v", err)
+	}
+	t.Cleanup(func() { _ = a.Stop(context.Background()) })
+
+	// One fresh store PER SUBTEST, which is what NewDriver promises.
+	// RunContract reuses its identities from one subtest to the next; against a
+	// shared table a row left behind by an earlier subtest makes the next
+	// insert a CONFLICT, and the suite then fails for a reason that has nothing
+	// to do with the repository.
+	return func(t *testing.T) (persistence.UnitOfWork, persistence.Repository[*domain.User, domain.UserID]) {
+		t.Helper()
+		if _, err := db(ctx).Exec(ctx, `DELETE FROM users`); err != nil {
+			t.Fatalf("emptying users: %v", err)
+		}
+		return uow, &UserRepository{db: db}
+	}
+}
+
+type userContractProbe struct{}
+
+// newUserForContract builds a user with a pending event. The pending event is
+// the measurement: the suite asserts it is gone after a commit, which is only
+// true if the repository enlisted the aggregate.
+//
+// The address is derived from the identity so that two aggregates never share
+// one: users.email is UNIQUE, and a fixed address would fail the suite for a
+// reason that has nothing to do with what it is measuring.
+func newUserForContract(id domain.UserID) *domain.User {
+	return domain.NewUser(id, domain.Email(id.String()+"@example.test"), id.String(), time.Unix(1, 0).UTC())
+}

@@ -203,6 +203,9 @@ func Repository(opts Options) (string, error) {
 	if !ok {
 		return "", errUnknownDriver(driver)
 	}
+	// The project's OWN variable, so the generated skip names something that
+	// exists in this application rather than a generic DATABASE_URL.
+	data["DSNVar"] = strconv.Quote(envPrefix(opts.Dir) + "_DATABASE_URL")
 	// The repository implements the port the ENTITY declares and stores the
 	// aggregate the entity defines. Without it the generated file cannot
 	// compile — and until this check existed the generator wrote it anyway,
@@ -210,13 +213,26 @@ func Repository(opts Options) (string, error) {
 	if err := checkEntityExists(opts.Dir, base, opts.Module, opts.Name); err != nil {
 		return "", err
 	}
-	content, err := render(tmpl, data)
+	content, err := render(tmpl.impl, data)
+	if err != nil {
+		return "", err
+	}
+	// The contract test is not optional decoration. persistence.Write cannot
+	// make itself be called, so a repository that drops it compiles, vets and
+	// serves traffic while losing every event — and `go test ./...` stayed
+	// green over exactly that, because the only generated test was the module
+	// boot test and it skips without a DSN. RunContract asserts that Save and
+	// Delete enlist.
+	contract, err := render(tmpl.contract, data)
 	if err != nil {
 		return "", err
 	}
 	p := &plan{
 		dir: opts.Dir, dryRun: opts.DryRun, force: opts.Force,
-		files: map[string][]byte{base + "/infrastructure/" + data["Snake"] + "_repository.go": content},
+		files: map[string][]byte{
+			base + "/infrastructure/" + data["Snake"] + "_repository.go":      content,
+			base + "/infrastructure/" + data["Snake"] + "_repository_test.go": contract,
+		},
 		edits: []edit{provide(data, base, "infrastructure", "New"+opts.Name+"Repository")},
 		declares: []decl{{base + "/infrastructure", []string{
 			opts.Name + "Repository", "New" + opts.Name + "Repository",
@@ -308,12 +324,20 @@ func Repository(opts Options) (string, error) {
 	return p.apply()
 }
 
-// repositoryTemplates maps a driver to the file it generates. Adding a
-// driver is adding a row and a template — the port is the same.
-var repositoryTemplates = map[string]string{
-	"memory":   "repository.go.tmpl",
-	"postgres": "repository_postgres.go.tmpl",
+// repositoryTemplates maps a driver to the files it generates. Adding a
+// driver is adding a row and two templates — the port is the same.
+//
+// The contract test is part of the row, not an extra: a driver whose
+// implementation ships without one is a driver nothing certifies, and the
+// certification is the reason persistence exports RunContract at all.
+var repositoryTemplates = map[string]repositoryFiles{
+	"memory":   {impl: "repository.go.tmpl", contract: "repository_test.go.tmpl"},
+	"postgres": {impl: "repository_postgres.go.tmpl", contract: "repository_postgres_test.go.tmpl"},
 }
+
+// repositoryFiles is one driver's implementation and the contract test that
+// certifies it.
+type repositoryFiles struct{ impl, contract string }
 
 // plural is the table name for an aggregate. Two rules cover almost every
 // name; the rest is a line the user edits, which beats a dependency.

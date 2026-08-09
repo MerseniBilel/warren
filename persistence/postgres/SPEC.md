@@ -94,8 +94,18 @@ autocommits while the events stay pending on an object that goes out of scope
 at the end of the function, and they are gone: silent, unrecoverable, no error
 anywhere. That is precisely the loss the outbox exists to prevent, reintroduced
 through the back door. **`postgres.RequireTx(ctx, op)` is the first line of
-every `Save` and `Delete`**, and of `Store.Append`. One map lookup, zero cost
-inside a transaction, a copy-pasteable diagnostic outside one.
+`Store.Append` and of any write that carries no aggregate.** One map lookup,
+zero cost inside a transaction, a copy-pasteable diagnostic outside one.
+
+**Corrected 2026-08-09.** This used to read "the first line of every `Save`
+and `Delete`", and a repository `Save` or `Delete` now calls
+`persistence.Write` instead — which makes the same check AND enlists the
+aggregate on success. `RequireTx` checks for a transaction and nothing else,
+so a `Delete` built on it dropped the aggregate's farewell event: measured
+against Postgres 17, one outbox row where the same `DELETE` under
+`persistence.Write` produced two, with no error anywhere. `Delete` carries an
+aggregate — that is when `OrderCancelled` is raised — so it was never the
+exception it was written as.
 
 Sniffing the `Queryer`'s methods instead — refuse `Exec`, allow `QueryRow` —
 was considered and rejected: `INSERT … RETURNING id` goes through `QueryRow`,

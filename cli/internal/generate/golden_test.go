@@ -47,6 +47,19 @@ func TestGolden(t *testing.T) {
 		{"repository", func() (string, error) {
 			return generate.Repository(generate.Options{Dir: dir, Module: "billing", Name: "Invoice"})
 		}},
+		// A second aggregate with the POSTGRES driver. The postgres template
+		// is where the generator's hardest-to-see rules live — persistence.
+		// Write around every write that carries an aggregate, the version
+		// check, the CONTENTION/CONFLICT split — and it had no golden file at
+		// all while the Delete it emitted silently dropped events.
+		{"entity Payment", func() (string, error) {
+			return generate.Entity(generate.Options{Dir: dir, Module: "billing", Name: "Payment"})
+		}},
+		{"repository Payment --driver postgres", func() (string, error) {
+			return generate.Repository(generate.Options{
+				Dir: dir, Module: "billing", Name: "Payment", Driver: "postgres",
+			})
+		}},
 		{"command", func() (string, error) {
 			return generate.Command(generate.Options{Dir: dir, Module: "billing", Name: "VoidInvoice"})
 		}},
@@ -64,6 +77,9 @@ func TestGolden(t *testing.T) {
 	for _, rel := range []string{
 		"internal/modules/billing/domain/invoice.go",
 		"internal/modules/billing/infrastructure/invoice_repository.go",
+		"internal/modules/billing/infrastructure/invoice_repository_test.go",
+		"internal/modules/billing/infrastructure/payment_repository.go",
+		"internal/modules/billing/infrastructure/payment_repository_test.go",
 		"internal/modules/billing/application/void_invoice.go",
 		"internal/modules/billing/application/void_invoice_test.go",
 		"internal/modules/billing/application/on_payment_received.go",
