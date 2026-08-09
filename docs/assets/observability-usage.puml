@@ -1,5 +1,5 @@
 @startuml observability-usage
-title warren/observability — OTel wiring, span across the broker\nsource: observability/SPEC.md (approved 2026-08-01); warren.md §7.1, §3.4
+title warren/observability — OTel wiring, span across the broker\nsource: warren.md §7.1, §3.4 (spec retired — the code, its tests and the manifest are the contract)
 
 participant "main.go" as main
 participant "observability.Module" as obs

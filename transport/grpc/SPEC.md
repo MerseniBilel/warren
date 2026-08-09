@@ -320,6 +320,30 @@ The driver carve-out is the **`Raw*` prefix**, and it needs a second member:
 `ChainUnaryInterceptor` or a keepalive policy. `RawServerOptions(...grpc.ServerOption)`
 covers that, and `scripts/invariants.sh` scopes the carve-out to the prefix.
 
+**Inherited from `internal/panics` (rehomed 2026-08-09, on that spec's
+retirement).** The non-removable recover this ruling makes structural is a
+**request-path** recover, and the request path is explicitly outside the
+boot-time containment `warren/internal/panics` provides — it is contained by
+the adapter, where the correlation ID and the status mapping live, exactly as
+`transport/http/edge.go` does it for HTTP. Two obligations follow when this
+adapter is built:
+
+1. **The C0 frame contract applies verbatim.** Whatever renders a contained
+   panic here drops the same frames `internal/panics` drops — no
+   `go.uber.org/dig`, no `runtime.`, no `panic(`, no `created by `, no
+   `reflect.`, and none of the containment plumbing's own — because a
+   diagnostic that ends in nine dig frames has leaked the wrap boundary
+   invariant 2 exists to hold. Use `internal/panics` rather than a third copy
+   of the filter; the whole reason that package exists is that three copies
+   drift within a month and then hold in one place out of three.
+2. **A panic must not reach the client.** The stack goes to the log, the
+   client gets `Internal` and the correlation ID — the shape warren.md §4.1
+   now records for HTTP.
+
+`internal/panics.Do` also carries a `passthrough` parameter, added for
+`http.ErrAbortHandler`. gRPC has no documented equivalent; if one is found,
+this is the seam for it.
+
 **2. Streaming is out, and `transport.Raw` already covers it — no core change.**
 Same ruling as HTTP: typed byte-in/byte-out is the only typed shape.
 `transport.Raw(r, transport.ProtocolGRPC, "user.v1.UserService/Watch", h)`,

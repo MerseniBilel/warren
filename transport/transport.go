@@ -57,9 +57,15 @@ type Controller interface {
 }
 
 // Consumer is a Controller that registers event subscriptions. The two names
-// mirror warren.Controllers and warren.Consumers, which differ in lifecycle
-// placement — consumers start before servers and stop after them — not in
-// what may be registered.
+// mirror warren.Controllers and warren.Consumers, which are behaviourally
+// IDENTICAL: App.Start walks both as one list, and nothing reads which of the
+// two an entry came from. The pair exists to let a module say which it means,
+// and the ordering people expect from it comes from boot step 5b, not from
+// the option it was declared with.
+//
+// This comment claimed until 2026-08-09 that consumers start before servers
+// and stop after them. They do not, and a reader who wired a subscription
+// expecting that ordering would have got it by luck.
 type Consumer = Controller
 
 // Invoker is the route closure: bytes in, bytes out, middleware already

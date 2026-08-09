@@ -273,6 +273,22 @@ audit (5 above), and whether `transport.Doc(summary, description)` earns a
 core `RouteOption` — without it the document has no prose, because
 "RegisterUser" is not "Registers a user" and inventing prose from a Go name is
 the kind of guess this package must not make.
+
+10. **Do RAW routes appear in the document?** *(Rehomed from
+    `transport/http/SPEC.md` on its retirement, 2026-08-09; that spec asked it
+    and said "for that spec to answer".)* `transport.Raw` routes carry a
+    pattern, a protocol and an `http.Handler`, and they carry **no `Req`/`Res`
+    types at all** — that is the whole point of the escape door — so there is
+    nothing to derive a schema from. Three readings, and none is obviously
+    right: omit them, and `/openapi.json` silently under-describes a service
+    whose uploads and SSE endpoints are real routes a client must call; emit
+    them path-and-method only with no request or response schema, which is
+    honest but produces entries a generator cannot make a typed client from;
+    or emit them only when the user supplies prose, which couples this to the
+    `transport.Doc` question above. Note this package **registers itself
+    through `transport.Raw`**, so whatever is decided, `/openapi.json` must
+    not describe itself by accident. The same question governs
+    `openapi`'s own `/docs` route if the Scalar bundle lands.
 ## Definition of done
 
 1. OpenAPI 3.1 emitted from the frozen `*transport.Table` plus `json:`,

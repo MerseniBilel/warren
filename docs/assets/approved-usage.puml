@@ -1,5 +1,5 @@
 @startuml approved-usage
-title Warren — usage flow across the ten approved packages\nerrors · di · lifecycle · log · config · domain implemented (specs retired 2026-08-01) · warren (root) · app · broker · observability spec'd\nsources: warren.md §1.2–§1.5, §2.1–§2.6, §3.1, §3.2, §3.4, §7.1; remaining SPEC.md files
+title Warren — usage flow across the ten approved packages\nerrors · di · lifecycle · log · config · domain implemented (specs retired 2026-08-01) · warren (root) · app · broker · observability spec'd\nsources: warren.md §1.2–§1.5, §2.1–§2.6, §3.1, §3.2, §3.4, §7.1; the SPEC.md files that remain are the deferred packages only
 
 actor User
 participant "main.go" as main

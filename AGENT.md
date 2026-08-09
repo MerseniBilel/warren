@@ -111,7 +111,8 @@ scopes the controllers were built in. **No other kernel package may**, and
 `log`, `errors`, `validate`, or `health` that knows what a route is has
 collapsed the ring. The carve-out is exactly one package wide, and adding to it
 is an architecture decision, not an implementation detail. (Added 2026-08-02
-with boot step 5; the reasoning is recorded in `transport/http/SPEC.md` ⚠1.)
+with boot step 5; the reasoning is recorded in `warren.md` §1.1, rehomed there
+when `transport/http/SPEC.md` retired.)
 
 Inside a user's application the rule is the familiar one, and `warren lint arch`
 is the thing that enforces it:

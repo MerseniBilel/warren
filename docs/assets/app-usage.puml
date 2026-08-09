@@ -1,5 +1,5 @@
 @startuml app-usage
-title warren/app — Handler, Middleware, Chain (the core ring)\nsource: app/SPEC.md (approved 2026-08-01 for Handler/Middleware/Chain); warren.md §3.2, §1.4
+title warren/app — Handler, Middleware, Chain (the core ring)\nsource: warren.md §3.2, §1.4 (spec retired 2026-08-09 — the code, its tests and the manifest are the contract)
 
 participant "adapter (edge ring)\nHTTP / gRPC / consumer" as edge
 participant "composed chain\nChain(h, mw...) — built at boot step 5" as chain

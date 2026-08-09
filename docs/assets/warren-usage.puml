@@ -1,5 +1,5 @@
 @startuml warren-usage
-title warren (root) — declare modules, boot, run, stop\nsource: SPEC.md (approved 2026-08-01); warren.md §2.1, §1.2, §1.3
+title warren (root) — declare modules, boot, run, stop\nsource: warren.md §2.1, §1.2, §1.3 (spec retired — the code, its tests and the manifest are the contract)
 
 participant "main.go" as main
 participant "warren.App" as app

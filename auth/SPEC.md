@@ -17,8 +17,9 @@ every route, and `app.Authorized` composes it. A user writes a twenty-line
 policy today and it works over HTTP and consumers alike.
 
 **The identity decision WAS the blocker, and it was taken in v0.1.**
-`app.Identity` and its context seam ship in core (warren.md §3.2, and
-`app/SPEC.md`), so users write policies, handlers and tests today that do not
+`app.Identity` and its context seam ship in core — warren.md §3.2 and
+`app/identity.go`'s doc comments carry the ruling now that `app/SPEC.md` has
+retired — so users write policies, handlers and tests today that do not
 change when this module lands. That was the right order: the seam is
 expressible without a token library, and the verifier is not expressible
 without the seam.
@@ -224,9 +225,13 @@ undetermined, and none of it should be guessed.
 3. **What is `policy` in `app.Authorized(policy)`?** Its type must live in the
    core module for §3.2 to compile there, but a JWT-scope policy is an
    implementation, and core is stdlib-and-dig only (invariant 1) with zero
-   implementations in contract packages (invariant 5). Same unresolved mechanism
-   as `app.Traced()` — see `observability/SPEC.md` Open question 1. Is
-   `auth.RequireScope` itself a policy, so the same value serves both rings?
+   implementations in contract packages (invariant 5). Same mechanism as
+   `app.Traced()`, which is now answered and not by this spec: the value RIDES
+   THE CONTEXT, so the core middleware takes no argument and the adapter seeds
+   it (warren.md §3.2; `observability/SPEC.md` asked it and has since retired).
+   `app.AuthorizationPolicy` is the core-side answer here, and
+   `app.RequireScope` is the core-resident proof that a policy needs no token
+   library.
 4. **How is token validation configured?** No issuer, audience, key source,
    allowed algorithms, clock skew, or JWKS refresh interval appears anywhere in
    warren.md. Is there an `auth.Module(...)` like every other adapter has, and

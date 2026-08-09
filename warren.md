@@ -71,6 +71,29 @@ Dependencies point downward only.
 - **Adapters** are leaves. `broker/kafka` and `persistence/postgres` are mutually invisible — which is precisely what makes them independently versionable and community-ownable.
 - **Tooling** is a one-way street: the CLI imports the runtime to analyse it; the runtime never imports the CLI.
 
+**The one carve-out: the root `warren` package is the composition root, and it
+may import the CONTRACTS ring.** That is KERNEL → CONTRACTS, which the rule
+above forbids for every other kernel package. It exists because boot step 5
+(§1.3) hands every controller a `transport.Registrar` and freezes the result
+into the `*transport.Table`, so the bootstrapper has to know that
+`transport.Controller` exists — and there is nowhere else that knowledge could
+live, because only the bootstrapper holds the module scopes the controllers
+were built in. Before this, `app.go` instantiated controllers and discarded
+them: a controller with a typo'd `Register` signature registered nothing,
+silently, and every route it meant to declare 404'd in production — the exact
+failure §1.3 exists to prevent.
+
+**No import cycle results**, which is what makes the carve-out safe rather
+than merely convenient: `transport` imports `app`, `broker`, `errors` and
+`validate`, and none of those imports `warren`.
+
+**The carve-out is exactly one package wide, and `scripts/invariants.sh`
+enforces the second half** — a `di`, `lifecycle`, `config`, `log`, `errors`,
+`validate` or `health` that knows what a route is has collapsed the ring.
+Widening it is an architecture decision, not an implementation detail. (Added
+2026-08-02 with boot step 5; this paragraph is where its reasoning lives, and
+AGENT.md § The four rings states the rule.)
+
 ### 1.2 Module encapsulation — the hard part
 
 This is where most Go DI frameworks stop short. `dig` and `fx` give you one global type-keyed container: register `*UserRepo` and every component in the process can inject it. Nest's module system is meaningfully different — a provider is private unless exported, and importing is explicit.
@@ -339,6 +362,31 @@ the type, the option, and the module's declaration site, because a `Register`
 with a typo'd signature compiles and registers nothing. A type that genuinely
 registers nothing belongs in `Providers` with `Eager[T]()`.
 `App.Validator(v)` sets the validator those route closures compile in.
+
+**`Controllers` and `Consumers` do exactly the same thing, and the difference
+is documentary.** Both take constructors, both are instantiated at step 4,
+both are asserted to `transport.Controller`, both register at step 5; step 5
+walks them as one list and the only value the choice carries into the runtime
+is which option name the boot diagnostic prints when the assertion fails. They
+are two spellings because an HTTP controller and a Kafka consumer read
+differently at a module's declaration site, and `Register` is the same act
+either way — a consumer subscribes through `transport.OnEvent` rather than
+`transport.Post`, and that is the whole of it. `transport.Consumer` is
+likewise a type ALIAS for `transport.Controller`, not a second interface.
+
+**In particular, the choice does not place a lifecycle hook.** §1.3's
+`consumers → servers` ordering is real, and it comes from step **5b**: every
+adapter is an eager singleton built after registration, so a broker adapter's
+hook is appended before an HTTP server adapter's regardless of how the user
+ordered modules in `New`. An entry point listed under the "wrong" option
+starts and stops at exactly the same moment. *(`transport.Consumer`'s doc
+comment currently attributes the ordering to the two module options instead;
+that comment is wrong and is the code's to correct.)*
+
+Stated here because two options that look like a behavioural switch and are
+not is the kind of thing a reader infers wrongly once and then designs around.
+If a real difference is ever wanted — separate boot ordering, a different
+registrar set — it is an architecture decision, not an implementation detail.
 
 **A panicking `Register` is contained, per controller.** `Register` is user
 code called on Warren's own stack, and a nil handler field is the ordinary way
@@ -988,6 +1036,20 @@ A `Validator` implementing the full tag vocabulary — `email`, `min`, `max`,
 anything leaves the module. Custom constraints, tag renaming and
 translations are its business, not core's. Installed with
 `transport.WithValidator(playground.New())`.
+
+**The detail SHAPE is a public wire contract, and it is settled.** A 400 body
+is read by clients, so this could not stay open once `transport/http` shipped.
+The **key** is core's rule and does not change here — the JSON wire name,
+dotted for nesting, embedded structs flattened (`address.postcode`, never
+`Base.email`). The **value** is a human-readable English clause naming the
+constraint with its parameter interpolated: `"is required"`,
+`"must be a valid email address"`, `"must be at least 2 characters"`,
+`"must be one of: a, b"`. An unmapped constraint falls back to
+`"must satisfy <tag>=<param>"` rather than being dropped, so a custom
+constraint always produces a detail. Core's `"is required"` is the same string
+from the same rule, which is what lets a service swap validators without
+changing its clients. Changing any of these is a breaking change to every
+400 a service has ever returned.
 
 ---
 
@@ -1755,7 +1817,24 @@ risk to verify when 1.27 ships, not a certainty.
 
 **Amended 2026-08-02: the router is `net/http.ServeMux`, and there is no swappable router.** Go 1.22 gave `ServeMux` method and wildcard patterns and Go 1.23 gave `Request.Pattern` — the two features this port actually needs — and the sealed `Registrar` (§3.5) already discards everything else a router is bought for: it consumes `[]HTTPRoute`, and core owns decode, validate, param binding and status defaults. Measured, chi is the *worst* of five candidates on this project's stated first priority — 4 allocations and 704 B per request against `ServeMux`'s 2 and 48 B, because `Mux.ServeHTTP` shallow-copies the whole `*http.Request` — and gin's and echo's zeroes are unreachable behind a `func(http.Handler) http.Handler` middleware model. `RouterAdapter` and the Gin/Echo/Fiber adapters are dropped: a swap mechanism protecting against a cost the port already eliminated.
 
-The ecosystem argument survives intact — `chi/v5/middleware` is `net/http`-shaped and runs unmodified on a `ServeMux`, so a user who wants it adds chi to *their* go.mod rather than everyone's. Full evidence, and what this gives up, in `transport/http/SPEC.md`.
+The ecosystem argument survives intact — `chi/v5/middleware` is `net/http`-shaped and runs unmodified on a `ServeMux`, so a user who wants it adds chi to *their* go.mod rather than everyone's. Full measured evidence for all five candidates is the §9 HTTP row.
+
+**What the sealed `Registrar` gives up, stated plainly:** route groups,
+`Mount`, per-group middleware, a framework request context, and framework-side
+binding and rendering. The first four are things the port never exposed —
+core owns decode, validate, param binding and status defaults, so a router's
+version of them would be a second way to do what already happens. The one that
+is a real gap is **middleware scoped to a path prefix**: `Middleware(...)` is
+global in v0.1, and `transport.Guard` covers authorization per route but not a
+rate limit or a CORS policy scoped to `/admin/*`. Deferred, not refused.
+
+**Adapter hook ordering is documented, not enforced.** §1.3 promises
+`consumers → servers`, and boot step 5b makes it true for adapters, which are
+eager singletons built after registration (§1.1's carve-out paragraph, §2.1).
+Nothing stops a user appending a `lifecycle.Hook` afterwards that lands out of
+order. Enforcing it wants a phase field on `lifecycle.Hook`, which is a change
+to a kernel port and therefore an architecture decision rather than an
+implementation one.
 
 **Surface**
 
@@ -2022,6 +2101,34 @@ func Raw(func(context.Context, *kgo.Client) error) Option
 func RawSASL(sasl.Mechanism) Option
 ```
 
+**The `Raw` PREFIX is the invariant-3 carve-out, and it is the whole of it.**
+Invariant 3 is not narrower than it reads — it is not "driver types are fine
+inside the driver's own options". A driver type reaches an exported signature
+only behind a name beginning `Raw`, so the carve-out is greppable, and a
+reader can see from the call site alone that they have left the portable
+surface. `SASL(Mechanism)` is Warren-owned and `Plain`/`SCRAM256`/`SCRAM512`
+cover essentially all managed Kafka; OAUTHBEARER, AWS MSK IAM and GSSAPI need
+a token callback or a keytab and go through `RawSASL` until v0.2 models them.
+`persistence/postgres` set the precedent with `postgres.Raw`, and
+`transport/grpc` inherits it (`Raw`, `RawServerOptions`).
+
+**`*kgo.Client` is NOT provided into the container**, deliberately. A driver
+type any constructor can inject is not an escape hatch, it is a second default
+path — and a consumer that reaches `kgo.Record` has left the driver-agnostic
+chain that is the entire reason this package exists. `Configure(...kgo.Opt)`
+runs BEFORE the client is built, because hooks and a custom partitioner are
+read at construction; `Raw(func(ctx, *kgo.Client) error)` runs in `OnStart`
+after the metadata fetch. Same split, same reasons, as
+`postgres.Configure`/`postgres.Raw`.
+
+**One hard requirement the outbox puts on this driver:** `Publish` must return
+errors carrying the right §2.6 code, because `outbox`'s disposition switches
+on it. Dial failure, no leader and `NOT_ENOUGH_REPLICAS` are `UNAVAILABLE`
+(left for the next drain, never parked); `RECORD_TOO_LARGE`,
+`UNKNOWN_TOPIC_OR_PARTITION` with auto-create off, and `INVALID_RECORD` are
+`INVALID` (parked immediately). Get this backwards and a broker outage parks
+the entire outbox.
+
 **Every subscribed topic needs a `<topic>.dlq` beside it.** The dead-letter
 topic is derived, not declared, so a cluster with auto-creation off — the
 production default — has a shadow set of topics nobody provisioned. A
@@ -2218,6 +2325,21 @@ startup naming this fix (§5, `outbox.Durable`).
 **Kafka transactions do not make this exactly-once.** The outbox ack is in
 Postgres and the publish is in Kafka — two systems. At-least-once plus inbox
 dedupe is the guarantee; §5.1's stronger wording is corrected here.
+
+**There is ONE delivery mode, and it is polling. CDC is deferred, not
+forgotten.** Earlier drafts of this section named two modes — polling and CDC
+over Postgres logical replication — and the relay has never had a mode option.
+Recording the deferral rather than deleting the sentence, because silence here
+reads as an oversight and this was a decision: a replication slot is a second,
+incompatible delivery path whose slots **silently fill the primary's disk when
+a consumer stops**, it would put logical-replication code behind a port that
+core cannot name (§1.1: the kernel does not know SQL exists), and the
+table-based relay is shipped and correct while its latency has never been
+measured as a problem. The `Waiter` seam above is the cheap half of what CDC
+was wanted for — appending is the signal, so a relay on a store that
+implements it does not wait out a poll interval. If CDC is ever built it is
+additive: a second `Store` implementation in `persistence/postgres`, behind
+the same port, with no change to `Relay`.
 
 
 ### 5.6 `warren/inbox`
@@ -2444,6 +2566,31 @@ so `<name>_repository_test.go` runs `persistence.RunContract`, which asserts
 that `Save` and `Delete` enlist. It is generated because passing it is not
 optional and failing to run it is invisible. Delete the test and you are back
 to a green build over a repository that silently drops events.
+
+**pgbouncer: `StatementCacheDescribe` is not the whole story.** The adapter
+sets that mode so prepared statements survive a pooler, and two shipped
+options need more than it can give. `WithOutbox()`'s low-latency path uses
+`LISTEN`/`NOTIFY` and `WithAdvisoryLock()` takes a **session-level** advisory
+lock; both require **session** pooling, and both degrade silently under
+transaction pooling — the relay falls back to its poll interval, and a session
+lock taken on a connection the pooler reassigns is not the lock anyone thinks
+it is. If you run pgbouncer in transaction mode, give these two a session-mode
+pool. This deserves a written deployment section and does not have one.
+
+**Deferred out of v0.1, with the reason each time** — recorded so the next
+round does not re-derive them:
+
+- **Down migrations** — an undo you write forwards is an undo you can test.
+- **`CopyFrom`/`SendBatch` on `postgres.DB`** — every method added here is a
+  method a Mongo or MySQL driver must also provide. Reachable through `Raw`.
+- **Read-replica routing for `persistence.ReadOnly()`** — it needs a second
+  pool, a staleness contract and a read-after-write rule. Today `ReadOnly()`
+  maps to `BEGIN READ ONLY` on the primary, which is honest about what it does.
+- **`SKIP LOCKED` multi-drainer outbox** — the advisory lock buys
+  single-drainer correctness; parallel draining trades the relay's global
+  ordering for throughput, and that renegotiation comes first (§5.5).
+- **Inbox partitioning** — v0.1 sweeps with a periodic `DELETE`.
+- **CDC / logical replication** — see §5.5, where the ruling lives.
 
 ### 6.2–6.4 `mysql` / `mongo` / `redis`
 
@@ -2744,6 +2891,27 @@ name for a test spanning several features, and `WithValidator` compiles the
 routes against another validator — how a module whose requests carry tags
 core refuses is tested at all.
 
+**Port-conformance suites do NOT live here; they live beside their ports** —
+`broker/brokertest`, `inbox/inboxtest`, `persistence.RunContract` and
+`RunVersionedContract`. A suite is part of the port's contract, and a driver
+in its own module must be able to run it without taking a dependency on the
+test harness. `warren/testing` is the *module-boot* harness, and that is the
+whole of it.
+
+`warren/testing/containers` **is a name, not a module.** Nothing ships behind
+it and nothing may be created ahead of its first real code (AGENT.md). Three
+things are undecided and are the human's to settle when it is built: what the
+fixtures are called, whether a container is reused across a package or a run,
+and how the DSN or broker address reaches the module under test. Two shipped
+places want it today and each reimplements it privately — the schema-per-test
+harness in `persistence/postgres`'s integration suite, and `broker/kafka`'s.
+
+**The CLI owns its own golden-file machinery.** The obligation below is
+AGENT.md's and applies to `warren/cli`; it is not discharged by a helper in
+this package. `warrentest.Golden` exists for module tests, `cli/internal/*`
+has its own under `testdata/golden/`, and the tooling ring deliberately takes
+no dependency on a test-only runtime module.
+
 Every CLI generator has golden-file tests — templates break silently
 otherwise.
 
@@ -2911,7 +3079,7 @@ All generators support `--dry-run` and `--force`.
 | HTTP | `net/http.ServeMux` | Vendor | stdlib. **`go-chi/chi/v5` rejected 2026-08-02** — healthy (MIT, zero deps, released 2026-07-06) and still wrong here: measured 4 allocs / 704 B per request vs ServeMux's 2 / 48, because `Mux.ServeHTTP` clones the request; and behind the sealed Registrar none of what chi is bought for is reachable. gin rejected (29 indirect requires, incl. a mongo driver and a JIT JSON encoder); httprouter rejected (v1.3.0, 2019-09; no commit since 2024-07 — the rule-9 case in all but the flag); fasthttp/fiber rejected (no `func(http.Handler) http.Handler`, no Flusher/Hijacker, no HTTP/2) |
 | gRPC | `google.golang.org/grpc` | Wrap | shared middleware chain |
 | Proto | `buf` | Vendor | tooling only |
-| Kafka | `twmb/franz-go` | Wrap | pure Go, Kafka ≤4.2+, transactions |
+| Kafka | `twmb/franz-go` | Wrap | pure Go, Kafka 0.8.0–4.2+, targets every client KIP. **Audited 2026-08-02**: v1.21.5, BSD-3-Clause, 2 971 stars, pushed 2026-07-31, not archived. **4 third-party modules compiled in** — `klauspost/compress`, `pierrec/lz4`, `twmb/franz-go`, `golang.org/x/crypto` (SCRAM's) — measured with `go list -deps`, the second-smallest adapter footprint here after `transport/http`'s zero. `franz-go/pkg/kfake` is a SEPARATE module and enters the go.mod **test-only**; the 4 are the non-test build and must stay so. **This row said "transactions" until 2026-08-09 and that was the retracted claim** (§5.1): no Kafka transaction spans Postgres and Kafka, there is no `Transactional` option, and the guarantee is at-least-once plus inbox dedupe. Alternatives audited the same date and rejected: `IBM/sarama` v1.60.1 (MIT, 12 499) low-level surface and heavy allocation; `segmentio/kafka-go` v0.4.51 (MIT, 8 597, last push 2026-04 — the only one going quiet) tested only to Kafka 2.7.1; `confluent-kafka-go` v2.15.0 (Apache-2.0, 5 153) is cgo over librdkafka, costing a C toolchain in every build image |
 | RabbitMQ | `rabbitmq/amqp091-go` | Wrap | official successor to streadway/amqp |
 | NATS | `nats-io/nats.go` | Wrap | JetStream |
 | Postgres | `jackc/pgx/v5` | Wrap | no ORM, by design. **Audited 2026-08-02**: v5.10.0, MIT, 14 087 stars, pushed 2026-08-01, not archived. Six modules compiled in — `pgpassfile`, `pgservicefile`, `pgx`, `puddle`, `x/sync`, `x/text` — measured with `go list -deps`, not read off a README. One pgx type in one exported signature: `postgres.Raw` |
@@ -2984,9 +3152,13 @@ func main() {
             warren.Exports[Config](),
         ),
         observability.Module(observability.ServiceName("user-service")),
-        postgres.Module(postgres.DSN(cfg.Postgres.DSN)),
+        // WithOutbox declares the outbox table and its store; the relay that
+        // drains it is a provider inside this module — see §5.5's newRelay,
+        // which needs the store, the publisher and an Elector, so it cannot
+        // be a bare top-level module value. This example called a
+        // non-existent `outbox.Relay()` until 2026-08-09.
+        postgres.Module(postgres.DSN(cfg.Postgres.DSN), postgres.WithOutbox()),
         kafka.Broker(kafka.Brokers(cfg.Kafka.Brokers...)),
-        outbox.Relay(),
         user.Module(),
         billing.Module(),
         http.Server(http.Port(8080)),
