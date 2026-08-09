@@ -1,0 +1,22 @@
+✗ layer violation
+
+    internal/notes/domain/note.go:3
+      package example.com/fix/internal/notes/domain          (layer: domain)
+        imports example.com/fix/internal/notes/infrastructure (layer: infrastructure)
+
+  The domain layer imports nothing from the other three — that rule is
+  why the domain can be tested, versioned, and extracted on its own.
+
+  Fix one of:
+    • Move the type you need into the domain, and let the other layer
+      depend on it.
+    • Declare a port in the domain and implement it in infrastructure,
+      then wire the two in module.go — the one file permitted to see
+      all four layers.
+
+1 violation(s) in 2 packages.
+
+  NOT checked: the cross-module rule. It compares feature modules, which it
+  finds by a `modules` path segment — internal/modules/<feature>/… , the tree
+  `warren new` generates — and this project has none, so nothing was compared
+  across features.

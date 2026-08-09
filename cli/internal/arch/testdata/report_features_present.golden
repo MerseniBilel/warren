@@ -1,0 +1,33 @@
+✗ cross-module import
+
+    internal/modules/notes/application/attach.go:3
+      package example.com/fix/internal/modules/notes/application
+        imports example.com/fix/internal/modules/tasks/domain
+
+  This reaches into another feature module's internals. Modules talk
+  through published events or an exported port, never by importing each
+  other's packages — that is what makes extracting one into its own
+  service a wiring change rather than a rewrite.
+
+  Fix one of:
+    • If this feature is REACTING to something that happened in the
+      other, consume its EVENT. `warren g consumer` writes the handler
+      and the subscription. The event is a wire contract, so the other
+      feature stays extractable. This is the preferred answer.
+    • If this feature needs to ASK the other something, the port has to
+      live where both may see it — which is NOT inside either feature.
+      Move the interface to a self-contained package outside
+      internal/modules/:
+
+          internal/contracts/<owner>/  — the interface and its own
+          request and result types, importing no feature package.
+
+      The owner's infrastructure implements it, the owner's module
+      exports it with warren.Exports[...](), and this feature imports
+      the contract package and the owner's module value in module.go.
+      A contract package that imports a feature is reported here too,
+      as a cross-module import through a helper.
+
+1 violation(s) in 4 packages.
+
+  Checked 2 feature modules for cross-module imports.

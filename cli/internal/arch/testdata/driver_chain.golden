@@ -1,0 +1,25 @@
+✗ the handler reaches a driver
+
+    internal/modules/orders/application/place.go:3
+      package example.com/fix/internal/modules/orders/application          (layer: application)
+        ↳ example.com/fix/internal/store
+        imports github.com/jackc/pgx/v5
+
+  A use case says WHAT must happen, never HOW it is stored, and that holds
+  through a helper as much as directly: this package does not import
+  github.com/jackc/pgx/v5 itself, but everything it depends on comes with it.
+
+  The import is in example.com/fix/internal/store.
+
+  Fix one of:
+    • SPLIT that package. The part the handler needs — an identifier, a
+      decision, a plain value — is almost always driver-free; only the code
+      that talks to the store needs github.com/jackc/pgx/v5.
+      Two packages, and the handler imports the half without it.
+    • If the handler needs the STORE, declare a port in the domain and put
+      the driver code in infrastructure, where a driver is allowed.
+      `warren g repository` writes both halves.
+
+1 violation(s) in 2 packages.
+
+  Checked 1 feature module for cross-module imports.

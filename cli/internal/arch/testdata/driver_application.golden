@@ -1,0 +1,23 @@
+✗ handler imports a driver
+
+    internal/modules/orders/application/place.go:3
+      package example.com/fix/internal/modules/orders/application          (layer: application)
+        imports github.com/jackc/pgx/v5
+
+  A use case says WHAT must happen, never HOW it is stored or delivered. The
+  moment it names pgx it can only run where a Postgres pool can be built: not
+  in a unit test, not behind a second driver, not in another service.
+
+  That rule is what makes app.Handler[Req, Res] the same type on HTTP, gRPC
+  and a consumer, and what lets warren/persistence/postgres be swapped for
+  another driver in one line of main.go.
+
+  Fix:
+    • Declare a PORT in the domain — an interface in the domain's own words —
+      and put the pgx code in infrastructure, where a driver is allowed. Wire
+      the two in module.go, the one file permitted to see all four layers.
+      `warren g repository` writes both halves.
+
+1 violation(s) in 1 packages.
+
+  Checked 1 feature module for cross-module imports.

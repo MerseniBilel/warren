@@ -54,6 +54,12 @@ type Violation struct {
 type Report struct {
 	Violations []Violation
 	Packages   int
+
+	// Features is the number of distinct feature modules found. Zero means
+	// the cross-module rule compared nothing, which the report says out
+	// loud: a check that did not run must never read as a check that
+	// passed.
+	Features int
 }
 
 // layerOf reports the layer a package path belongs to. The LAST recognised
@@ -100,6 +106,9 @@ func Check(dir string, opts Options) (*Report, error) {
 
 	report := &Report{}
 	seen := map[string]bool{}
+	// The feature modules found, so the report can say whether the
+	// cross-module rule compared anything at all.
+	features := map[string]bool{}
 	// The import graph of the project's OWN packages, for the rules a single
 	// file cannot answer. A handler that imports net/http is caught by
 	// reading one file; a handler that imports a helper that imports
@@ -138,6 +147,10 @@ func Check(dir string, opts Options) (*Report, error) {
 		if !seen[pkgPath] {
 			seen[pkgPath] = true
 			report.Packages++
+			if f := featureOf(pkgPath); f != "" && !features[f] {
+				features[f] = true
+				report.Features++
+			}
 		}
 
 		// module.go is the one file permitted to see all four layers: it is
@@ -177,17 +190,20 @@ func Check(dir string, opts Options) (*Report, error) {
 				}
 			}
 
-			// The transport rule is the one that looks OUTSIDE the project:
-			// what a handler must not import is the framework's transport
-			// port, a driver, or net/http — none of which carry the project's
-			// module path. Skipping every foreign import, as the layer rules
-			// do, is why invariant 5 went unchecked.
-			if opts.Rules&Layers != 0 && isTransportPackage(imported) && slices.Contains(handlerLayers, layer) {
-				report.Violations = append(report.Violations, Violation{
-					File: rel, Line: pos.Line, Package: pkgPath, Layer: layer,
-					Imported: imported, Rule: "transport",
-				})
-				continue
+			// The transport and driver rules are the ones that look OUTSIDE
+			// the project: what a handler must not import is the framework's
+			// transport port, a driver, or net/http — none of which carry the
+			// project's module path. Skipping every foreign import, as the
+			// layer rules do, is why invariant 5 went unchecked, and why
+			// README's "no pgx, no kgo" went unchecked after it.
+			if opts.Rules&Layers != 0 && slices.Contains(handlerLayers, layer) {
+				if rule := foreignRule(imported); rule != "" {
+					report.Violations = append(report.Violations, Violation{
+						File: rel, Line: pos.Line, Package: pkgPath, Layer: layer,
+						Imported: imported, Rule: rule,
+					})
+					continue
+				}
 			}
 			if !strings.HasPrefix(imported, modPath) {
 				continue // otherwise third party and stdlib are not this rule's business
@@ -216,7 +232,8 @@ func Check(dir string, opts Options) (*Report, error) {
 	}
 
 	if opts.Rules&Layers != 0 {
-		findTransportChains(report, graph, site, modPath)
+		findForeignChains(report, graph, site, modPath, "transport", isTransportPackage)
+		findForeignChains(report, graph, site, modPath, "driver", isDriverPackage)
 		findLaunderedImports(report, graph, site, modPath)
 	}
 
@@ -333,8 +350,11 @@ func reachesThroughHelpers(graph map[string][]string, pkg, modPath string, bad f
 	return nil, ""
 }
 
-// findTransportChains reports a handler-layer package that reaches a
-// transport package THROUGH another package in the same module.
+// findForeignChains reports a handler-layer package that reaches an import
+// the rule forbids — a transport package, or a driver — THROUGH another
+// package in the same module. One function serves both rules: two
+// breadth-first searches that differ by one predicate is how two rules drift
+// apart.
 //
 // The direct rule reads one file and is easy to satisfy by accident: move
 // the import into a helper and the check goes quiet. That is not a corner
@@ -343,17 +363,19 @@ func reachesThroughHelpers(graph map[string][]string, pkg, modPath string, bad f
 // reader that the application layer needs, so a project following the
 // documentation reaches net/http from its handlers and lints clean. A field
 // test's application layer did, across 19 packages, and only `go list -deps`
-// showed it.
+// showed it. A pool handed round from an internal/store package is the same
+// shape with a driver at the end of it.
 //
 // Only the project's OWN packages are traversed. A third-party helper that
 // happens to import net/http is not something the reader can restructure,
 // and a linter that reports it is one they switch off.
-func findTransportChains(report *Report, graph map[string][]string, site map[string]Violation, modPath string) {
-	// A package already reported directly is not reported again: the reader
-	// has the import, and the chain to it adds nothing.
+func findForeignChains(report *Report, graph map[string][]string, site map[string]Violation, modPath, rule string, offends func(string) bool) {
+	// A package already reported directly under THIS rule is not reported
+	// again: the reader has the import, and the chain to it adds nothing. The
+	// other rule's finding is a different mistake and does not suppress it.
 	direct := map[string]bool{}
 	for _, v := range report.Violations {
-		if v.Rule == "transport" {
+		if v.Rule == rule {
 			direct[v.Package] = true
 		}
 	}
@@ -368,27 +390,27 @@ func findTransportChains(report *Report, graph map[string][]string, site map[str
 		if direct[pkg] || !slices.Contains(handlerLayers, layerOf(pkg)) {
 			continue
 		}
-		chain, offender := reachesTransport(graph, pkg, modPath)
+		chain, offender := reachesForeign(graph, pkg, modPath, offends)
 		if offender == "" {
 			continue
 		}
 		// The line reported is the handler's own import of the next hop:
 		// that is the edge the reader owns and the one they will change.
 		v := site[pkg+" "+chain[1]]
-		v.Rule = "transport-chain"
+		v.Rule = rule + "-chain"
 		v.Imported = offender
 		v.Via = chain
 		report.Violations = append(report.Violations, v)
 	}
 }
 
-// reachesTransport returns the shortest chain from pkg to a transport
-// package, and that package. The chain starts at pkg and ends at the last
+// reachesForeign returns the shortest chain from pkg to an import offends()
+// accepts, and that import. The chain starts at pkg and ends at the last
 // in-module package before the offending import.
 //
 // Breadth-first, so the reported chain is the shortest one — a reader given
 // a six-hop path when a two-hop one exists will not believe the tool.
-func reachesTransport(graph map[string][]string, pkg, modPath string) ([]string, string) {
+func reachesForeign(graph map[string][]string, pkg, modPath string, offends func(string) bool) ([]string, string) {
 	type node struct {
 		pkg  string
 		path []string
@@ -399,7 +421,7 @@ func reachesTransport(graph map[string][]string, pkg, modPath string) ([]string,
 		cur := queue[0]
 		queue = queue[1:]
 		for _, imp := range graph[cur.pkg] {
-			if isTransportPackage(imp) {
+			if offends(imp) {
 				return cur.path, imp
 			}
 			// Foreign packages are leaves: their imports are not this
@@ -442,12 +464,85 @@ var transportPackages = []string{
 // isTransportPackage reports whether path is one of them, or lives beneath
 // one — warren/transport/http is as much a transport package as its parent.
 func isTransportPackage(path string) bool {
-	for _, p := range transportPackages {
+	return matchesPrefix(path, transportPackages)
+}
+
+// driverPackages are the import prefixes that make a package a driver: SQL
+// and NoSQL clients, message-broker clients, and Warren's own adapter
+// modules. The list is explicit rather than heuristic, for the same reason
+// transportPackages is: a linter that guesses is one people switch off.
+//
+// Cloud and SaaS SDKs are deliberately absent — aws-sdk-go-v2,
+// cloud.google.com/go, Stripe, Twilio and the rest. A domain importing the S3
+// SDK is the same violation in principle, and the list of SaaS clients is
+// unbounded: a list maintained by whoever last hit a false negative IS a
+// heuristic in a different hat, permanently incomplete, and its
+// incompleteness is indistinguishable from approval. The rule that catches
+// those is the layer rule, the moment the port is declared in the domain and
+// implemented in infrastructure.
+//
+// database/sql IS here, and database/sql/driver with it. The
+// legitimate-looking minority — a value object implementing driver.Valuer so
+// it can be stored — is exactly the coupling Warren argues against.
+//
+// warren/persistence and warren/broker are NOT here and must not be: they are
+// contract packages, and a domain naming persistence.UnitOfWork is the
+// pattern, not the violation. That is what the prefix matcher's `p+"/"` is
+// for.
+var driverPackages = []string{
+	"database/sql",
+	"github.com/jackc/pgx",
+	"github.com/lib/pq",
+	"github.com/go-sql-driver/mysql",
+	"go.mongodb.org/mongo-driver",
+	"github.com/redis/go-redis",
+	"github.com/twmb/franz-go",
+	"github.com/segmentio/kafka-go",
+	"github.com/IBM/sarama",
+	"github.com/rabbitmq/amqp091-go",
+	"github.com/nats-io/nats.go",
+	"github.com/MerseniBilel/warren/persistence/postgres",
+	"github.com/MerseniBilel/warren/persistence/mysql",
+	"github.com/MerseniBilel/warren/persistence/mongo",
+	"github.com/MerseniBilel/warren/persistence/redis",
+	"github.com/MerseniBilel/warren/broker/kafka",
+	"github.com/MerseniBilel/warren/broker/rabbitmq",
+	"github.com/MerseniBilel/warren/broker/nats",
+	"github.com/MerseniBilel/warren/broker/memory",
+	"github.com/MerseniBilel/warren/observability",
+}
+
+// isDriverPackage reports whether path is one of them, or lives beneath one —
+// pgx/v5/pgxpool is as much a driver as pgx itself.
+func isDriverPackage(path string) bool {
+	return matchesPrefix(path, driverPackages)
+}
+
+// matchesPrefix reports whether path is one of the listed packages or lives
+// beneath one. The boundary is a slash, never a string prefix: listing
+// warren/persistence/postgres must never catch warren/persistence, which is
+// the port every handler is supposed to name.
+func matchesPrefix(path string, prefixes []string) bool {
+	for _, p := range prefixes {
 		if path == p || strings.HasPrefix(path, p+"/") {
 			return true
 		}
 	}
 	return false
+}
+
+// foreignRule names the outside-the-project rule an import breaks, or "" for
+// an import that breaks neither. The two are separate rules because they have
+// separate remedies: "move the routing to the controller" is nonsense advice
+// for a pgx import.
+func foreignRule(path string) string {
+	switch {
+	case isTransportPackage(path):
+		return "transport"
+	case isDriverPackage(path):
+		return "driver"
+	}
+	return ""
 }
 
 // modulePath reads the module path from go.mod.
@@ -470,7 +565,10 @@ func modulePath(dir string) (string, error) {
 // broke, where, and what to do about it.
 func (r *Report) String() string {
 	if len(r.Violations) == 0 {
-		return fmt.Sprintf("No violations in %d packages.\n", r.Packages)
+		return fmt.Sprintf("No violations in %d packages.\n\n"+
+			"  Checked: the layer rule, the handler/transport rule and the handler/driver\n"+
+			"  rule — each directly and through a helper package.\n\n%s",
+			r.Packages, r.crossModuleCoverage())
 	}
 	var b strings.Builder
 	for _, v := range r.Violations {
@@ -505,10 +603,51 @@ func (r *Report) String() string {
 			}
 			fmt.Fprintf(&b, "✗ %s\n\n    %s:%d\n      package %s          (layer: %s)\n        imports %s\n\n%s\n\n",
 				headline, v.File, v.Line, v.Package, v.Layer, v.Imported, explain(v))
+		case "driver-chain":
+			what := "handler"
+			if v.Layer == "domain" {
+				what = "domain"
+			}
+			fmt.Fprintf(&b, "✗ the %s reaches a driver\n\n    %s:%d\n      package %s          (layer: %s)\n%s        imports %s\n\n%s\n\n",
+				what, v.File, v.Line, v.Package, v.Layer, chainOf(v), v.Imported, explain(v))
+		case "driver":
+			// The same split as the transport rule, and for the same reason:
+			// a use case has a port to declare, and a value object being told
+			// it has a handler is how a reader decides the tool has not read
+			// their code.
+			headline := "handler imports a driver"
+			if v.Layer == "domain" {
+				headline = "the domain imports a driver"
+			}
+			fmt.Fprintf(&b, "✗ %s\n\n    %s:%d\n      package %s          (layer: %s)\n        imports %s\n\n%s\n\n",
+				headline, v.File, v.Line, v.Package, v.Layer, v.Imported, explain(v))
 		}
 	}
-	fmt.Fprintf(&b, "%d violation(s) in %d packages.\n", len(r.Violations), r.Packages)
+	fmt.Fprintf(&b, "%d violation(s) in %d packages.\n\n%s", len(r.Violations), r.Packages, r.crossModuleCoverage())
 	return b.String()
+}
+
+// crossModuleCoverage says whether the cross-module rule compared anything.
+//
+// A check that did not run must never read as a check that passed: under the
+// layout with no `modules` segment, featureOf returns "" for every package,
+// the cross-module rule and its through-a-helper variant are both skipped,
+// and a real cross-feature import used to print "No violations" and exit 0.
+// The tool does not GUESS where a feature begins — a heuristic fires on the
+// project root of a single-feature app and invents the boundary it then
+// polices — so it says what it did instead.
+func (r *Report) crossModuleCoverage() string {
+	if r.Features > 0 {
+		unit := "feature modules"
+		if r.Features == 1 {
+			unit = "feature module"
+		}
+		return fmt.Sprintf("  Checked %d %s for cross-module imports.\n", r.Features, unit)
+	}
+	return "  NOT checked: the cross-module rule. It compares feature modules, which it\n" +
+		"  finds by a `modules` path segment — internal/modules/<feature>/… , the tree\n" +
+		"  `warren new` generates — and this project has none, so nothing was compared\n" +
+		"  across features.\n"
 }
 
 // chainOf renders the hops between the reported package and the offending
@@ -536,6 +675,51 @@ func explain(v Violation) string {
 			"      domain needs, in the domain's own words — and put the client\n" +
 			"      that speaks HTTP in infrastructure, where net/http is allowed.\n" +
 			"      The domain then depends on the interface it owns."
+	}
+	if (v.Rule == "driver" || v.Rule == "driver-chain") && v.Layer == "domain" {
+		// The domain's version of the rule is the stronger one, and the
+		// driver.Valuer case is named because it is the one a reader will
+		// otherwise defend: their Money type is being reported and they
+		// cannot see why.
+		return "  The domain layer is the one part of the application that depends on\n" +
+			"  nothing — not the other layers, not a protocol, and not a database. A\n" +
+			"  domain type that knows how it is stored cannot be tested without the\n" +
+			"  store, versioned apart from it, or moved into another service.\n\n" +
+			"  This includes implementing driver.Valuer or sql.Scanner on a domain type.\n" +
+			"  It reads as a small convenience and it is the whole coupling: the type now\n" +
+			"  names its storage technology.\n\n" +
+			"  Fix:\n" +
+			"    • Declare a PORT in the domain and put the mapping in infrastructure,\n" +
+			"      where database/sql is allowed. A repository that translates between the\n" +
+			"      domain type and its columns is the pattern; the domain type stays plain."
+	}
+	if v.Rule == "driver-chain" {
+		last := v.Via[len(v.Via)-1]
+		return "  A use case says WHAT must happen, never HOW it is stored, and that holds\n" +
+			"  through a helper as much as directly: this package does not import\n" +
+			"  " + v.Imported + " itself, but everything it depends on comes with it.\n\n" +
+			"  The import is in " + last + ".\n\n" +
+			"  Fix one of:\n" +
+			"    • SPLIT that package. The part the handler needs — an identifier, a\n" +
+			"      decision, a plain value — is almost always driver-free; only the code\n" +
+			"      that talks to the store needs " + v.Imported + ".\n" +
+			"      Two packages, and the handler imports the half without it.\n" +
+			"    • If the handler needs the STORE, declare a port in the domain and put\n" +
+			"      the driver code in infrastructure, where a driver is allowed.\n" +
+			"      `warren g repository` writes both halves."
+	}
+	if v.Rule == "driver" {
+		return "  A use case says WHAT must happen, never HOW it is stored or delivered. The\n" +
+			"  moment it names pgx it can only run where a Postgres pool can be built: not\n" +
+			"  in a unit test, not behind a second driver, not in another service.\n\n" +
+			"  That rule is what makes app.Handler[Req, Res] the same type on HTTP, gRPC\n" +
+			"  and a consumer, and what lets warren/persistence/postgres be swapped for\n" +
+			"  another driver in one line of main.go.\n\n" +
+			"  Fix:\n" +
+			"    • Declare a PORT in the domain — an interface in the domain's own words —\n" +
+			"      and put the pgx code in infrastructure, where a driver is allowed. Wire\n" +
+			"      the two in module.go, the one file permitted to see all four layers.\n" +
+			"      `warren g repository` writes both halves."
 	}
 	if v.Rule == "transport-chain" {
 		last := v.Via[len(v.Via)-1]

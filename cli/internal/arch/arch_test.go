@@ -1,14 +1,41 @@
 package arch_test
 
 import (
+	"bytes"
+	"flag"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/MerseniBilel/warren/cli/internal/arch"
+	"github.com/MerseniBilel/warren/cli/internal/command"
 	"github.com/MerseniBilel/warren/cli/internal/scaffold"
 )
+
+var update = flag.Bool("update", false, "rewrite golden files")
+
+// assertGolden pins a diagnostic to a file: the diagnostics ARE the product,
+// and untested error text rots immediately.
+func assertGolden(t *testing.T, name, got string) {
+	t.Helper()
+	path := filepath.Join("testdata", name+".golden")
+	if *update {
+		if err := os.MkdirAll("testdata", 0o755); err != nil {
+			t.Fatalf("creating testdata: %v", err)
+		}
+		if err := os.WriteFile(path, []byte(got), 0o644); err != nil {
+			t.Fatalf("writing golden file: %v", err)
+		}
+	}
+	want, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading golden file: %v", err)
+	}
+	if got != string(want) {
+		t.Errorf("report does not match golden file %s\ngot:\n%s\nwant:\n%s", path, got, want)
+	}
+}
 
 // fixture writes a throwaway Go module and returns its directory.
 func fixture(t *testing.T, files map[string]string) string {
@@ -800,5 +827,551 @@ type S struct{ I domain.Invoice }
 		if !strings.Contains(got, want) {
 			t.Errorf("the remedy does not mention %q:\n%s", want, got)
 		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// F3 — the report says what it did NOT check.
+// ---------------------------------------------------------------------------
+
+// twoFeatures returns the same project twice over: once under the layout
+// GETTING_STARTED §1-§5 teaches (internal/<feature>/…), once under the layout
+// `warren new` generates (internal/modules/<feature>/…). The import from one
+// feature into another's domain is byte-identical in both.
+func twoFeatures(t *testing.T, root string) string {
+	t.Helper()
+	return fixture(t, map[string]string{
+		root + "/tasks/domain/task.go": "package domain\n\ntype Task struct{}\n",
+		root + "/notes/domain/note.go": "package domain\n\ntype Note struct{}\n",
+		root + "/notes/application/attach.go": `package application
+
+import "example.com/fix/` + root + `/tasks/domain"
+
+type Attach struct{ T domain.Task }
+`,
+		root + "/notes/infrastructure/repo.go": "package infrastructure\n\ntype Repo struct{}\n",
+	})
+}
+
+// TestZeroFeaturesIsDisclosed — field test #13, finding F3. Under the layout
+// GETTING_STARTED §1-§5 teaches, featureOf returns "" for every package, the
+// cross-module rule and its through-a-helper variant are both skipped, and a
+// real cross-feature import printed:
+//
+//	No violations in 7 packages.   EXIT=0
+//
+// Nothing said half the rule set had not run. A check that did not run must
+// never read as a check that passed.
+func TestZeroFeaturesIsDisclosed(t *testing.T) {
+	t.Parallel()
+
+	report, err := arch.Check(twoFeatures(t, "internal"), arch.Options{Rules: arch.Layers})
+	if err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	if report.Features != 0 {
+		t.Errorf("Features = %d, want 0 — no `modules` segment in this tree", report.Features)
+	}
+	out := report.String()
+	for _, want := range []string{
+		"NOT checked: the cross-module rule",
+		"modules",
+		"internal/modules/<feature>",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the report does not disclose %q:\n%s", want, out)
+		}
+	}
+	assertGolden(t, "report_clean_no_features", out)
+}
+
+// TestFeatureCountIsReportedWhenPresent — the same tree, one segment moved.
+// The rule runs, the violation is found, and the report says how much it
+// compared rather than repeating the disclosure.
+func TestFeatureCountIsReportedWhenPresent(t *testing.T) {
+	t.Parallel()
+
+	report, err := arch.Check(twoFeatures(t, "internal/modules"), arch.Options{Rules: arch.Layers})
+	if err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	if report.Features != 2 {
+		t.Errorf("Features = %d, want 2", report.Features)
+	}
+	out := report.String()
+	if !strings.Contains(out, "Checked 2 feature modules for cross-module imports.") {
+		t.Errorf("the report does not say what it compared:\n%s", out)
+	}
+	if strings.Contains(out, "NOT checked") {
+		t.Errorf("a rule that RAN was disclosed as skipped:\n%s", out)
+	}
+	if len(report.Violations) != 1 {
+		t.Fatalf("violations = %d, want 1 — the cross-feature import:\n%s", len(report.Violations), out)
+	}
+	assertGolden(t, "report_features_present", out)
+}
+
+// TestDisclosureAppearsWithViolationsToo — the paragraph is about the rule
+// set, not about the outcome. A report with findings is still a report that
+// silently skipped half its rules.
+func TestDisclosureAppearsWithViolationsToo(t *testing.T) {
+	t.Parallel()
+
+	dir := fixture(t, map[string]string{
+		"internal/notes/infrastructure/repo.go": "package infrastructure\n\ntype Repo struct{}\n",
+		"internal/notes/domain/note.go": `package domain
+
+import "example.com/fix/internal/notes/infrastructure"
+
+type Note struct{ R infrastructure.Repo }
+`,
+	})
+	report, err := arch.Check(dir, arch.Options{Rules: arch.Layers})
+	if err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	if len(report.Violations) != 1 {
+		t.Fatalf("violations = %d, want 1:\n%s", len(report.Violations), report)
+	}
+	out := report.String()
+	if !strings.Contains(out, "NOT checked: the cross-module rule") {
+		t.Errorf("a report WITH violations dropped the disclosure:\n%s", out)
+	}
+	assertGolden(t, "report_violations_no_features", out)
+}
+
+// TestDisclosureDoesNotChangeExitCode — a disclosure is not a failure. A tool
+// that started failing builds over how a directory is named is a tool people
+// switch off, which is the outcome every ruling in this round avoids. Run
+// through the real command, because the exit code is the command's.
+func TestDisclosureDoesNotChangeExitCode(t *testing.T) {
+	t.Parallel()
+
+	dir := fixture(t, map[string]string{
+		"internal/notes/domain/note.go": "package domain\n\ntype Note struct{}\n",
+	})
+	root := command.Root()
+	var out bytes.Buffer
+	root.SetOut(&out)
+	root.SetErr(&out)
+	root.SetArgs([]string{"lint", "arch", dir})
+	err := root.Execute()
+	if code := command.ExitCode(err); code != 0 {
+		t.Errorf("exit = %d, want 0 — the disclosure is not a violation:\n%s", code, out.String())
+	}
+	if !strings.Contains(out.String(), "NOT checked: the cross-module rule") {
+		t.Errorf("the command's own output does not carry the disclosure:\n%s", out.String())
+	}
+}
+
+// ---------------------------------------------------------------------------
+// F4 — a driver in domain/ or application/ is a violation.
+// ---------------------------------------------------------------------------
+
+// TestPgxInApplicationIsAViolation is the F4 regression test. README:51-54
+// calls "a handler imports no transport package — no net/http, no pgx, no
+// kgo" the entire point; net/http was caught and every driver in the sentence
+// was waved through. Verified on a plain `warren new` scaffold: `go build`
+// passed and `warren lint arch .` printed "No violations in 10 packages."
+func TestPgxInApplicationIsAViolation(t *testing.T) {
+	t.Parallel()
+
+	for _, imported := range []string{
+		"github.com/jackc/pgx/v5",
+		"github.com/jackc/pgx/v5/pgxpool",
+		"database/sql",
+		"github.com/lib/pq",
+		"github.com/go-sql-driver/mysql",
+		"go.mongodb.org/mongo-driver/mongo",
+		"github.com/redis/go-redis/v9",
+		"github.com/twmb/franz-go/pkg/kgo",
+		"github.com/segmentio/kafka-go",
+		"github.com/IBM/sarama",
+		"github.com/rabbitmq/amqp091-go",
+		"github.com/nats-io/nats.go",
+	} {
+		t.Run(imported, func(t *testing.T) {
+			t.Parallel()
+			dir := fixture(t, map[string]string{
+				"internal/modules/orders/application/place.go": "package application\n\nimport _ \"" + imported + "\"\n",
+			})
+			report, err := arch.Check(dir, arch.Options{Rules: arch.Layers})
+			if err != nil {
+				t.Fatalf("Check: %v", err)
+			}
+			if len(report.Violations) != 1 {
+				t.Fatalf("importing %q from the application layer reported %d violations, want 1:\n%s",
+					imported, len(report.Violations), report)
+			}
+			if got := report.Violations[0].Rule; got != "driver" {
+				t.Errorf("rule = %q, want %q", got, "driver")
+			}
+			out := report.String()
+			for _, want := range []string{"handler imports a driver", imported, "place.go"} {
+				if !strings.Contains(out, want) {
+					t.Errorf("the report does not mention %q:\n%s", want, out)
+				}
+			}
+		})
+	}
+}
+
+// TestPgxInDomainGetsTheDomainRemedy — the two layers are not the same
+// mistake, and the domain's version of the rule is the stronger one. "Move
+// the routing to the controller" is nonsense for a pgx import; so is telling
+// a value object it has a handler.
+func TestPgxInDomainGetsTheDomainRemedy(t *testing.T) {
+	t.Parallel()
+
+	dir := fixture(t, map[string]string{
+		"internal/modules/orders/domain/order.go": "package domain\n\nimport _ \"github.com/jackc/pgx/v5\"\n",
+	})
+	report, err := arch.Check(dir, arch.Options{Rules: arch.Layers})
+	if err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	if len(report.Violations) != 1 {
+		t.Fatalf("violations = %d, want 1:\n%s", len(report.Violations), report)
+	}
+	out := report.String()
+	if !strings.Contains(out, "the domain imports a driver") {
+		t.Errorf("a domain violation is reported as a handler's:\n%s", out)
+	}
+	if strings.Contains(out, "Move the routing") {
+		t.Errorf("the report offers a transport fix for a driver import:\n%s", out)
+	}
+	for _, want := range []string{"depends on", "infrastructure", "order.go"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the report does not mention %q:\n%s", want, out)
+		}
+	}
+	assertGolden(t, "driver_domain", out)
+}
+
+// TestDatabaseSQLDriverInDomainIsAViolation — the legitimate-looking
+// minority: a value object implementing driver.Valuer so it can be stored.
+// That IS the coupling Warren argues against, and the remedy must name the
+// case rather than leave the reader guessing why their Money type is being
+// reported.
+func TestDatabaseSQLDriverInDomainIsAViolation(t *testing.T) {
+	t.Parallel()
+
+	dir := fixture(t, map[string]string{
+		"internal/modules/orders/domain/money.go": `package domain
+
+import "database/sql/driver"
+
+type Money struct{ Cents int64 }
+
+func (m Money) Value() (driver.Value, error) { return m.Cents, nil }
+`,
+	})
+	report, err := arch.Check(dir, arch.Options{Rules: arch.Layers})
+	if err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	if len(report.Violations) != 1 {
+		t.Fatalf("violations = %d, want 1:\n%s", len(report.Violations), report)
+	}
+	if !strings.Contains(report.String(), "driver.Valuer") {
+		t.Errorf("the remedy does not name the case it is reporting:\n%s", report)
+	}
+}
+
+// TestWarrenPersistencePostgresInApplicationIsAViolation — Warren's own
+// adapter modules are drivers like any other. A use case naming
+// warren/persistence/postgres can only run where a pool can be built.
+func TestWarrenPersistencePostgresInApplicationIsAViolation(t *testing.T) {
+	t.Parallel()
+
+	for _, imported := range []string{
+		"github.com/MerseniBilel/warren/persistence/postgres",
+		"github.com/MerseniBilel/warren/persistence/mysql",
+		"github.com/MerseniBilel/warren/persistence/mongo",
+		"github.com/MerseniBilel/warren/persistence/redis",
+		"github.com/MerseniBilel/warren/broker/kafka",
+		"github.com/MerseniBilel/warren/broker/rabbitmq",
+		"github.com/MerseniBilel/warren/broker/nats",
+		"github.com/MerseniBilel/warren/broker/memory",
+		"github.com/MerseniBilel/warren/observability",
+	} {
+		t.Run(imported, func(t *testing.T) {
+			t.Parallel()
+			dir := fixture(t, map[string]string{
+				"internal/modules/orders/application/place.go": "package application\n\nimport _ \"" + imported + "\"\n",
+			})
+			report, _ := arch.Check(dir, arch.Options{Rules: arch.Layers})
+			if len(report.Violations) != 1 {
+				t.Fatalf("importing %q reported %d violations, want 1:\n%s", imported, len(report.Violations), report)
+			}
+			if got := report.Violations[0].Rule; got != "driver" {
+				t.Errorf("rule = %q, want driver", got)
+			}
+		})
+	}
+}
+
+// TestWarrenPersistenceContractPackageIsNotAViolation is the prefix guard.
+// warren/persistence and warren/broker are CONTRACT packages: a domain naming
+// persistence.UnitOfWork is the pattern, not the violation. Listing
+// warren/persistence/postgres must never catch warren/persistence.
+func TestWarrenPersistenceContractPackageIsNotAViolation(t *testing.T) {
+	t.Parallel()
+
+	for _, imported := range []string{
+		"github.com/MerseniBilel/warren/persistence",
+		"github.com/MerseniBilel/warren/broker",
+		"github.com/MerseniBilel/warren/errors",
+	} {
+		for _, layer := range []string{"domain", "application"} {
+			t.Run(imported+"/"+layer, func(t *testing.T) {
+				t.Parallel()
+				dir := fixture(t, map[string]string{
+					"internal/modules/orders/" + layer + "/port.go": "package " + layer + "\n\nimport _ \"" + imported + "\"\n",
+				})
+				report, err := arch.Check(dir, arch.Options{Rules: arch.Layers})
+				if err != nil {
+					t.Fatalf("Check: %v", err)
+				}
+				if len(report.Violations) != 0 {
+					t.Errorf("the %s layer was refused %q — that is the pattern, not the violation:\n%s",
+						layer, imported, report)
+				}
+			})
+		}
+	}
+}
+
+// TestDriverInInfrastructureIsClean — an adapter holding a driver is the
+// reason infrastructure exists. Refusing it would make the rule wrong more
+// often than right.
+func TestDriverInInfrastructureIsClean(t *testing.T) {
+	t.Parallel()
+
+	dir := fixture(t, map[string]string{
+		"internal/modules/orders/infrastructure/repo.go": "package infrastructure\n\nimport _ \"github.com/jackc/pgx/v5\"\n",
+	})
+	report, err := arch.Check(dir, arch.Options{Rules: arch.Layers})
+	if err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	if len(report.Violations) != 0 {
+		t.Errorf("an infrastructure adapter was refused its driver:\n%s", report)
+	}
+}
+
+// TestDriverInControllerIsClean — the controller is unlayered and exempt by
+// construction, exactly as it is for transport.
+func TestDriverInControllerIsClean(t *testing.T) {
+	t.Parallel()
+
+	dir := fixture(t, map[string]string{
+		"internal/modules/orders/controller.go": "package orders\n\nimport _ \"database/sql\"\n",
+	})
+	report, err := arch.Check(dir, arch.Options{Rules: arch.Layers})
+	if err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	if len(report.Violations) != 0 {
+		t.Errorf("the controller was refused a driver:\n%s", report)
+	}
+}
+
+// TestDriverThroughAHelperIsAViolation — the direct rule reads one file,
+// which makes it satisfiable by accident: move the import into an unlayered
+// helper and the check goes quiet while the dependency is exactly as real.
+// The transport rule already learned this the expensive way.
+func TestDriverThroughAHelperIsAViolation(t *testing.T) {
+	t.Parallel()
+
+	dir := fixture(t, map[string]string{
+		"internal/store/store.go": `package store
+
+import "github.com/jackc/pgx/v5"
+
+func Pool() *pgx.Conn { return nil }
+`,
+		"internal/modules/orders/application/place.go": `package application
+
+import "example.com/fix/internal/store"
+
+var _ = store.Pool
+`,
+	})
+	report, err := arch.Check(dir, arch.Options{Rules: arch.Layers})
+	if err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	if len(report.Violations) != 1 {
+		t.Fatalf("violations = %d, want 1:\n%s", len(report.Violations), report)
+	}
+	v := report.Violations[0]
+	if v.Rule != "driver-chain" {
+		t.Errorf("rule = %q, want driver-chain", v.Rule)
+	}
+	// The line reported is the handler's OWN import of the helper: that is
+	// the edge the reader owns and the one they will change.
+	if v.File != "internal/modules/orders/application/place.go" {
+		t.Errorf("file = %q, want the handler's own import line", v.File)
+	}
+	if got := strings.Join(v.Via, " → "); got != "example.com/fix/internal/modules/orders/application → example.com/fix/internal/store" {
+		t.Errorf("chain = %q", got)
+	}
+	out := report.String()
+	for _, want := range []string{"internal/store", "github.com/jackc/pgx/v5", "place.go"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the report does not name %q:\n%s", want, out)
+		}
+	}
+	assertGolden(t, "driver_chain", out)
+}
+
+// TestDriverChainReportsShortestPath — a reader given a four-hop path when a
+// one-hop path exists will not believe the tool.
+func TestDriverChainReportsShortestPath(t *testing.T) {
+	t.Parallel()
+
+	dir := fixture(t, map[string]string{
+		"internal/long/long.go":   "package long\n\nimport _ \"example.com/fix/internal/deep\"\n",
+		"internal/deep/deep.go":   "package deep\n\nimport _ \"github.com/jackc/pgx/v5\"\n",
+		"internal/short/short.go": "package short\n\nimport _ \"github.com/jackc/pgx/v5\"\n",
+		"internal/modules/orders/application/place.go": `package application
+
+import (
+	_ "example.com/fix/internal/long"
+	_ "example.com/fix/internal/short"
+)
+`,
+	})
+	report, err := arch.Check(dir, arch.Options{Rules: arch.Layers})
+	if err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	if len(report.Violations) != 1 {
+		t.Fatalf("violations = %d, want 1:\n%s", len(report.Violations), report)
+	}
+	v := report.Violations[0]
+	if len(v.Via) != 2 || !strings.HasSuffix(v.Via[1], "internal/short") {
+		t.Errorf("chain = %v, want the two-hop path through internal/short", v.Via)
+	}
+}
+
+// TestDriverInApplicationGolden pins the handler remedy, which is the half of
+// the rule that must NOT read like the transport one.
+func TestDriverInApplicationGolden(t *testing.T) {
+	t.Parallel()
+
+	dir := fixture(t, map[string]string{
+		"internal/modules/orders/application/place.go": "package application\n\nimport _ \"github.com/jackc/pgx/v5\"\n",
+	})
+	report, err := arch.Check(dir, arch.Options{Rules: arch.Layers})
+	if err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	assertGolden(t, "driver_application", report.String())
+}
+
+// TestDriverInModuleGoIsExempt — module.go is the one file permitted to wire
+// a feature together, which is where a driver is handed to the repository
+// that will hold it. It is skipped before it is parsed, so its imports reach
+// neither the direct rule nor the graph the chain search walks: the exemption
+// holds for the driver rule as it does for every other.
+func TestDriverInModuleGoIsExempt(t *testing.T) {
+	t.Parallel()
+
+	dir := fixture(t, map[string]string{
+		"internal/modules/orders/application/module.go": "package application\n\nimport _ \"github.com/jackc/pgx/v5\"\n",
+		"internal/modules/orders/application/place.go":  "package application\n\ntype Place struct{}\n",
+	})
+	report, err := arch.Check(dir, arch.Options{Rules: arch.Layers})
+	if err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	if len(report.Violations) != 0 {
+		t.Errorf("module.go was refused its driver:\n%s", report)
+	}
+}
+
+// TestATransportAndADriverAreTwoFindings — the two rules share one
+// breadth-first search and one "already reported directly" map, and that map
+// is keyed per rule for a reason: a handler that imports both has made two
+// different mistakes with two different remedies, and suppressing one behind
+// the other is how a fix ships half done.
+func TestATransportAndADriverAreTwoFindings(t *testing.T) {
+	t.Parallel()
+
+	dir := fixture(t, map[string]string{
+		"internal/modules/orders/application/place.go": `package application
+
+import (
+	_ "github.com/jackc/pgx/v5"
+	_ "net/http"
+)
+`,
+	})
+	report, err := arch.Check(dir, arch.Options{Rules: arch.Layers})
+	if err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	rules := map[string]int{}
+	for _, v := range report.Violations {
+		rules[v.Rule]++
+	}
+	if rules["transport"] != 1 || rules["driver"] != 1 || len(report.Violations) != 2 {
+		t.Errorf("violations = %v, want one transport and one driver:\n%s", rules, report)
+	}
+}
+
+// TestInfrastructureMayReachADriverThroughAHelper — an adapter is where a
+// driver lives, and that exemption must survive indirection or the linter
+// becomes noise. An internal/store package handing a pool to a repository is
+// the ordinary shape.
+func TestInfrastructureMayReachADriverThroughAHelper(t *testing.T) {
+	t.Parallel()
+
+	dir := fixture(t, map[string]string{
+		"internal/store/store.go": "package store\n\nimport _ \"github.com/jackc/pgx/v5\"\n",
+		"internal/modules/orders/infrastructure/repo.go": `package infrastructure
+
+import _ "example.com/fix/internal/store"
+`,
+	})
+	report, err := arch.Check(dir, arch.Options{Rules: arch.Layers})
+	if err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	if len(report.Violations) != 0 {
+		t.Errorf("infrastructure was refused a driver dependency:\n%s", report)
+	}
+}
+
+// TestDomainReachingADriverThroughAHelperGetsTheDomainWording — the domain's
+// version of the rule is the stronger one, and it must not be lost to
+// indirection. A domain told to split a package it does not own, when what it
+// has is a type that knows how it is stored, is a domain whose owner switches
+// the linter off.
+func TestDomainReachingADriverThroughAHelperGetsTheDomainWording(t *testing.T) {
+	t.Parallel()
+
+	dir := fixture(t, map[string]string{
+		"internal/store/store.go": "package store\n\nimport _ \"database/sql\"\n",
+		"internal/modules/orders/domain/money.go": `package domain
+
+import _ "example.com/fix/internal/store"
+`,
+	})
+	report, err := arch.Check(dir, arch.Options{Rules: arch.Layers})
+	if err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	if len(report.Violations) != 1 {
+		t.Fatalf("violations = %d, want 1:\n%s", len(report.Violations), report)
+	}
+	out := report.String()
+	if !strings.Contains(out, "the domain reaches a driver") {
+		t.Errorf("a domain chain is reported as a handler's:\n%s", out)
+	}
+	if !strings.Contains(out, "driver.Valuer") {
+		t.Errorf("the domain remedy was lost to indirection:\n%s", out)
 	}
 }

@@ -1,0 +1,9 @@
+No violations in 4 packages.
+
+  Checked: the layer rule, the handler/transport rule and the handler/driver
+  rule — each directly and through a helper package.
+
+  NOT checked: the cross-module rule. It compares feature modules, which it
+  finds by a `modules` path segment — internal/modules/<feature>/… , the tree
+  `warren new` generates — and this project has none, so nothing was compared
+  across features.

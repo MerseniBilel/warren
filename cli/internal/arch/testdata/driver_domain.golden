@@ -1,0 +1,23 @@
+✗ the domain imports a driver
+
+    internal/modules/orders/domain/order.go:3
+      package example.com/fix/internal/modules/orders/domain          (layer: domain)
+        imports github.com/jackc/pgx/v5
+
+  The domain layer is the one part of the application that depends on
+  nothing — not the other layers, not a protocol, and not a database. A
+  domain type that knows how it is stored cannot be tested without the
+  store, versioned apart from it, or moved into another service.
+
+  This includes implementing driver.Valuer or sql.Scanner on a domain type.
+  It reads as a small convenience and it is the whole coupling: the type now
+  names its storage technology.
+
+  Fix:
+    • Declare a PORT in the domain and put the mapping in infrastructure,
+      where database/sql is allowed. A repository that translates between the
+      domain type and its columns is the pattern; the domain type stays plain.
+
+1 violation(s) in 1 packages.
+
+  Checked 1 feature module for cross-module imports.
