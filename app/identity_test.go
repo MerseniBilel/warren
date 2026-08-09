@@ -864,7 +864,12 @@ func TestTransactionalOutsideRetryingIsRefused(t *testing.T) {
 		for _, want := range []string{
 			"OUTSIDE Retrying",
 			"app.Chain(h, app.Retrying(policy), app.Transactional(uow))",
-			"hand-rolled transaction",
+			// The architect ruling of 2026-08-09 turned the closing paragraph
+			// from a confession — "a hand-rolled transaction middleware is
+			// not checked" — into a position. The escape hatch is writing the
+			// transaction yourself, and Warren declines to name it.
+			"There is no ChainUnchecked",
+			"app.Unwrapper",
 		} {
 			if !strings.Contains(msg, want) {
 				t.Errorf("the panic does not contain %q:\n%s", want, msg)
@@ -935,4 +940,123 @@ func TestTheMistakeHiddenBehindWarrensOwnMiddlewareIsRefused(t *testing.T) {
 			_ = app.Chain(inner, app.Transactional[string, string](&countingUoW{}))
 		})
 	}
+}
+
+// TestAUsersOwnMiddlewareCanMakeItselfWalkable — architect ruling of
+// 2026-08-09, and the root cause it identified. Field test #12 found four
+// compositions the refusal misses, all one cause: the walk's interface was
+// UNEXPORTED, so a user's middleware could not make itself transparent even
+// when it wanted to. That is not a limit of looking at handler values, it is
+// a closed door.
+//
+// app.Unwrapper opens it. A middleware whose handler implements it is walked
+// through exactly like Warren's own, so a Retrying underneath it is visible
+// to the refusal in an enclosing Chain.
+func TestAUsersOwnMiddlewareCanMakeItselfWalkable(t *testing.T) {
+	t.Parallel()
+
+	h := app.HandlerFunc[string, string](func(context.Context, string) (string, error) {
+		return "", nil
+	})
+	inner := app.Chain(h, app.Retrying[string, string](broker.ExponentialBackoff(3)))
+	// A user's middleware, hiding the Retrying — but declaring itself
+	// transparent.
+	seen := app.Chain(inner, func(next app.Handler[string, string]) app.Handler[string, string] {
+		return walkableMiddleware[string, string]{next: next}
+	})
+
+	defer func() {
+		if recover() == nil {
+			t.Fatal("a Retrying under a user middleware that implements app.Unwrapper stayed invisible")
+		}
+	}()
+	_ = app.Chain(seen, app.Transactional[string, string](&countingUoW{}))
+}
+
+// TestAnOpaqueUserMiddlewareIsStillAWall is the control, and it documents the
+// limit rather than hiding it: a middleware that does NOT implement Unwrapper
+// stops the walk, and the composition beneath it is not checked. This test
+// exists so the boundary is asserted rather than assumed — if a later change
+// makes the walk see through an anonymous HandlerFunc, that is a behaviour
+// change and this fails.
+func TestAnOpaqueUserMiddlewareIsStillAWall(t *testing.T) {
+	t.Parallel()
+
+	h := app.HandlerFunc[string, string](func(context.Context, string) (string, error) {
+		return "", nil
+	})
+	inner := app.Chain(h, app.Retrying[string, string](broker.ExponentialBackoff(3)))
+	hidden := app.Chain(inner, func(next app.Handler[string, string]) app.Handler[string, string] {
+		return app.HandlerFunc[string, string](func(ctx context.Context, r string) (string, error) {
+			return next.Handle(ctx, r)
+		})
+	})
+
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("the walk saw through an opaque middleware — the documented limit moved:\n%v", r)
+		}
+	}()
+	_ = app.Chain(hidden, app.Transactional[string, string](&countingUoW{}))
+}
+
+// walkableMiddleware is a user's middleware, written the way the panic text
+// tells a reader to write one: a named handler type with an Unwrap.
+type walkableMiddleware[Req, Res any] struct{ next app.Handler[Req, Res] }
+
+func (m walkableMiddleware[Req, Res]) Handle(ctx context.Context, r Req) (Res, error) {
+	return m.next.Handle(ctx, r)
+}
+
+func (m walkableMiddleware[Req, Res]) Unwrap() app.Handler[Req, Res] { return m.next }
+
+// TestTheNestedRefusalDoesNotPrescribeASwapThatCannotBeMade — field test #12,
+// D4. Split across two Chain calls, the refusal fired correctly and then gave
+// advice that did not apply: "middleware 1 of 1", followed by an instruction
+// to swap two arguments at a call site that has one. The reader greps for
+// app.Retrying at the panicking line and does not find it, because it is in
+// the handler they passed in.
+func TestTheNestedRefusalDoesNotPrescribeASwapThatCannotBeMade(t *testing.T) {
+	t.Parallel()
+
+	h := app.HandlerFunc[string, string](func(context.Context, string) (string, error) {
+		return "", nil
+	})
+	inner := app.Chain(h, app.Retrying[string, string](broker.ExponentialBackoff(3)))
+
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("the nested mistake was accepted")
+		}
+		msg, _ := r.(string)
+		// It must say where the Retrying actually is.
+		if !strings.Contains(msg, "handler you passed in") {
+			t.Errorf("the panic does not say the Retrying came from the handler argument:\n%s", msg)
+		}
+		// And it must NOT recite the swap, which has nothing to swap here.
+		if strings.Contains(msg, "is written the other way round") {
+			t.Errorf("the panic prescribes an argument swap at a call site with one middleware:\n%s", msg)
+		}
+	}()
+	_ = app.Chain(inner, app.Transactional[string, string](&countingUoW{}))
+}
+
+// TestTheDirectRefusalStillPrescribesTheSwap is the control for the test
+// above: where the swap IS the fix, it must still be spelled out.
+func TestTheDirectRefusalStillPrescribesTheSwap(t *testing.T) {
+	t.Parallel()
+
+	h := app.HandlerFunc[string, string](func(context.Context, string) (string, error) {
+		return "", nil
+	})
+	defer func() {
+		msg, _ := recover().(string)
+		if !strings.Contains(msg, "is written the other way round") {
+			t.Errorf("the single-call refusal lost the swap it exists to prescribe:\n%s", msg)
+		}
+	}()
+	_ = app.Chain(h,
+		app.Transactional[string, string](&countingUoW{}),
+		app.Retrying[string, string](broker.ExponentialBackoff(3)))
 }

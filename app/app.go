@@ -70,6 +70,13 @@ type Middleware[Req, Res any] func(Handler[Req, Res]) Handler[Req, Res]
 // transaction, and the reverse wraps one transaction around every attempt. A
 // field test wrote the reverse and measured zero retries across eight
 // concurrent requests, with two callers refused for stock that existed.
+//
+// The reverse is REFUSED, at boot, and the walk that finds it sees through
+// every middleware Warren ships and through any of yours whose handler
+// implements [Unwrapper] — including across a nested Chain. A middleware of
+// yours that does not implement it is a wall the walk stops at, so a Retrying
+// beneath it is invisible here; one method lifts that. There is deliberately
+// no unchecked variant of this function.
 func Chain[Req, Res any](h Handler[Req, Res], mw ...Middleware[Req, Res]) Handler[Req, Res] {
 	if h == nil {
 		panic("app: Chain composed around a nil handler — the handler must exist before boot step 5 builds the route table")
@@ -78,6 +85,9 @@ func Chain[Req, Res any](h Handler[Req, Res], mw ...Middleware[Req, Res]) Handle
 	// Chain(Chain(h, Retrying(p)), Transactional(uow)) is the same mistake
 	// spelled in two calls.
 	sawRetry := containsRetrying[Req, Res](h)
+	// Whether the Retrying is in THIS call's list or came in with the handler
+	// decides what the refusal can sensibly tell the reader to do.
+	fromHandler := sawRetry
 	for i := len(mw) - 1; i >= 0; i-- {
 		if mw[i] == nil {
 			panic(fmt.Sprintf("app: Chain middleware %d of %d is nil — append a conditional middleware only when it is enabled", i+1, len(mw)))
@@ -89,12 +99,13 @@ func Chain[Req, Res any](h Handler[Req, Res], mw ...Middleware[Req, Res]) Handle
 		switch h.(type) {
 		case retryingHandler[Req, Res]:
 			sawRetry = true
+			fromHandler = false
 		case transactionalHandler[Req, Res]:
 			// Transactional is being applied OUTSIDE a Retrying that is
 			// already in the stack, so one transaction would wrap every
 			// attempt. There is no correct reading of that — see the panic.
 			if sawRetry {
-				panic(errTransactionOutsideRetry(i+1, len(mw)))
+				panic(errTransactionOutsideRetry(i+1, len(mw), fromHandler))
 			}
 		}
 	}
@@ -102,18 +113,27 @@ func Chain[Req, Res any](h Handler[Req, Res], mw ...Middleware[Req, Res]) Handle
 }
 
 // containsRetrying walks a handler's wrappers looking for a Retrying. It sees
-// Warren's own middleware and stops at a user's, which is the stated limit of
-// the check.
+// every middleware Warren ships, and any of the user's that implements
+// Unwrapper; it stops at one that does not, which is the stated limit of the
+// check and is now something the user can lift rather than only suffer.
 func containsRetrying[Req, Res any](h Handler[Req, Res]) bool {
 	for {
 		if _, ok := h.(retryingHandler[Req, Res]); ok {
 			return true
 		}
-		c, ok := h.(composed[Req, Res])
+		c, ok := h.(Unwrapper[Req, Res])
 		if !ok {
 			return false
 		}
-		h = c.inner()
+		next := c.Unwrap()
+		// A user's Unwrap may return nil, or itself. Neither is worth a
+		// diagnostic — a middleware that wraps nothing is simply the end of
+		// the walk — but a self-returning one would spin here forever, and a
+		// boot that hangs is worse than one that refuses.
+		if next == nil || next == h {
+			return false
+		}
+		h = next
 	}
 }
 
@@ -127,17 +147,34 @@ func containsRetrying[Req, Res any](h Handler[Req, Res]) bool {
 // case only works when the handler has staged nothing yet — an unenforceable
 // property — and even then the correct ordering does the same work without
 // holding a transaction open across the backoff.
-func errTransactionOutsideRetry(pos, total int) string {
-	return fmt.Sprintf(`app: Transactional is composed OUTSIDE Retrying (middleware %d of %d), so ONE
-transaction wraps every retry attempt instead of each attempt getting its own.
-
-  Chain's FIRST middleware is the OUTERMOST one, so this:
+// nested says the Retrying was not in this call's middleware list at all — it
+// was already inside the handler argument, put there by another Chain. The
+// distinction is the whole of the remedy: with nothing to swap at this call
+// site, the reader who is told to swap two arguments greps for app.Retrying,
+// does not find it, and concludes the framework is confused.
+func errTransactionOutsideRetry(pos, total int, nested bool) string {
+	where := `  Chain's FIRST middleware is the OUTERMOST one, so this:
 
       app.Chain(h, app.Transactional(uow), app.Retrying(policy))
 
   is written the other way round:
 
-      app.Chain(h, app.Retrying(policy), app.Transactional(uow))
+      app.Chain(h, app.Retrying(policy), app.Transactional(uow))`
+	if nested {
+		where = `  There is no app.Retrying in THIS call to swap. It is already inside
+  the handler you passed in, composed by an earlier Chain, and this call
+  wraps a transaction around the whole of it. Compose both in one call:
+
+      h = app.Chain(h, app.Retrying(policy), app.Transactional(uow))
+
+  or, if the two calls must stay apart, move the Transactional into the inner
+  one and leave this call the outer middleware that does not open a
+  transaction.`
+	}
+	return fmt.Sprintf(`app: Transactional is composed OUTSIDE Retrying (middleware %d of %d), so ONE
+transaction wraps every retry attempt instead of each attempt getting its own.
+
+%s
 
   As composed, a retry re-invokes the whole handler inside the transaction that
   is already open, with the writes the failed attempt staged still in it. On a
@@ -151,6 +188,15 @@ transaction wraps every retry attempt instead of each attempt getting its own.
   To retry one flaky outbound call rather than the whole handler, retry it in the
   adapter behind its port (warren.md §7.3), not here.
 
-  This check sees app.Transactional and app.Retrying. A hand-rolled transaction
-  middleware carries no such marker and is not checked.`, pos, total)
+  There is no ChainUnchecked and there will not be one. If you have concluded that
+  you genuinely need ONE transaction spanning a retry, write the transaction
+  middleware yourself — uow.Do around the retrying handler — and own what it
+  means: every attempt after the first runs on a connection the failed one may
+  have poisoned, and on Postgres the commit publishes the writes of the attempts
+  that failed. This check sees app.Transactional and app.Retrying. It will not
+  see yours, and that is the whole of the opt-out.
+
+  A middleware of your own that WRAPS another handler is invisible to this check
+  unless its handler implements app.Unwrapper[Req, Res] — one method,
+  Unwrap() Handler[Req, Res], returning the handler it wraps.`, pos, total, where)
 }

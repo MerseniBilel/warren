@@ -52,14 +52,9 @@ type timeoutHandler[Req, Res any] struct {
 	next Handler[Req, Res]
 }
 
-// inner is reached through composed[Req,Res], in Chain's containsRetrying
-// walk. staticcheck's unused does not track interface satisfaction by a
-// GENERIC method, so it reports every one of these as dead; the var _ composed
-// block and TestTheMistakeHiddenBehindWarrensOwnMiddlewareIsRefused both
-// prove otherwise.
-//
-//nolint:unused // false positive: generic method satisfying composed[Req,Res]
-func (h timeoutHandler[Req, Res]) inner() Handler[Req, Res] { return h.next }
+// Unwrap makes this middleware transparent to Chain's containsRetrying walk.
+// See app.Unwrapper.
+func (h timeoutHandler[Req, Res]) Unwrap() Handler[Req, Res] { return h.next }
 
 func (h timeoutHandler[Req, Res]) Handle(ctx context.Context, req Req) (Res, error) {
 	ctx, cancel := context.WithTimeout(ctx, h.d)

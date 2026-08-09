@@ -1057,6 +1057,13 @@ type Middleware[Req, Res any] func(Handler[Req, Res]) Handler[Req, Res]
 type HandlerFunc[Req, Res any] func(ctx context.Context, req Req) (Res, error)
 
 func Chain[Req, Res any](h Handler[Req, Res], mw ...Middleware[Req, Res]) Handler[Req, Res]
+
+// Implement it on YOUR middleware's handler to make it transparent to
+// Chain's composition checks. Every middleware Warren ships does.
+type Unwrapper[Req, Res any] interface {
+	Handler[Req, Res]
+	Unwrap() Handler[Req, Res]
+}
 ```
 
 `Chain(h, a, b, c)`: `a` is the **outermost** — first to see the request,

@@ -548,6 +548,29 @@ recommended in blog posts, and neither README said so.
   alongside the next one's, and a field test measured the in-memory driver
   retrying ZERO times. Nothing else panics, and nothing is added to this
   list without amending this line.
+
+  **The admission test, added 2026-08-09 by architect ruling.** Three entries
+  is not evidence of a habit; it is evidence that nobody had written down the
+  criteria, so each candidate was argued from scratch and the COUNT was the
+  only thing anyone could point at. A construct earns a boot panic when **all
+  four** of these hold, and the count is then whatever the test produces:
+
+  1. It is **detectable at composition time** — no runtime state required.
+  2. It has **no correct reading**. Not "usually wrong": there is no
+     legitimate minority to serve — which is also exactly why such a check
+     needs no opt-out, and why `ChainUnchecked` does not exist.
+  3. The API **cannot return an error** — the signature is fixed by a recorded
+     decision, and widening it would put `if err != nil` at every call site
+     for what is a programming mistake.
+  4. The alternative is **silent data loss or corruption**, not a
+     degraded-but-working service.
+
+  A candidate failing any one of them is a doc comment, a `warren lint` rule,
+  or a returned error. Note what this test is NOT: it is not a defence of
+  runtime DI. `app.Chain` is an ordinary generic function called with explicit
+  arguments, and the mistake is argument ORDER — a `wire`-style generator
+  would emit the corrupting composition just as cheerfully. This panic is the
+  price of expressing composition as a variadic slice rather than as types.
 - Reflection belongs at boot, not in the request path (invariant 7).
 - Exported identifiers have doc comments starting with the identifier's name.
 - Formatting is the formatter's job. Never hand-format; never argue about it.
