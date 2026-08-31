@@ -170,10 +170,33 @@ func bindParams(req any, p Params, setters []setter) error {
 // Renaming a path segment without renaming the tag is the ordinary way to
 // reach it, and nothing in the response says the parameter never arrived.
 //
+// BOTH directions are checked, and the second sentence of this comment used
+// to deny the second one: "a pattern with a wildcard nothing binds is
+// legitimate — a route may ignore a segment it matches on." It is not
+// legitimate, and field test #14 measured why. A {id} no field binds boots
+// green and then fails every request — 400 for ever where the field carries
+// validate:"required", and an empty identifier reaching the handler where it
+// does not — while the published OpenAPI path is invalid either way, because
+// OpenAPI 3.1 requires a path parameter for every template expression and
+// openapi derives parameters from `param:` tags alone. A route that ignores a
+// segment it matches on is therefore serving a path its own published
+// contract does not mention.
+//
+// The remedy is one struct field, and it costs nothing at request time —
+// bindParams walks a precomputed index either way — so the diagnostic names it
+// rather than offering an opt-out.
+//
 // Only PATH parameters are checked. A query: tag has no wildcard by
-// definition, and a pattern with a wildcard nothing binds is legitimate —
-// a route may ignore a segment it matches on.
-func checkWildcards(pattern string, setters []setter) error {
+// definition, and cannot satisfy one.
+// It returns the failures INDIVIDUALLY rather than pre-joined. errRegistration
+// indents what it wraps, and the Builder joins every registration failure with
+// the same function at boot — so a pre-joined group arrived one indent deeper
+// than its siblings and read as nested under one of them. Returning a slice
+// makes each failure a sibling, which is what
+// TestEveryJoinedFailureLeadsWithItsOwnHeadline asserts and what the forward
+// check had quietly been getting wrong too, for want of a second failure to
+// stand beside.
+func checkWildcards(pattern, reqType string, setters []setter) []error {
 	var missing []setter
 	for _, s := range setters {
 		if s.query {
@@ -183,11 +206,26 @@ func checkWildcards(pattern string, setters []setter) error {
 			missing = append(missing, s)
 		}
 	}
-	if len(missing) == 0 {
+	// The reverse: a wildcard the request type binds nothing to.
+	var unbound []string
+	for _, w := range wildcards(pattern) {
+		bound := false
+		for _, s := range setters {
+			if !s.query && s.name == w {
+				bound = true
+				break
+			}
+		}
+		if !bound {
+			unbound = append(unbound, w)
+		}
+	}
+
+	if len(missing) == 0 && len(unbound) == 0 {
 		return nil
 	}
 
-	var errs []error
+	var errs []error //nolint:prealloc // two loops append to it under different conditions
 	present := wildcards(pattern)
 	for _, s := range missing {
 		hint := "  Add it to the pattern, or drop the tag."
@@ -204,7 +242,31 @@ func checkWildcards(pattern string, setters []setter) error {
 				"    zero value and report NOT_FOUND, with nothing saying why.\n\n%s",
 			s.name, s.name, pattern, hint)))
 	}
-	return errRegistration(errs)
+
+	for _, w := range unbound {
+		// The near miss is the likely cause, and the forward half already
+		// prints this class of hint: a field tagged for a name the pattern
+		// does not declare, beside a wildcard nothing declares a field for.
+		hint := fmt.Sprintf("  Add the field, even if the handler ignores it:\n\n      ID string `param:%q`\n\n  or drop {%s} from the pattern.", w, w)
+		var tagged []string
+		for _, s := range setters {
+			if !s.query {
+				tagged = append(tagged, s.name)
+			}
+		}
+		if len(tagged) > 0 {
+			hint = fmt.Sprintf("  %s carries `param:` for %s and nothing for {%s}.\n%s",
+				reqType, "{"+strings.Join(tagged, "}, {")+"}", w, hint)
+		}
+		errs = append(errs, diagnostic(fmt.Sprintf(
+			"✗ path wildcard nothing binds\n\n    pattern %s declares {%s}, and no field of %s carries `param:%q`\n\n"+
+				"    Every request binds \"\" for it: with validate:\"required\" the route\n"+
+				"    400s for ever, without it the handler receives an empty identifier\n"+
+				"    and reports NOT_FOUND. The published OpenAPI path is invalid either\n"+
+				"    way — a templated segment with no parameter.\n\n%s",
+			pattern, w, reqType, w, hint)))
+	}
+	return errs
 }
 
 // hasWildcard reports whether pattern declares {name} or {name...}.
