@@ -3,10 +3,10 @@ package postgres
 import (
 	"context"
 	stderrors "errors"
+	"sync"
 
 	"github.com/jackc/pgx/v5"
 
-	"github.com/MerseniBilel/warren/domain"
 	"github.com/MerseniBilel/warren/errors"
 	"github.com/MerseniBilel/warren/persistence"
 )
@@ -16,8 +16,13 @@ import (
 //
 // It is provided by Module; construct it only in a test.
 type UnitOfWork struct {
-	pool  *pool
-	sinks []func(context.Context, []domain.Event) error
+	pool *pool
+
+	// mu guards sinks. Registration is boot-time and commits are concurrent,
+	// so the slice is snapshotted under the lock before Deliver runs — the
+	// memory driver already did this and the two now match.
+	mu    sync.Mutex
+	sinks []persistence.EventSink
 }
 
 var _ persistence.UnitOfWork = (*UnitOfWork)(nil)
@@ -32,10 +37,14 @@ var _ persistence.UnitOfWork = (*UnitOfWork)(nil)
 //	uow.OnCommit(outbox.Sink(store, outbox.JSONEncoder()))
 //
 // Outbox wires this for you.
-func (u *UnitOfWork) OnCommit(fn func(context.Context, []domain.Event) error) {
+// OnCommit registers a sink for the events drained at commit. Registration is
+// a boot-time act: a sink added after the first commit is not supported.
+func (u *UnitOfWork) OnCommit(fn persistence.EventSink) {
 	if fn == nil {
 		panic("postgres: OnCommit registered a nil sink")
 	}
+	u.mu.Lock()
+	defer u.mu.Unlock()
 	u.sinks = append(u.sinks, fn)
 }
 
@@ -124,10 +133,16 @@ func (u *UnitOfWork) Do(ctx context.Context, fn func(context.Context) error, opt
 
 	// Step 7 — the sinks, INSIDE the transaction. outbox.Sink lands here and
 	// its INSERT joins this transaction, so a rollback takes the rows with it.
-	for _, sink := range u.sinks {
-		if err := sink(txCtx, events); err != nil {
-			return errors.Unavailable("unit of work commit", err)
-		}
+	//
+	// persistence.Deliver, not a loop: it is the only sanctioned way to
+	// dispose of drained events, and it REFUSES when there are events and no
+	// sink. This was an inline loop, and with no sink registered it discarded
+	// them — committing the row while the events it raised ceased to exist.
+	u.mu.Lock()
+	sinks := append([]persistence.EventSink(nil), u.sinks...)
+	u.mu.Unlock()
+	if err := persistence.Deliver(txCtx, events, sinks); err != nil {
+		return err
 	}
 
 	// Step 8 — one commit: aggregate state and outbox rows together.
@@ -153,8 +168,7 @@ func isoLevel(l persistence.Level) pgx.TxIsoLevel {
 	}
 }
 
-// errorsAs and errorsAs2 are the standard library's As and Is, renamed so
-// this package's own errors import does not shadow them.
-func errorsAs(err error, target any) bool { return stderrors.As(err, target) }
-
-func errorsAs2(err, target error) bool { return stderrors.Is(err, target) }
+// errorsIs is the standard library's Is, renamed so this package's own errors
+// import does not shadow it. There is no As counterpart: errors.AsType is
+// generic, so it needs no out-parameter and reads correctly at the call site.
+func errorsIs(err, target error) bool { return stderrors.Is(err, target) }

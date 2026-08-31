@@ -25,6 +25,7 @@
 package playground
 
 import (
+	stderrors "errors"
 	"reflect"
 	"strings"
 	"sync"
@@ -199,8 +200,7 @@ func (val *validator) unknownTokens(tag string) []string {
 // address" — rather than the library's default sentence, which names the Go
 // struct and reads like a stack trace to an API consumer.
 func translate(err error) error {
-	var invalid *pv.InvalidValidationError
-	if asInvalid(err, &invalid) {
+	if _, ok := stderrors.AsType[*pv.InvalidValidationError](err); ok {
 		return errors.Internal(err)
 	}
 	fes, ok := err.(pv.ValidationErrors)

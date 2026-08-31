@@ -44,6 +44,9 @@ func TestDefaultVersionIsTagged(t *testing.T) {
 	}
 
 	for _, m := range frameworkModules {
+		if _, unreleased := unreleasedModules[m]; unreleased {
+			continue // declared, with a reason; TestUnreleasedModulesAreUntagged holds it honest
+		}
 		want := DefaultVersion
 		if m != "" {
 			want = strings.TrimPrefix(m, "/") + "/" + DefaultVersion
@@ -141,4 +144,41 @@ func semver(tag string) ([3]int, bool) {
 		out[i] = n
 	}
 	return out, true
+}
+
+// TestUnreleasedModulesAreUntagged is the other half of the exemption above.
+//
+// An exemption list that only ever suppresses failures rots into a list of
+// things nobody rechecks — the shape CLAUDE.md rejects as "a linter that
+// guesses". This one cannot: the moment a module named here IS tagged, its
+// entry is a lie and this fails, which is what makes deleting the line part
+// of releasing rather than something to remember afterwards.
+func TestUnreleasedModulesAreUntagged(t *testing.T) {
+	t.Parallel()
+
+	tags := repoTags(t)
+	if len(tags) == 0 {
+		t.Skip("no git tags visible; nothing to check the exemptions against")
+	}
+
+	listed := map[string]bool{}
+	for _, m := range frameworkModules {
+		listed[m] = true
+	}
+
+	for m, why := range unreleasedModules {
+		if !listed[m] {
+			t.Errorf("unreleasedModules exempts %q, which frameworkModules does not list — "+
+				"an exemption for a module that is not part of the scaffold exempts nothing", m)
+		}
+		if m == "" {
+			t.Errorf("unreleasedModules exempts the core module; a scaffold cannot resolve at all without it")
+			continue
+		}
+		tag := strings.TrimPrefix(m, "/") + "/" + DefaultVersion
+		if tags[tag] {
+			t.Errorf("unreleasedModules says %s is unreleased (%s), but %s is tagged — "+
+				"delete the entry: the exemption is now suppressing a real check", m, why, tag)
+		}
+	}
 }

@@ -1,7 +1,6 @@
 package playground
 
 import (
-	stderrors "errors"
 	"reflect"
 	"strings"
 
@@ -94,10 +93,6 @@ func jsonNameOf(f reflect.StructField) string {
 		return f.Name
 	}
 	return name
-}
-
-func asInvalid(err error, target **pv.InvalidValidationError) bool {
-	return stderrors.As(err, target)
 }
 
 // probeTag reports whether v recognises a constraint, PROBING the library

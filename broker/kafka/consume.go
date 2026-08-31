@@ -198,11 +198,7 @@ func (c *client) poll(ctx context.Context) {
 		if len(fp.Records) == 0 {
 			return
 		}
-		wg.Add(1)
-		go func(fp kgo.FetchTopicPartition) {
-			defer wg.Done()
-			c.dispatch(fp)
-		}(fp)
+		wg.Go(func() { c.dispatch(fp) })
 	})
 	wg.Wait()
 }

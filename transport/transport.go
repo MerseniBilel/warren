@@ -6,16 +6,37 @@
 // driver-neutral route table of pre-built closures; by the time a request
 // arrives the container is never consulted and nothing is resolved.
 //
-// # Go 1.26 and the shape of registration
+// Type arguments are inferred at the call site — r.Post("/users", c.register)
+// compiles, including when c.register is a concrete handler struct rather
+// than an app.HandlerFunc — and only need spelling out when the handler's own
+// type does not determine Req and Res.
 //
-// warren.md §3.5 registers through generic METHODS on concrete registrars —
-// a Go 1.27 feature. Until it ships, registration is generic FREE functions
-// with the same names (Get, Post, Method, OnEvent) and the same argument
-// order, so the migration is a mechanical rewrite of call sites inside
-// Register bodies; Register's own signature never changes. Type arguments
-// are usually inferred — transport.Post(r, "/users", c.register) compiles —
-// and only need spelling out when the handler's own type does not determine
-// Req and Res.
+// # Registration is methods on a concrete Registrar, and that is permanent
+//
+// Registrar is a struct, not an interface, and it cannot become one. Go
+// permits type parameters on methods of concrete types and forbids them on
+// interface methods — "interface method must have no type parameters" — and a
+// generic method cannot satisfy a non-generic interface method either. So no
+// interface can ever describe this API: not a test double, not a decorating
+// Registrar, not a recording one. Anything that needs to observe registration
+// reads the frozen Table instead. This is AGENT.md invariant 5's single
+// carve-out, and it is a language constraint rather than a preference.
+//
+// # reflect cannot see a generic method
+//
+// reflect.Type.NumMethod does not count them and Method(i) does not return
+// them: a type with one plain and two generic methods reports NumMethod() == 1.
+//
+// For the request path that is a guarantee, not a limitation — a generic
+// method cannot be dispatched reflectively at all, which is invariant 7 held
+// up by the type system rather than by review.
+//
+// It is a trap for TOOLING. Anything that enumerates methods reflectively sees
+// none of the registration API and gets no error saying so. warren/openapi is
+// the package this is aimed at: it is specified to read the frozen route table
+// plus DTO struct tags, and it must keep doing exactly that. An implementation
+// that reflects over controller methods to discover routes will find nothing
+// and report an empty document with a clean exit.
 package transport
 
 import (
@@ -35,13 +56,27 @@ import (
 	"github.com/MerseniBilel/warren/validate"
 )
 
-// Registrar accumulates the routes one controller registers. It is sealed:
-// this package holds the only implementation, so no adapter can reimplement
-// registration and drift from it — every router decodes, validates, binds
-// params, and defaults statuses identically.
-type Registrar interface {
-	record(e entry)
-	moduleName() string
+// Registrar accumulates the routes one controller registers.
+//
+// It is a concrete struct because it must be: Go permits type parameters on
+// methods of concrete types and forbids them on interface methods,
+// permanently, so the generic registration API below is only expressible this
+// way. This is the single carve-out to AGENT.md invariant 5 ("contract
+// packages contain zero implementations"), and it holds no driver type — it
+// erases handlers into route closures and nothing else.
+//
+// It is SEALED by construction: its fields are unexported and Builder.For is
+// the only thing that makes one, so no adapter can reimplement registration
+// and drift from it — every router decodes, validates, binds params, and
+// defaults statuses identically. Sealing used to be a run-time assertion
+// against a foreign implementation of an interface; there is no longer an
+// interface to implement, so the type system does it instead.
+//
+// Do not embed it. Get, Post, Delete and Method are ordinary method names and
+// would promote into the embedding type.
+type Registrar struct {
+	b      *Builder
+	module string
 }
 
 // Controller exposes handlers over transports. Register is called once, at
@@ -53,7 +88,7 @@ type Registrar interface {
 // accumulates. The routes a panicking controller had registered are
 // discarded.
 type Controller interface {
-	Register(r Registrar)
+	Register(r *Registrar)
 }
 
 // Consumer is a Controller that registers event subscriptions. The two names
@@ -168,11 +203,18 @@ func jsonKind(t reflect.Type) string {
 // with that field left at its zero value.
 //
 // It is opt-in, installed per HTTP server with http.Codec, and there is
-// deliberately no way to put it on the event path. It costs 3 allocations per
-// request more than JSON: json.Decoder has no Reset in encoding/json v1, so
-// the reader and the decoder are both per-request. Measured on
-// go1.26.3/darwin-arm64; transport/http's allocation budget is asserted
-// against the DEFAULT codec, and this is why.
+// deliberately no way to put it on the event path. It costs 7 allocations per
+// request more than JSON: v1's json.Decoder has no Reset, so the reader and
+// the decoder are both per-request. Measured on go1.27.0/darwin-arm64;
+// transport/http's allocation budget is asserted against the DEFAULT codec,
+// and this is why.
+//
+// The comment here used to read "3 allocations", "measured on go1.26.3", and
+// call the per-request decoder "a floor". All three were wrong by 2026-08-31:
+// the count is 7, and it is not a floor — encoding/json/jsontext.Decoder has
+// a Reset, and json/v2's Unmarshal takes RejectUnknownMembers directly and
+// rejects trailing data natively. Moving this codec onto it is a decode-error
+// change, so it goes through a spec rather than through this comment.
 //
 // Encoding is identical to JSON's. Strictness is a decode policy.
 func StrictJSON() Codec { return strictJSONCodec{} }
@@ -261,7 +303,7 @@ func Status(code int) RouteOption {
 // succeeded, the log said "http server listening", and every request to the
 // guarded route panicked inside the edge and became a 500. README's headline
 // is that every error the framework can detect surfaces at boot, and this one
-// is detectable at the call site: app.Authorized and transport.Raw both
+// is detectable at the call site: app.Authorized and r.Raw both
 // already refuse their nil the same way.
 func Guard(p app.AuthorizationPolicy) RouteOption {
 	if app.IsNilPolicy(p) {
@@ -351,10 +393,23 @@ type Table struct {
 	raw    []RawRoute
 	claims map[Protocol]string
 	tel    app.Telemetry
+	val    validate.Validator
 }
 
 // HTTP returns the registered HTTP routes.
 func (t *Table) HTTP() []HTTPRoute { return t.http }
+
+// Validator returns the validator the routes were compiled against.
+//
+// It exists for one consumer and one reason: something that DESCRIBES the API
+// from `validate:` tags — warren/openapi — must know whether those tags are
+// enforced. Under validate.None() every tag is accepted and nothing is
+// checked, so publishing them as constraints would be a document asserting
+// guarantees the service does not make. A generated client would then reject
+// requests the server accepts, and the framework would have generated the lie.
+//
+// It is not a seam for anything else. Nothing on the request path consults it.
+func (t *Table) Validator() validate.Validator { return t.val }
 
 // GRPC returns the registered gRPC methods.
 func (t *Table) GRPC() []GRPCRoute { return t.grpc }
@@ -404,10 +459,13 @@ func (t *Table) Unserved() error {
 		// name a package that does not exist. Say what is true instead.
 		missing = append(missing, fmt.Sprintf(
 			"%d gRPC method(s) — warren/transport/grpc is not built yet (deferred to v0.2).\n"+
-				"      Serve them over HTTP with transport.Get/Post, or drop the transport.Method calls", n))
+				"      Serve them over HTTP with r.Get/r.Post, or drop the r.Method calls", n))
 	}
 	if n := len(t.events) + rawFor[ProtocolEvent]; n > 0 && t.claims[ProtocolEvent] == "" {
-		missing = append(missing, fmt.Sprintf("%d event subscription(s) — add a broker module to warren.New", n))
+		missing = append(missing, fmt.Sprintf(
+			"%d event subscription(s) — add a broker module to warren.New:\n"+
+				"      memory.Module() from warren/broker/memory (in process), or\n"+
+				"      kafka.Broker(...) plus its consumers for a real broker", n))
 	}
 	if len(missing) == 0 {
 		return nil
@@ -462,7 +520,7 @@ func NewBuilder(opts ...BuilderOption) *Builder {
 }
 
 // For returns the Registrar passed to one module's controllers.
-func (b *Builder) For(module string) Registrar { return &registrar{b: b, module: module} }
+func (b *Builder) For(module string) *Registrar { return &Registrar{b: b, module: module} }
 
 // Failures returns the registration failures accumulated so far as one
 // diagnostic, or nil. Fill reports the same list, and reporting it twice is
@@ -494,6 +552,7 @@ func (b *Builder) Fill(t *Table) error {
 	}
 	t.http, t.grpc, t.events, t.raw = nil, nil, nil, nil
 	t.tel = b.cfg.telemetry
+	t.val = b.cfg.validator
 	seenHTTP := map[string]bool{}
 	seenGRPC := map[string]bool{}
 	seenEvent := map[string]bool{}
@@ -570,39 +629,46 @@ type entry struct {
 	rawHandler  any
 }
 
-type registrar struct {
-	b      *Builder
-	module string
-}
+func (r *Registrar) record(e entry)     { r.b.entries = append(r.b.entries, e) }
+func (r *Registrar) moduleName() string { return r.module }
 
-func (r *registrar) record(e entry)     { r.b.entries = append(r.b.entries, e) }
-func (r *registrar) moduleName() string { return r.module }
+func (r *Registrar) fail(err error) { r.b.errs = append(r.b.errs, err) }
 
-func (r *registrar) fail(err error) { r.b.errs = append(r.b.errs, err) }
+// zero reports a Registrar the framework did not create. Making Registrar a
+// concrete type made `var r transport.Registrar` constructible for the first
+// time, and an unguarded zero value would nil-dereference r.b — a strictly
+// worse diagnostic than the "foreign Registrar" panics this replaced. It
+// fires on the one case those could not, and it is boot-time only.
+//
+// It panics rather than accumulating through fail because fail writes to
+// r.b.errs, and r.b is precisely what is nil.
+func (r *Registrar) zero() bool { return r == nil || r.b == nil }
+
+const errZeroRegistrar = "transport: zero Registrar — the framework creates one at boot step 5 and passes it to Register; it cannot be constructed"
 
 // Get registers an HTTP GET route.
-func Get[Req, Res any](r Registrar, pattern string, h app.Handler[Req, Res], opts ...RouteOption) {
-	register(r, ProtocolHTTP, "GET", pattern, h, 200, opts...)
+func (r *Registrar) Get[Req, Res any](pattern string, h app.Handler[Req, Res], opts ...RouteOption) {
+	r.register(ProtocolHTTP, "GET", pattern, h, 200, opts...)
 }
 
 // Post registers an HTTP POST route. Its default success status is 201.
-func Post[Req, Res any](r Registrar, pattern string, h app.Handler[Req, Res], opts ...RouteOption) {
-	register(r, ProtocolHTTP, "POST", pattern, h, 201, opts...)
+func (r *Registrar) Post[Req, Res any](pattern string, h app.Handler[Req, Res], opts ...RouteOption) {
+	r.register(ProtocolHTTP, "POST", pattern, h, 201, opts...)
 }
 
 // Put registers an HTTP PUT route.
-func Put[Req, Res any](r Registrar, pattern string, h app.Handler[Req, Res], opts ...RouteOption) {
-	register(r, ProtocolHTTP, "PUT", pattern, h, 200, opts...)
+func (r *Registrar) Put[Req, Res any](pattern string, h app.Handler[Req, Res], opts ...RouteOption) {
+	r.register(ProtocolHTTP, "PUT", pattern, h, 200, opts...)
 }
 
 // Patch registers an HTTP PATCH route.
-func Patch[Req, Res any](r Registrar, pattern string, h app.Handler[Req, Res], opts ...RouteOption) {
-	register(r, ProtocolHTTP, "PATCH", pattern, h, 200, opts...)
+func (r *Registrar) Patch[Req, Res any](pattern string, h app.Handler[Req, Res], opts ...RouteOption) {
+	r.register(ProtocolHTTP, "PATCH", pattern, h, 200, opts...)
 }
 
 // Delete registers an HTTP DELETE route.
-func Delete[Req, Res any](r Registrar, pattern string, h app.Handler[Req, Res], opts ...RouteOption) {
-	register(r, ProtocolHTTP, "DELETE", pattern, h, 204, opts...)
+func (r *Registrar) Delete[Req, Res any](pattern string, h app.Handler[Req, Res], opts ...RouteOption) {
+	r.register(ProtocolHTTP, "DELETE", pattern, h, 204, opts...)
 }
 
 // Raw registers a protocol-native handler — the escape hatch for what the
@@ -621,23 +687,22 @@ func Delete[Req, Res any](r Registrar, pattern string, h app.Handler[Req, Res], 
 // and Post name a verb and take a bare path; Raw names none, so its pattern
 // is the adapter's own syntax and includes one:
 //
-//	transport.Post(r, "/uploads", h)          // typed:  path only
-//	transport.Raw(r, ProtocolHTTP, "POST /uploads", h)   // raw: method + path
+//	r.Post("/uploads", h)                       // typed: path only
+//	r.Raw(ProtocolHTTP, "POST /uploads", h)     // raw:   method + path
 //
 // A raw route gets the edge ring, its Guard policies, and the drain. It gets
 // no decode, no parameter binding, no validation, no encode, no Status
 // default, and no body limit: the handler owns all of it.
-func Raw(r Registrar, p Protocol, pattern string, h any, opts ...RouteOption) {
-	reg, ok := r.(*registrar)
-	if !ok {
-		panic("transport: Raw with a foreign Registrar — the interface is sealed")
+func (r *Registrar) Raw(p Protocol, pattern string, h any, opts ...RouteOption) {
+	if r.zero() {
+		panic(errZeroRegistrar)
 	}
 	if h == nil {
-		reg.fail(errNilHandler("transport.Raw", "raw route "+fmt.Sprintf("%q", pattern), "registered", reg.moduleName(), "handler"))
+		r.fail(errNilHandler("r.Raw", "raw route "+fmt.Sprintf("%q", pattern), "registered", r.moduleName(), "handler"))
 		return
 	}
 	if pattern == "" {
-		reg.fail(errEmptyPattern("Raw"))
+		r.fail(errEmptyPattern("Raw"))
 		return
 	}
 	cfg := routeConfig{}
@@ -646,9 +711,9 @@ func Raw(r Registrar, p Protocol, pattern string, h any, opts ...RouteOption) {
 	}
 	name := cfg.name
 	if name == "" {
-		name = reg.moduleName() + "." + rawName(h)
+		name = r.moduleName() + "." + rawName(h)
 	}
-	reg.record(entry{
+	r.record(entry{
 		protocol:   p,
 		pattern:    pattern,
 		name:       name,
@@ -671,37 +736,36 @@ func rawName(h any) string {
 }
 
 // Method registers a gRPC method, named "package.Service/Method".
-func Method[Req, Res any](r Registrar, fullMethod string, h app.Handler[Req, Res], opts ...RouteOption) {
-	register(r, ProtocolGRPC, "", fullMethod, h, 0, opts...)
+func (r *Registrar) Method[Req, Res any](fullMethod string, h app.Handler[Req, Res], opts ...RouteOption) {
+	r.register(ProtocolGRPC, "", fullMethod, h, 0, opts...)
 }
 
 // OnEvent subscribes a handler to a topic. The options are warren/broker's
 // own per-subscription options, forwarded to broker.Pipeline unchanged.
-func OnEvent[Req, Res any](r Registrar, topic string, h app.Handler[Req, Res], opts ...broker.SubscribeOption) {
-	reg, ok := r.(*registrar)
-	if !ok {
-		panic("transport: OnEvent with a foreign Registrar — the interface is sealed")
+func (r *Registrar) OnEvent[Req, Res any](topic string, h app.Handler[Req, Res], opts ...broker.SubscribeOption) {
+	if r.zero() {
+		panic(errZeroRegistrar)
 	}
 	if h == nil {
-		reg.fail(errNilHandler("transport.OnEvent", "topic "+fmt.Sprintf("%q", topic), "subscribed", reg.moduleName(), "app.Handler[Req, Res]"))
+		r.fail(errNilHandler("r.OnEvent", "topic "+fmt.Sprintf("%q", topic), "subscribed", r.moduleName(), "app.Handler[Req, Res]"))
 		return
 	}
 	if topic == "" {
-		reg.fail(errEmptyPattern("OnEvent"))
+		r.fail(errEmptyPattern("OnEvent"))
 		return
 	}
-	name := handlerName(reg.moduleName(), h)
-	rule, err := planRule[Req](reg.b.cfg.validator)
+	name := handlerName(r.moduleName(), h)
+	rule, err := planRule[Req](r.b.cfg.validator)
 	if err != nil {
-		reg.fail(errCannotValidate(topic, name, err))
+		r.fail(errCannotValidate(topic, name, err))
 		return
 	}
 	setters, err := paramSetters(reflect.TypeFor[Req]())
 	if err != nil {
-		reg.fail(err)
+		r.fail(err)
 		return
 	}
-	reg.record(entry{
+	r.record(entry{
 		protocol:   ProtocolEvent,
 		pattern:    topic,
 		name:       name,
@@ -709,7 +773,7 @@ func OnEvent[Req, Res any](r Registrar, topic string, h app.Handler[Req, Res], o
 		req:        reflect.TypeFor[Req](),
 		res:        reflect.TypeFor[Res](),
 		bindHandler: func(c Codec) broker.MessageHandler {
-			invoke := buildInvoker(c, h, rule, setters, name, reg.b.cfg.telemetry)
+			invoke := buildInvoker(c, h, rule, setters, name, r.b.cfg.telemetry)
 			return func(ctx context.Context, msg broker.Message) error {
 				_, err := invoke(ctx, msg.Payload)
 				return err
@@ -718,22 +782,21 @@ func OnEvent[Req, Res any](r Registrar, topic string, h app.Handler[Req, Res], o
 	})
 }
 
-func register[Req, Res any](r Registrar, p Protocol, verb, pattern string, h app.Handler[Req, Res], defaultStatus int, opts ...RouteOption) {
-	reg, ok := r.(*registrar)
-	if !ok {
-		panic("transport: registration with a foreign Registrar — the interface is sealed")
+func (r *Registrar) register[Req, Res any](p Protocol, verb, pattern string, h app.Handler[Req, Res], defaultStatus int, opts ...RouteOption) {
+	if r.zero() {
+		panic(errZeroRegistrar)
 	}
 	if h == nil {
-		reg.fail(errNilHandler(registrationFunc(p, verb), routeSubject(p, verb, pattern), "registered", reg.moduleName(), "app.Handler[Req, Res]"))
+		r.fail(errNilHandler(registrationFunc(p, verb), routeSubject(p, verb, pattern), "registered", r.moduleName(), "app.Handler[Req, Res]"))
 		return
 	}
 	if pattern == "" {
-		reg.fail(errEmptyPattern(verb))
+		r.fail(errEmptyPattern(verb))
 		return
 	}
 	if p == ProtocolHTTP {
 		if err := checkHTTPPattern(verb, pattern); err != nil {
-			reg.fail(err)
+			r.fail(err)
 			return
 		}
 	}
@@ -744,16 +807,16 @@ func register[Req, Res any](r Registrar, p Protocol, verb, pattern string, h app
 	}
 	name := cfg.name
 	if name == "" {
-		name = handlerName(reg.moduleName(), h)
+		name = handlerName(r.moduleName(), h)
 	}
-	rule, err := planRule[Req](reg.b.cfg.validator)
+	rule, err := planRule[Req](r.b.cfg.validator)
 	if err != nil {
-		reg.fail(errCannotValidate(pattern, name, err))
+		r.fail(errCannotValidate(pattern, name, err))
 		return
 	}
 	setters, err := paramSetters(reflect.TypeFor[Req]())
 	if err != nil {
-		reg.fail(err)
+		r.fail(err)
 		return
 	}
 	// HTTP only. A `param:` tag with no matching {wildcard} would bind "" on
@@ -763,20 +826,20 @@ func register[Req, Res any](r Registrar, p Protocol, verb, pattern string, h app
 	// same check refused the canonical Warren handler over the one protocol
 	// gRPC exists to share it with:
 	//
-	//	transport.Get(r, "/users/{id}", h)                    // fine
-	//	transport.Method(r, "user.v1.UserService/GetUser", h) // refused
+	//	r.Get("/users/{id}", h)                    // fine
+	//	r.Method("user.v1.UserService/GetUser", h) // refused
 	//
 	// OnEvent already exempts itself by never calling this; gRPC was the odd
 	// one out. A gRPC adapter fills Req from the protobuf message, so the
 	// param setters are simply unused there.
 	if p == ProtocolHTTP {
 		if err := checkWildcards(pattern, setters); err != nil {
-			reg.fail(err)
+			r.fail(err)
 			return
 		}
 	}
 
-	reg.record(entry{
+	r.record(entry{
 		protocol: p,
 		verb:     verb,
 		pattern:  pattern,
@@ -786,7 +849,7 @@ func register[Req, Res any](r Registrar, p Protocol, verb, pattern string, h app
 		req:      reflect.TypeFor[Req](),
 		res:      reflect.TypeFor[Res](),
 		bindInvoker: func(c Codec) Invoker {
-			return buildInvoker(c, h, rule, setters, name, reg.b.cfg.telemetry)
+			return buildInvoker(c, h, rule, setters, name, r.b.cfg.telemetry)
 		},
 	})
 }
@@ -937,24 +1000,24 @@ func errDuplicate(route string) error {
 // that is not a path at all.
 //
 // Get, Post and the rest already name the verb, and the adapter builds the
-// router pattern as "<verb> <pattern>" — so transport.Get(r, "GET /x", h)
+// router pattern as "<verb> <pattern>" — so r.Get("GET /x", h)
 // becomes "GET GET /x", which net/http reads as host "GET" and path "/x".
-// It boots clean and serves a route nothing can reach. transport.Raw is the
+// It boots clean and serves a route nothing can reach. r.Raw is the
 // opposite by design: it names no verb, so its pattern carries one.
 func checkHTTPPattern(verb, pattern string) error {
 	if i := strings.IndexByte(pattern, ' '); i >= 0 {
 		return diagnostic(fmt.Sprintf(
-			"✗ HTTP route pattern contains a method\n\n    transport.%s(r, %q, …)\n\n"+
+			"✗ HTTP route pattern contains a method\n\n    r.%s(%q, …)\n\n"+
 				"  %s already names the method, so the pattern is the path alone:\n\n"+
-				"      transport.%s(r, %q, …)\n\n"+
-				"  Only transport.Raw takes \"METHOD /path\" — it names no method of\n"+
+				"      r.%s(%q, …)\n\n"+
+				"  Only r.Raw takes \"METHOD /path\" — it names no method of\n"+
 				"  its own, so the pattern has to carry one.",
 			methodFunc(verb), pattern, methodFunc(verb),
 			methodFunc(verb), strings.TrimSpace(pattern[i+1:])))
 	}
 	if pattern[0] != '/' {
 		return diagnostic(fmt.Sprintf(
-			"✗ HTTP route pattern is not a path\n\n    transport.%s(r, %q, …)\n\n"+
+			"✗ HTTP route pattern is not a path\n\n    r.%s(%q, …)\n\n"+
 				"  An HTTP pattern starts with \"/\". Wildcards are net/http's:\n"+
 				"  \"/users/{id}\", \"/files/{path...}\", \"/exact/{$}\".",
 			methodFunc(verb), pattern))
@@ -987,7 +1050,7 @@ func methodFunc(verb string) string {
 // functions — a method written into the pattern, a duplicate route — were
 // not: the same mistake produced a clean boot failure or a Go stack dump
 // depending on which line of Register hit it first. The admission test
-// (AGENT.md § General) fails a nil handler on criterion 3, because reg.fail
+// (AGENT.md § General) fails a nil handler on criterion 3, because r.fail
 // is three lines away, and on criterion 4, because the alternative is a clean
 // boot failure rather than silent data loss.
 //
@@ -1020,9 +1083,9 @@ func errNilHandler(fn, subject, action, module, what string) error {
 // shows the line they wrote rather than the internal one it reached.
 func registrationFunc(p Protocol, verb string) string {
 	if p == ProtocolGRPC {
-		return "transport.Method"
+		return "r.Method"
 	}
-	return "transport." + methodFunc(verb)
+	return "r." + methodFunc(verb)
 }
 
 // routeSubject names the route the way its own protocol does: HTTP by verb

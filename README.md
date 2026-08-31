@@ -10,13 +10,15 @@
 > `net/http.ServeMux` and adds nothing to your `go.mod` but itself, and
 > **`persistence/postgres`**, whose unit of work commits aggregate state and
 > the outbox rows for that aggregate's events in one transaction. What is
-> **not** in v0.1: `openapi`, `auth` (the JWT/OIDC **verifier** — the identity
+> **not** in v0.1: `auth` (the JWT/OIDC **verifier** — the identity
 > type and the policies ship in `app`), `transport/grpc`,
 > `broker/rabbitmq`, `broker/nats`, and the Mongo/Redis/MySQL drivers — each
 > deferred to v0.2 **with the reason recorded in its own spec**, not left as
-> an open question. The short version: `openapi`'s architecture is now ruled
-> and its spec approved — it is a pure add-on over a route table frozen in
-> v0.1, so `go get` gets it in v0.2 with no migration —
+> an open question. `openapi` was on this list and was **written on
+> 2026-08-29**, exactly as predicted: a pure add-on over a route table frozen
+> in v0.1, with no migration and no third-party dependency. It is **not
+> released** — the module has no tag, so `go get .../warren/openapi` does not
+> resolve and `warren new --framework` is the only way to reach it. The short version for the rest:
 > `auth` needs two dependency audits that have not been run, and a third
 > broker driver answers nothing that `broker/memory` plus the shared contract
 > suite does not.
@@ -144,7 +146,7 @@ Progress is spec-first: ☑ means *done and verified*, not *started*.
       v1.19.0, cobra v1.10.2, franz-go v1.21.5, playground v10.30.3, and the
       rejections — `dave/dst`, `robfig/cron`, `x/tools` — with their reasons)*
 
-### Phase 1 — kernel (buildable on Go 1.26, in dependency order)
+### Phase 1 — kernel (in dependency order)
 
 All seven implemented packages were adversarially reviewed on 2026-08-01
 (31 reproduced findings across two review rounds, all fixed with regression
@@ -187,11 +189,11 @@ contract now.
 
 ### Phase 2 — transport
 
-- [x] `transport` (port) — sealed `Registrar`, generic free functions, route
-      table of pre-built closures *(implemented on Go 1.26 — the "Fix A"
-      shape; the 1.27 method form is a mechanical call-site rewrite)*
-- [ ] Bump toolchain to Go 1.27; verify generic methods compile as designed
-      *(and that inference works — explicit type arguments are needed today)*
+- [x] `transport` (port) — sealed `Registrar`, generic methods, route
+      table of pre-built closures
+- [x] Bump toolchain to Go 1.27; generic methods compile as designed, and
+      inference works — `r.Post("/users", c.register)` needs no type
+      arguments, including for a concrete handler struct *(2026-08-29)*
 - [x] `warren g repository --driver postgres` — plain SQL over `postgres.DB`
       carrying the three rules no compiler enforces, plus the table's
       migration and a `cmd/migrate` binary *(CI compiles the generated
@@ -204,7 +206,7 @@ contract now.
       drain-before-stop *(implemented on **`net/http.ServeMux`**, not chi:
       the sealed `Registrar` already discards everything a router is bought
       for, and chi measured worst of five candidates on this project's own
-      first priority. Zero third-party dependencies; 17 allocations per
+      first priority. Zero third-party dependencies; 13 allocations per
       request, asserted by a test)*
 - [ ] `transport/grpc` — **deferred to v0.2**, and the reasons are decided
       rather than open: a handler's `Req` must stay a plain Go struct or the
@@ -215,11 +217,12 @@ contract now.
       no reflection descriptor, and field numbers in Go struct tags. The round
       found **zero required changes to core `transport`**
 - [x] Fallback if 1.27 slips: generic free functions (compiles on 1.26; call
-      sites change shape) *(this is not a contingency any more — it is what
-      SHIPPED. `transport.Get[Req, Res](r, pattern, h)` is a generic free
-      function running on 1.26 today, and warren.md §3.5 fixes the names and
-      argument order the 1.27 methods will take, so the bump above is a
-      refactor of call sites rather than of the design)*
+      sites change shape) *(the contingency was taken, then retired. v0.1–v0.2
+      shipped `transport.Get(r, pattern, h)` as a free function on Go 1.26;
+      1.27 landed on schedule and the call sites were rewritten to
+      `r.Get(pattern, h)` on 2026-08-29. As predicted, it was a refactor of
+      call sites rather than of the design — `Register`'s body changed, the
+      route table did not)*
 
 ### Phase 3 — messaging
 
@@ -273,7 +276,17 @@ contract now.
       type, AssertPublished, Golden *(implemented; stdlib + core only)*
 - [x] `app.Identity` — the identity seam, policies and the 401/403 split (v0.1)
 - [x] `app.Timeout` + the resilience ruling: module DROPPED, not deferred (v0.1)
-- [ ] `auth` (verifier), `openapi`
+- [ ] `openapi` — OpenAPI 3.1 from the frozen route table plus DTO tags. No
+      annotations, no IDL, no checked-in spec file. Raw routes are EMITTED with
+      an `x-warren-undescribed` rather than omitted, and constraints are
+      published only when the application's validator actually enforces them
+      *(implemented 2026-08-29; zero third-party dependencies. **Unticked
+      again on 2026-08-31**: the module is untagged, so neither documented
+      install route reaches it, and field test #14 found the emitter merges
+      two same-named DTOs from different features into one schema and emits
+      `time.Time` as `{"type":"object"}` — both silently, with `Strict()`
+      booting clean. It ships when those are fixed and it is tagged.)*
+- [ ] `auth` (verifier)
 
 ### Phase 6 — the CLI *(the discovery engine: scaffolding real apps is how
 ### weaknesses get found)*

@@ -34,8 +34,8 @@ func (allocController) handle(_ context.Context, r allocReq) (allocRes, error) {
 	return allocRes{ID: r.ID}, nil
 }
 
-func (c allocController) Register(r transport.Registrar) {
-	transport.Post(r, "/users/{id}", app.HandlerFunc[allocReq, allocRes](c.handle))
+func (c allocController) Register(r *transport.Registrar) {
+	r.Post("/users/{id}", app.HandlerFunc[allocReq, allocRes](c.handle))
 }
 
 // nullWriter is a ResponseWriter that allocates nothing, so what the
@@ -99,29 +99,44 @@ func TestAllocations(t *testing.T) {
 		s.mux.ServeHTTP(w, req)
 	}))
 
-	// The committed budget. Measured on go1.26.3, darwin/arm64: this path
-	// currently allocates 17, so there is exactly ONE spare — which is why
+	// The committed budget. Measured on go1.27.0, darwin/arm64: this path
+	// currently allocates 13, so there is exactly ONE spare — which is why
 	// the framework installs no identity middleware by default, and why a
 	// new per-request step needs a measurement before it is added.
 	//
-	// Roughly where they go, attributed 2026-08-02 and not re-attributed
-	// since — the TOTAL is what this test enforces, and the breakdown is a
-	// reader's aid that has already drifted once (it summed to 18 while the
-	// path measured 17):
+	// RE-MEASURED 2026-08-29, on the move to Go 1.27. The number fell 17 -> 13
+	// with no Warren change: 1.27 backs v1 `encoding/json` with the json/v2
+	// implementation, and the saving lands entirely in the decoder this
+	// breakdown already attributed it to. Confirmed by difference —
+	// `GOEXPERIMENT=nojsonv2 go test -run Alloc ./...` still measures 17.
+	// That opt-out is documented as temporary, so do not build anything on
+	// being able to get 17 back.
+	//
+	// Roughly where they go, re-attributed 2026-08-29 — the TOTAL is what
+	// this test enforces, and the breakdown is a reader's aid:
 	//
 	//	 ~2  net/http.ServeMux dispatch with one path wildcard
 	//	 ~6  edge ring: the ID string, the response header slice, the
 	//	     correlation context value, and the http.Request clone
 	//	     r.WithContext makes so user middleware sees the ID
-	//	~10  the typed path, of which ~7 are encoding/json's decoder
+	//	 ~5  the typed path, of which ~3 are encoding/json's decoder
 	//
-	// Raise it only with a measurement and a reason in the commit message. A
-	// silently drifting number is the thing this test exists to prevent —
-	// and note the reference point BenchmarkHandlerDirect prints: the same
-	// handler called without a transport allocates 0.
-	const budget = 18
-	if got > budget {
-		t.Errorf("POST with a JSON body and a path and query parameter allocates %d, budget %d", got, budget)
+	// Change it only with a measurement and a reason in the commit message.
+	// A silently drifting number is the thing this test exists to prevent —
+	// including drifting DOWNWARD, which is how this budget came to carry
+	// five slots of unwatched headroom before anyone looked. And note the
+	// reference point BenchmarkHandlerDirect prints: the same handler called
+	// without a transport allocates 0.
+	//
+	// The comparison is != and not >, because AGENT.md invariant 7 and
+	// warren.md both promise "an exact allocation count". Under > this test
+	// asserted a ceiling while two documents described it as exact, and that
+	// is how 17 became 13 with the budget still reading 18: an improvement no
+	// one was told about is drift that happens to be in the nice direction,
+	// and it is what leaves the headroom for the next regression to hide in.
+	const budget = 13
+	if got != budget {
+		t.Errorf("POST with a JSON body and a path and query parameter allocates %d, budget %d (exact: re-measure and move the budget deliberately)", got, budget)
 	}
 	t.Logf("allocations per request: %d (budget %d)", got, budget)
 }
@@ -159,14 +174,18 @@ func BenchmarkHandlerDirect(b *testing.B) {
 // consider flipping the default reads the cost here rather than
 // rediscovering it.
 //
-// json.Decoder has no Reset in encoding/json v1 — go doc encoding/json
-// Decoder lists Buffered, Decode, DisallowUnknownFields, InputOffset, More,
-// Token, UseNumber and nothing else — so the reader and the decoder are both
+// v1's json.Decoder has no Reset — go doc encoding/json Decoder lists
+// Buffered, Decode, DisallowUnknownFields, InputOffset, More, Token,
+// UseNumber and nothing else — so the reader and the decoder are both
 // per-request and cannot be pooled the way bodyPool pools the read buffer.
-// That is a floor, not an implementation detail.
 //
-// TestAllocations above stays at 18 and is asserted against the DEFAULT
-// codec. That it did not move is itself the assertion that this change was
+// That was called "a floor" here until 2026-08-31, and Go 1.27 falsified it:
+// encoding/json/jsontext.Decoder HAS a Reset, and json/v2's Unmarshal takes
+// RejectUnknownMembers and rejects trailing data without the More() dance.
+// The floor is an artefact of the v1 decoder, not of strictness.
+//
+// TestAllocations above is asserted against the DEFAULT codec, and its budget
+// is 13. That it did not move is itself the assertion that this change was
 // additive.
 func TestStrictCodecAllocations(t *testing.T) {
 	if raceEnabled {
@@ -183,11 +202,18 @@ func TestStrictCodecAllocations(t *testing.T) {
 		s.mux.ServeHTTP(w, req)
 	}))
 
-	// 17 for the default path, +4 for the unpoolable reader and decoder —
+	// 13 for the default path, +7 for the unpoolable reader and decoder —
 	// json.Decoder has no Reset in v1, so neither can be pooled. Measured at
-	// exactly 21, so this budget has NO headroom: a strict-path change that
+	// exactly 20, so this budget has NO headroom: a strict-path change that
 	// costs one allocation fails here, deliberately.
-	const budget = 21
+	//
+	// RE-MEASURED 2026-08-29 on Go 1.27: 21 -> 20. The strict codec gains far
+	// less from json/v2 than the default path does because it drives a
+	// Decoder rather than Unmarshal, and the Decoder is the part that stayed
+	// unpoolable. Moving this codec to the json/v2 API would cut it further,
+	// but that is a behaviour change (v2 rejects duplicate keys and invalid
+	// UTF-8) and needs its own decision, not a budget edit.
+	const budget = 20
 	if got > budget {
 		t.Errorf("strict codec allocates %d per request, budget %d", got, budget)
 	}

@@ -20,6 +20,7 @@ package postgres
 
 import (
 	"context"
+	stderrors "errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -64,6 +65,7 @@ const (
 
 type config struct {
 	dsn              string
+	dsnSet           bool
 	maxConns         int32
 	minConns         int32
 	maxConnLifetime  time.Duration
@@ -202,7 +204,12 @@ func Module(opts ...Option) warren.Module {
 // boot. The password never appears in a log line, an error, or a diagnostic —
 // see redact.
 func DSN(dsn string) Option {
-	return Option{apply: func(c *config) { c.dsn = dsn }}
+	// dsnSet records that the option was GIVEN, separately from whether the
+	// value is usable. The two have opposite remedies — add the option, or
+	// look at why the value it was handed is empty — and reporting the wrong
+	// one sends a reader to a file where the thing said to be missing is
+	// plainly present.
+	return Option{apply: func(c *config) { c.dsn = dsn; c.dsnSet = true }}
 }
 
 // MaxConns caps the pool. The default is 10. It is the concurrency limit of
@@ -411,6 +418,9 @@ type pool struct {
 
 func newPool(cfg config, lc lifecycle.Lifecycle, reg health.Registry) (*pool, error) {
 	if strings.TrimSpace(cfg.dsn) == "" {
+		if cfg.dsnSet {
+			return nil, errEmptyDSN()
+		}
 		return nil, errNoDSN()
 	}
 	// ParseConfig does no I/O, so every configuration mistake is a WIRING
@@ -644,11 +654,11 @@ func mapError(err error) error {
 	}
 	// ErrNoRows is the caller's to interpret: only the repository knows which
 	// resource was missing, so it maps to errors.NotFound and this does not.
-	if errorsAs2(err, ErrNoRows) {
+	if errorsIs(err, ErrNoRows) {
 		return err
 	}
-	var pgErr *pgconn.PgError
-	if !errorsAs(err, &pgErr) {
+	pgErr, ok := stderrors.AsType[*pgconn.PgError](err)
+	if !ok {
 		// Not a server error: a dial failure, a dead connection, a closed
 		// pool. Those are UNAVAILABLE — retryable — and leaving them
 		// unclassified meant a read during an outage was a 500 while the
@@ -732,17 +742,15 @@ func isConnectionError(err error) bool {
 	// context.Canceled is deliberately NOT here: that is the CLIENT hanging
 	// up, not the database failing, and reporting it as a service problem
 	// would make every abandoned request look like an outage.
-	if errorsAs2(err, context.DeadlineExceeded) {
+	if errorsIs(err, context.DeadlineExceeded) {
 		return true
 	}
-	var connErr *pgconn.ConnectError
-	if errorsAs(err, &connErr) {
+	if _, ok := stderrors.AsType[*pgconn.ConnectError](err); ok {
 		return true
 	}
-	var netErr net.Error
-	if errorsAs(err, &netErr) {
+	if _, ok := stderrors.AsType[net.Error](err); ok {
 		return true
 	}
-	var opErr *net.OpError
-	return errorsAs(err, &opErr)
+	_, ok := stderrors.AsType[*net.OpError](err)
+	return ok
 }

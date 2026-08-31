@@ -22,7 +22,7 @@ jobs:
           fetch-depth: 0
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.26.x"
+          go-version: "1.27.x"
       - run: make fmt vet invariants test
 
   # The check the repository did not have, and the one it most needed.
@@ -70,7 +70,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.26.x"
+          go-version: "1.27.x"
           # setup-go pre-populates the module cache from the repository's own
           # go.sum files. "Clean" has to mean clean.
           cache: false
@@ -151,8 +151,8 @@ jobs:
   # golangci-lint-action runs in ONE directory. This is a multi-module
   # repository and go.work is generated, never committed (invariant 8), so
   # the action at the repo root linted the core module and nothing else —
-  # cli, transport/http, persistence/postgres, observability, broker/kafka
-  # and validate/playground were all unlinted in CI while `make lint` covered
+  # cli, transport/http, persistence/postgres, observability, broker/kafka,
+  # validate/playground and openapi were all unlinted in CI while `make lint` covered
   # them locally. Exactly the trap CLAUDE.md names: "multi-module means
   # `go test ./...` lies".
   #
@@ -164,11 +164,11 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.26.x"
+          go-version: "1.27.x"
       - name: install golangci-lint
         run: |
           curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/HEAD/install.sh \
-            | sh -s -- -b "$(go env GOPATH)/bin" v2.12.2
+            | sh -s -- -b "$(go env GOPATH)/bin" v2.13.2
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
       - run: make lint
 
@@ -202,7 +202,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.26.x"
+          go-version: "1.27.x"
       - name: persistence/postgres contract suites
         env:
           WARREN_TEST_POSTGRES_DSN: postgres://postgres:warren@localhost:5433/postgres?sslmode=disable

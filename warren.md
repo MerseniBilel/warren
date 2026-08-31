@@ -67,7 +67,7 @@ This section describes the internal design of the framework itself — not the l
 Dependencies point downward only.
 
 - **Kernel** has no knowledge that HTTP, SQL, or Kafka exist.
-- **Contracts** are pure interfaces, so an adapter and a user's domain package can both depend on `broker.Publisher` without ever meeting. This is what makes §3 packages implementation-free. One deliberate exception: the three protocol registrars of §3.5 are **concrete structs with generic methods** — Go 1.27 permits type parameters on methods of concrete types but never on interface methods, so §3.5's API is only expressible this way. They remain driver-free.
+- **Contracts** are pure interfaces, so an adapter and a user's domain package can both depend on `broker.Publisher` without ever meeting. This is what makes §3 packages implementation-free. One deliberate exception: the single `Registrar` of §3.5 is a **concrete struct with generic methods** — Go 1.27 permits type parameters on methods of concrete types but never on interface methods, so §3.5's API is only expressible this way. It remains driver-free.
 - **Adapters** are leaves. `broker/kafka` and `persistence/postgres` are mutually invisible — which is precisely what makes them independently versionable and community-ownable.
 - **Tooling** is a one-way street: the CLI imports the runtime to analyse it; the runtime never imports the CLI.
 
@@ -298,6 +298,10 @@ func (a *App) Substitute(subs ...Substitution) error
 // validate.Required(). Must be called before Start.
 func (a *App) Validator(v validate.Validator) error
 
+// the telemetry every route closure and consumer stage is built over;
+// default a no-op. Must be called before Start.
+func (a *App) Telemetry(t app.Telemetry) error
+
 func (m Module) Name() string
 func OnStart(fn func(context.Context) error) ModuleOption
 func OnStop(fn func(context.Context) error) ModuleOption
@@ -370,8 +374,8 @@ walks them as one list and the only value the choice carries into the runtime
 is which option name the boot diagnostic prints when the assertion fails. They
 are two spellings because an HTTP controller and a Kafka consumer read
 differently at a module's declaration site, and `Register` is the same act
-either way — a consumer subscribes through `transport.OnEvent` rather than
-`transport.Post`, and that is the whole of it. `transport.Consumer` is
+either way — a consumer subscribes through `r.OnEvent` rather than
+`r.Post`, and that is the whole of it. `transport.Consumer` is
 likewise a type ALIAS for `transport.Controller`, not a second interface.
 
 **In particular, the choice does not place a lifecycle hook.** §1.3's
@@ -524,7 +528,8 @@ func ForwardedFrom(scope string) ProvideOption   // a re-export, not a place a u
 func Named(name string) ProvideOption            // the name diagnostics print; required for synthesized constructors, whose runtime name is an assembly stub
 
 // Resolution is Explain's result: Target, Found, Provider, Scope, Site, and
-// Inputs ([]Resolution, recursive). It renders itself as an indented tree.
+// Inputs ([]Resolution, recursive).
+func (r Resolution) String() string   // renders itself as an indented tree
 
 func Resolve[T any](c Container) (T, error)
 func MustResolve[T any](c Container) T // panics with the diagnostic — the kernel's one sanctioned panic (boot only)
@@ -847,6 +852,8 @@ type Code string
 
 const (
     CodeInvalid          Code = "INVALID"
+    CodeUnsupportedMedia Code = "UNSUPPORTED_MEDIA" // terminal: fix the ENCODING, not the content
+    CodeMethodNotAllowed Code = "METHOD_NOT_ALLOWED" // terminal: fix the VERB, not the request
     CodeNotFound         Code = "NOT_FOUND"
     CodeConflict         Code = "CONFLICT"     // terminal: a rule refused
     CodeContention       Code = "CONTENTION"   // retryable: a race was lost, nothing written
@@ -859,6 +866,8 @@ const (
 func Codes() []Code // the closed set, in the order tabled below, so an adapter's mapping can be TESTED for exhaustiveness
 
 func Invalid(field string, err error) *Error          // "field <field> is invalid", wraps err
+func UnsupportedMedia(got, want string) *Error        // "unsupported media type <got>; this route accepts <want>"
+func MethodNotAllowed(got, allow string) *Error       // "<got> is not allowed; this resource answers <allow>"
 func NotFound(resource string, id any) *Error         // "<resource> <id> not found"
 func Conflict(msg string, args ...any) *Error         // printf-style; args are fmt operands
 func Contention(msg string, args ...any) *Error       // printf-style; written by REPOSITORIES, not aggregates
@@ -1136,6 +1145,10 @@ type AggregateRoot[T ID] struct {
     events []Event
 }
 func NewAggregateRoot[T ID](id T) AggregateRoot[T]  // identity set at construction
+
+type IDs func() string  // generates fresh aggregate identifiers; convert at creation: ParcelID(ids())
+func UUIDs() IDs        // UUIDv7 — TIME-ORDERED, so a primary-key index appends rather than fragmenting.
+                        // Zero dependency: uuid entered the standard library in Go 1.27.
 func (a *AggregateRoot[T]) Raise(e Event)
 func (a *AggregateRoot[T]) PullEvents() []Event   // drained by UnitOfWork
 
@@ -1153,6 +1166,8 @@ type VersionedRoot[T ID] struct {
 }
 func NewVersionedRoot[T ID](id T) VersionedRoot[T]                        // version 0
 func ReconstituteVersionedRoot[T ID](id T, version int64) VersionedRoot[T] // the load path
+func (a *VersionedRoot[T]) Version() int64      // read by the repository's WHERE clause
+func (a *VersionedRoot[T]) SetVersion(v int64)  // written by the repository after a successful write
 
 type Event interface {
     EventName() string          // "user.registered"
@@ -1303,6 +1318,12 @@ package would be ring bureaucracy. Four of the five are implemented:
 type RetryPolicy interface {           // broker.ExponentialBackoff implements it
     Next(attempt int) (delay time.Duration, retry bool)
 }
+type Clock func() time.Time  // where a handler gets the time
+func (c Clock) Now() time.Time  // so a Clock field reads as a method at the call site
+// A function type, not an interface: one method, so a test clock is a closure
+// over a fixed instant rather than a fake type. Warren provides no default —
+// `warren new` wires app.Clock(time.Now) in the platform module.
+
 func Timeout[Req, Res any](d time.Duration) Middleware[Req, Res]
 // Inside Retrying it bounds each ATTEMPT; outside, the whole SEQUENCE.
 // It signals, it does not interrupt: a handler ignoring its context runs on.
@@ -1328,6 +1349,7 @@ type Identity struct {
 }
 func (id Identity) HasScope(scope string) bool
 func (id Identity) LogValue() slog.Value   // redacts Claims — slog never dumps a token
+func (id Identity) String() string         // redacted too: the Subject and the scope count
 
 func WithIdentity(ctx context.Context, id Identity) context.Context
 func IdentityFromContext(ctx context.Context) (Identity, bool)
@@ -1350,9 +1372,9 @@ string` is deliberate: an absent correlation ID is cosmetic, an absent
 identity is a security decision.
 
 Reading identity costs **0 allocations**, present or absent; carrying it costs
-**2** (112 B, measured go1.26.3/darwin-arm64) and is charged only to a request
+**2** (112 B, measured go1.27.0/darwin-arm64) and is charged only to a request
 that actually carries a credential. **Warren installs no identity
-middleware** — that is what keeps `transport/http`'s committed budget at 17.
+middleware** — that is what keeps `transport/http`'s committed budget at 14.
 
 `Claims` is why there is no `Identity[T]`: a generic identity would give every
 instantiation its own context key, so a guard seeding one `T` and a handler
@@ -1417,9 +1439,21 @@ func ForApp(uow UnitOfWork, opts ...Option) app.UnitOfWork
 func ErrNoTransaction(op string) error   // one message; every driver returns THIS
 func ErrNestedOptions() error
 
+// the commit-sink seam, and the refusal that makes losing events impossible
+type EventSink func(ctx context.Context, events []domain.Event) error
+type EventSource interface{ OnCommit(EventSink) }   // drivers implement it on their CONCRETE unit of work
+func Deliver(ctx context.Context, events []domain.Event, sinks []EventSink) error
+func Discard(ctx context.Context, events []domain.Event) error  // the explicit opt-out; puts the decision in a diff
+func ErrNoEventSink(events int) error   // refused when events were drained and nothing can take them
+
 // the in-process driver + the exported contract suite
 func NewMemoryUnitOfWork() *MemoryUnitOfWork
 func NewMemoryRepository[T domain.Root[K], K domain.ID](uow *MemoryUnitOfWork) *MemoryRepository[T, K]
+func (u *MemoryUnitOfWork) Do(ctx context.Context, fn func(context.Context) error, opts ...Option) error
+func (u *MemoryUnitOfWork) OnCommit(fn EventSink)
+func (r *MemoryRepository[T, K]) FindByID(ctx context.Context, id K) (T, error)
+func (r *MemoryRepository[T, K]) Save(ctx context.Context, root T) error
+func (r *MemoryRepository[T, K]) Delete(ctx context.Context, root T) error
 func RunContract[T domain.Root[K], K domain.ID](t *testing.T, newDriver NewDriver[T, K], newAggregate func(K) T)
 func RunVersionedContract[T domain.Root[K], K domain.ID](t *testing.T, newDriver NewDriver[T, K], newAggregate func(K) T)
 ```
@@ -1430,7 +1464,29 @@ cannot name their identifier types. `domain.Aggregate` — `PullEvents()`
 alone — is the non-generic view that admits a heterogeneous collection, and
 `Track`/`Collect` ride the same context the transaction already travels on.
 Enlistment is part of the contract, not an implementation detail: a driver
-whose write does not enlist loses events, and the contract suite asserts it.
+whose write does not enlist loses events, and the contract suite asserts
+enlistment **and delivery to a registered sink** — the two are different, and
+only the second is what "reaches the outbox" means.
+
+**A drain with nowhere to go is refused, not swallowed.** `persistence.Deliver`
+is the one way a driver may dispose of drained events, and it returns
+`ErrNoEventSink` when a transaction raised events and no commit sink is
+registered — the commit does not happen and the write rolls back. The check is
+at commit rather than at boot because the condition is runtime state: a
+projection service enlists roots that raise nothing and is refused nothing. An
+application that means to discard its events registers `persistence.Discard`,
+so the decision is a line in a diff. `EventSink` and `EventSource` are the
+named types; a driver that does not implement `EventSource` fails
+`RunContract`, because a unit of work that drains and cannot deliver loses data
+by construction.
+
+Until 2026-08-29 this was unenforced, and the gap was real rather than
+theoretical: a unit of work with no sink drained the aggregates, discarded what
+it drained, and committed — the row was there, the outbox was empty, the
+aggregate's pending queue was empty, and no error or log line said so.
+`RunContract` could not catch it either, because its enlistment subtests
+asserted the pending queue was EMPTY after commit, which is equally true of
+events that reached the outbox and events that reached the floor.
 Outside a transaction `Track` is a no-op that loses nothing — the events stay
 pending for a later `Do`.
 
@@ -1648,20 +1704,24 @@ over loss, never silently).
 
 - **Mode** Build (port) · **One `Register`, three protocols.**
 
-**v0.1 (Go 1.26).** Generic methods on concrete types are a Go 1.27 feature,
-so registration is generic **free functions** — warren.md §9's recorded
-"Fix A" — with the names and argument order the 1.27 methods will have:
+**Shipped on Go 1.27 (2026-08-29).** Registration is generic **methods** on
+the concrete `Registrar`. The interim free functions — warren.md §9's recorded
+"Fix A" — are gone, and the migration was the mechanical call-site rewrite it
+was predicted to be:
 
 **Surface**
 
 ```go
-type Registrar interface{ /* sealed: transport holds the only implementation */ }
-type Controller interface{ Register(r Registrar) }
+// Sealed by construction: unexported fields, and Builder.For is the only
+// thing that makes one. It cannot become an interface — Go forbids type
+// parameters on interface methods, permanently. Do not embed it.
+type Registrar struct{ /* unexported */ }
+type Controller interface{ Register(r *Registrar) }
 
-func Get[Req, Res any](r Registrar, pattern string, h app.Handler[Req, Res], opts ...RouteOption)
-func Post[Req, Res any](...)   // default success 201; Delete 204; the rest 200
-func Method[Req, Res any](r Registrar, fullMethod string, h app.Handler[Req, Res], opts ...RouteOption)
-func OnEvent[Req, Res any](r Registrar, topic string, h app.Handler[Req, Res], opts ...broker.SubscribeOption)
+func (r *Registrar) Get[Req, Res any](pattern string, h app.Handler[Req, Res], opts ...RouteOption)
+func (r *Registrar) Post[Req, Res any](...)  // default success 201; Delete 204; the rest 200
+func (r *Registrar) Method[Req, Res any](fullMethod string, h app.Handler[Req, Res], opts ...RouteOption)
+func (r *Registrar) OnEvent[Req, Res any](topic string, h app.Handler[Req, Res], opts ...broker.SubscribeOption)
 
 // The escape hatch: a protocol-native handler for what byte-in/byte-out
 // deliberately does not model — upload, download, SSE, WebSocket upgrade.
@@ -1672,7 +1732,7 @@ func OnEvent[Req, Res any](r Registrar, topic string, h app.Handler[Req, Res], o
 //
 // Unlike Get/Post/… — which name a verb and take a bare path — Raw names no
 // verb, so its PATTERN CARRIES ONE: "POST /uploads".
-func Raw(r Registrar, p Protocol, pattern string, h any, opts ...RouteOption)
+func (r *Registrar) Raw(p Protocol, pattern string, h any, opts ...RouteOption)
 
 type RawRoute struct {
     Protocol Protocol
@@ -1703,20 +1763,26 @@ type EventRoute struct { Topic, Name string; Options []broker.SubscribeOption
 
 type Builder struct{ ... }
 func NewBuilder(opts ...BuilderOption) *Builder
-func (b *Builder) For(module string) Registrar
+func (b *Builder) For(module string) *Registrar
 func (b *Builder) Failures() error   // the accumulated registration failures, or nil
 func (b *Builder) Table() (*Table, error)
-func (t *Table) HTTP() []HTTPRoute; GRPC() []GRPCRoute; Events() []EventRoute
-func (t *Table) Claim(p Protocol, by string); Unserved() error
+func (t *Table) HTTP() []HTTPRoute
+func (t *Table) GRPC() []GRPCRoute
+func (t *Table) Events() []EventRoute
+func (t *Table) Claim(p Protocol, by string)
+func (t *Table) Unserved() error
+func (t *Table) Telemetry() app.Telemetry      // what the adapter instruments with
+func (t *Table) Validator() validate.Validator // what boot step 5 compiled the routes over
+func (p Protocol) String() string
 ```
 
 The remaining verb helpers and the seams a builder and a handler read — all
 of them driver-free:
 
 ```go
-func Put[Req, Res any](r Registrar, pattern string, h app.Handler[Req, Res], opts ...RouteOption)
-func Patch[Req, Res any](r Registrar, pattern string, h app.Handler[Req, Res], opts ...RouteOption)
-func Delete[Req, Res any](r Registrar, pattern string, h app.Handler[Req, Res], opts ...RouteOption)
+func (r *Registrar) Put[Req, Res any](pattern string, h app.Handler[Req, Res], opts ...RouteOption)
+func (r *Registrar) Patch[Req, Res any](pattern string, h app.Handler[Req, Res], opts ...RouteOption)
+func (r *Registrar) Delete[Req, Res any](pattern string, h app.Handler[Req, Res], opts ...RouteOption)
 
 func WithTelemetry(t app.Telemetry) BuilderOption
 func WithValidator(v validate.Validator) BuilderOption
@@ -1728,10 +1794,10 @@ func ParamsFromContext(ctx context.Context) Params
 A controller registers once and is exposed three ways:
 
 ```go
-func (c *UserController) Register(r transport.Registrar) {
-    transport.Post(r, "/users", c.register)
-    transport.Method(r, "user.v1.UserService/Register", c.register)
-    transport.OnEvent(r, "billing.customer.created", c.register)
+func (c *UserController) Register(r *transport.Registrar) {
+    r.Post("/users", c.register)
+    r.Method("user.v1.UserService/Register", c.register)
+    r.OnEvent("billing.customer.created", c.register)
 }
 ```
 
@@ -1764,8 +1830,10 @@ versioned in lockstep. It is installed per server with `http.Codec(...)`
 alone does NOT — it consumes the first value and discards the rest in silence,
 accepting `{"a":1} {"a":2}` where `json.Unmarshal` errors — so the obvious
 implementation of "strict" is laxer than the default it tightens. Measured on
-go1.26.3/darwin-arm64, the strict codec costs 3 allocations per request more
-than the default (20 against 17).
+go1.27.0/darwin-arm64, the strict codec costs 7 allocations per request more
+than the default (20 against 13) — the gap WIDENED on Go 1.27, because the
+json/v2 backing speeds up the default path's `Unmarshal` and not the strict
+path's `Decoder`.
 
 The right fix for "clients cannot spell my field names" is a schema they are
 generated from — that is `warren/openapi` (§4.3), whose input, `HTTPRoute`'s
@@ -1801,10 +1869,17 @@ The usual cause is named in the diagnostic, because it is nearly always the
 same one: a controller field the constructor does not assign, so `Register`
 passes that nil straight through.
 
-**Honest note on the 1.27 migration:** explicit type arguments are mandatory
-in *both* shapes — Go cannot infer `[Req, Res]` from a concrete handler passed
-where an interface is expected — so §3.5's inference-free call sites are a
-risk to verify when 1.27 ships, not a certainty.
+**Resolved 2026-08-29, and the earlier note here was wrong.** It read
+"explicit type arguments are mandatory in *both* shapes — Go cannot infer
+`[Req, Res]` from a concrete handler passed where an interface is expected".
+Compiled against the released go1.27.0, inference *succeeds* for exactly that
+case: with `Registrar` a concrete struct carrying `Post[Req, Res any](pattern
+string, h app.Handler[Req, Res])`, the call `r.Post("/users", c.register)` —
+where `c.register` is a concrete struct with `Handle(context.Context, Cmd)
+(View, error)` — infers `[Cmd, View]` with no type arguments written. The same
+holds for `OnEvent` and for a `HandlerFunc[Req, Res]` adapter. §3.5's
+inference-free call sites are therefore a **certainty**, not a risk, and the
+migration does not need to touch the ergonomics it promised.
 
 
 ---
@@ -1856,6 +1931,7 @@ func IdleTimeout(time.Duration) Option                       // 120s
 func MaxHeaderBytes(int) Option                              // 1 MiB
 func MaxBodyBytes(int64) Option                              // 1 MiB — Invoker is []byte-in
 func DrainDelay(time.Duration) Option                        // 5s — step 9b
+func LogRoutes() Option                                      // one INFO line per route at boot; off by default
 func ShutdownTimeout(time.Duration) Option                   // 15s, inside lifecycle's 30s
 
 func TLS(*tls.Config) Option                                 // checked at boot, not at handshake
@@ -1873,16 +1949,18 @@ const CorrelationHeader = "X-Correlation-Id"
 Implemented 2026-08-02. `Router` and `RouterAdapter` are gone with the
 ServeMux decision, and there is no `Raw(*http.ServeMux)`: a `ServeMux`'s entire
 API is `Handle`, so a mux escape hatch would buy exactly what `Handle` gives.
-The escape hatch that matters is `transport.Raw` (§3.5), registered from a
+The escape hatch that matters is `r.Raw` (§3.5), registered from a
 controller so the module's own container builds the handler.
 
-Measured on go1.26.3/darwin-arm64: **17 allocations** for a POST with a JSON
-body and a path and query parameter, asserted at a budget of 18 — 2 for
+Measured on go1.27.0/darwin-arm64: **13 allocations** for a POST with a JSON
+body and a path and query parameter, asserted at a budget of 14 — 2 for
 `ServeMux` dispatch, 6 for the edge ring, the rest for the typed path of which
-~7 are `encoding/json`. The same handler
+~3 are `encoding/json`. It was 17 on go1.26.3; Go 1.27 backs v1
+`encoding/json` with the json/v2 implementation, and the four saved
+allocations all land in the decoder. The same handler
 called directly allocates **0**. `TestAllocations` asserts the exact number,
-and it is asserted against the DEFAULT codec: `transport.StrictJSON()` costs 3
-more (20, budget 21), because `json.Decoder` has no `Reset` in `encoding/json`
+and it is asserted against the DEFAULT codec: `transport.StrictJSON()` costs 7
+more (20, budget 20), because `json.Decoder` has no `Reset` in `encoding/json`
 v1, so its reader and decoder are per-request and cannot be pooled the way the
 body buffer is. `TestStrictCodecAllocations` carries that number.
 
@@ -1916,7 +1994,7 @@ downloads. It is re-panicked so `net/http`'s own handling takes it
 
 **Two escape hatches for what the typed port deliberately does not model** — uploads, downloads, SSE, WebSocket upgrades:
 
-- `transport.Raw(r, transport.ProtocolHTTP, "POST /uploads", h)` — registered from a **controller**, so the module's own container builds the handler with the module's own private providers. This is the one to reach for: an upload handler needs the repository, and a repository is private to its module. Note the pattern carries the method, unlike `Get`/`Post`, which name one already.
+- `r.Raw(transport.ProtocolHTTP, "POST /uploads", h)` — registered from a **controller**, so the module's own container builds the handler with the module's own private providers. This is the one to reach for: an upload handler needs the repository, and a repository is private to its module. Note the pattern carries the method, unlike `Get`/`Post`, which name one already.
 - `http.Handle("GET /debug/pprof/", h)` — an adapter option, evaluated in `main`, for handlers that need no module-scoped dependency at all: `net/http/pprof`, static assets, a vendor SDK's webhook receiver.
 
 There is no `http.Raw(func(mux *http.ServeMux))`: a `ServeMux`'s entire API is `Handle`, so a mux handle would buy exactly what `http.Handle` already gives, at the cost of a third door and a registration order nobody can reason about.
@@ -1990,7 +2068,7 @@ import (
 wgrpc.Raw(func(s *grpc.Server) { pb.RegisterLegacyServer(s, impl) })
 ```
 
-Streaming is out of both v0.1 and v0.2's typed surface; `transport.Raw` with
+Streaming is out of both v0.1 and v0.2's typed surface; `r.Raw` with
 `ProtocolGRPC` already carries it, exactly as it carries HTTP upgrades.
 
 `warren g proto` is specced WITH the adapter, in the CLI spec, and §8's command
@@ -2000,8 +2078,44 @@ surface gains it in the same change — not before.
 
 ### 4.3 `warren/openapi`
 
-- **Mode** Build · **DEFERRED TO v0.2, RANK 1.** Spec APPROVED 2026-08-05 —
-  the architecture is ruled and nothing in core waits on it.
+- **Mode** Build · **IMPLEMENTED 2026-08-29.** Spec approved 2026-08-05,
+  built as ruled, spec retired.
+
+**Surface**
+
+```go
+func Module(opts ...Option) warren.Module
+func Emit(t *transport.Table, opts ...Option) (Document, error)  // pure: golden-testable without booting
+
+func Title(string) Option
+func Version(string) Option        // the API's version, not Warren's
+func Description(string) Option
+func Server(url, description string) Option   // repeatable; NEVER derived — the table knows no scheme or port
+func SpecPath(string) Option                  // "/openapi.json"
+func DocsPath(string) Option                  // reserved; no UI ships yet (the bundle is an unaudited dependency)
+func Guard(app.AuthorizationPolicy) Option    // an internal API's shape is not public
+func Strict() Option                          // every refusal becomes a boot failure
+
+type Document struct{ … }
+func (d Document) JSON() ([]byte, error)      // deterministic; also valid YAML 1.2
+func (d Document) Refusals() []Refusal
+type Refusal struct{ Route, Type, Reason string }
+```
+
+**Raw routes are EMITTED, never omitted**, path-and-method only, each carrying
+an `x-warren-undescribed` extension. A document smaller than the API is the one
+error a generated client acts on: omitting `POST /uploads` does not leave a
+client without a method for it, it asserts the endpoint does not exist. The
+emitter skips the routes this module itself registers, so no document describes
+its own delivery mechanism.
+
+**Constraints are published only when something enforces them.** Under
+`validate.None()` every tag is accepted and nothing is checked, so a document
+built from those tags would assert guarantees the service does not make — and a
+generated client would reject requests the server accepts. `transport.Table`
+gained a `Validator()` accessor for exactly this: under `None()` the shape is
+kept (types, paths, parameters) and the constraints are dropped, with a refusal
+saying why. It is the one place this package could have generated a lie.
 
 Reads the frozen route table (§3.5) plus DTO struct tags — `json:`, `param:`,
 `query:`, `validate:` — and emits OpenAPI 3.1. No annotations, no IDL, no
@@ -2013,7 +2127,7 @@ statically needs full type checking — `golang.org/x/tools/go/packages`, droppe
 in §9 — and would be a second implementation of a table boot already builds
 correctly. Instead `openapi.Module(...)` injects the `*transport.Table` bound
 in the root scope at step 2, provides a controller that registers
-`transport.Raw(r, ProtocolHTTP, "GET /openapi.json", …)`, and builds the
+`r.Raw(ProtocolHTTP, "GET /openapi.json", …)`, and builds the
 document ONCE in an `OnStart` hook after step 5. Whichever adapter claims
 `ProtocolHTTP` mounts it: this module imports `net/http` and no adapter —
 invariant 4 intact, and no `net/http` type in any public signature — and
@@ -2036,14 +2150,37 @@ still.
 boot WARN, and an `x-warren-undescribed` extension on the operation, so it
 survives into the published artifact rather than living in a log line nobody
 reads; `openapi.Strict()` makes them boot failures. Prose: there is none until
-a carrier exists, and "RegisterUser" is not "Registers a user". The shape of
-any `json.Marshaler` outside `time.Time`. `security`: an
+a carrier exists, and "RegisterUser" is not "Registers a user". `security`: an
 `AuthorizationPolicy` is one opaque method, so the 401/403 responses are
-emitted instead of a guessed scheme. The payload of a `transport.Raw` route.
-And every `validate:`-derived constraint when the installed validator is
-`validate.None()` — which accepts every tag and enforces nothing, so a
-tag-reading emitter would otherwise publish `required` for an API that
-accepts `{}`.
+emitted instead of a guessed scheme. The payload of an `r.Raw` route.
+Every `validate:` token with no JSON Schema equivalent — the service enforces
+it and the published schema is thinner than the server, which is a fact a
+client author needs. And every `validate:`-derived constraint when the
+installed validator is `validate.None()` — which accepts every tag and
+enforces nothing, so a tag-reading emitter would otherwise publish `required`
+for an API that accepts `{}`.
+
+**A type that encodes itself is answered by a three-rung ladder**, checked
+before the `reflect.Kind` switch and in the order `go doc encoding/json.Marshal`
+specifies its rules: a closed table (`time.Time` → `date-time`, `uuid.UUID` →
+`uuid`); then `json.Marshaler`/`jsonv2.MarshalerTo`, which is REFUSED because
+its wire form is bytes chosen by a method reflection cannot read; then
+`encoding.TextAppender`/`TextMarshaler`, which `encoding/json` is specified to
+encode as a JSON string. The order is not the obvious one and it is
+load-bearing: a type implementing MarshalText *and* MarshalJSON is encoded by
+MarshalJSON, so checking TextMarshaler first would call it a string when it is
+not. This paragraph replaces a line reading "the shape of any `json.Marshaler`
+outside `time.Time`", which described neither half of what the code did:
+nothing was refused, and `time.Time` was published as `{"type":"object"}`
+because its three fields are unexported.
+
+**A component key is the shortest run of trailing import-path segments that is
+unique in the document**, plus the type name — `application.BookView` alone,
+`catalog.application.BookView` and `lending.application.BookView` together.
+Collision is impossible by construction, which matters because `warren g
+module` names every feature's use-case package `application`: the previous key
+kept only the last path element, so two features' same-named DTOs silently
+became one schema and both routes referenced whichever was walked first.
 
 **`Raw` routes are emitted, not omitted.** A document missing a route claims a
 smaller API than reality, and that is the one error a generated client acts
@@ -2073,7 +2210,16 @@ The alternatives each disqualify themselves for framework use:
 **Surface**
 
 ```go
-func Broker(opts ...Option) warren.Module
+func Broker(opts ...Option) warren.Module            // publishes and subscribes; claims NO protocol
+
+// Serving r.OnEvent is a SEPARATE module, so a publish-only service does not
+// acquire a consumer group — a group holds partition assignments and
+// rebalances, and a member that never commits an offset slows every rebalance
+// for the services that do consume.
+func Consumers(opts ...ConsumerOption) warren.Module // claims transport.ProtocolEvent
+func Inbox(s inbox.Store) ConsumerOption             // default is IN-MEMORY: dedupe is lost on restart
+func DeadLetters(p broker.Publisher) ConsumerOption  // default is this broker's own publisher
+func Codec(c transport.Codec) ConsumerOption         // default transport.JSON(), LENIENT by ruling
 
 func Brokers(...string) Option
 func ConsumerGroup(string) Option
@@ -2201,8 +2347,8 @@ kafka.Broker(
 ```go
 type BillingConsumer struct{ activate *ActivateUserHandler }
 
-func (c *BillingConsumer) Register(r transport.Registrar) {
-    transport.OnEvent(r, "billing.subscription.created", c.activate,
+func (c *BillingConsumer) Register(r *transport.Registrar) {
+    r.OnEvent("billing.subscription.created", c.activate,
         broker.WithRetry(broker.ExponentialBackoff(5)),
         broker.WithDeadLetter("billing.subscription.created.dlq"),
         broker.WithConcurrency(10),
@@ -2438,6 +2584,8 @@ wants a durable store.
 **It does NOT provide `*pgxpool.Pool`, and it never migrates at boot.** The pool reaches user code only through the named escape hatch `postgres.Raw(func(ctx, *pgxpool.Pool) error) Option`; a raw handle as the default path is what Wrap mode exists to prevent. Migrating from a lifecycle hook races every replica of a rolling deploy, applies DDL the still-serving old replicas were not written against, and turns one bad file into a simultaneous crash-loop — so `postgres.Schema` (plain SQL, goose file format) and `postgres.Migrate` are a deploy step, and there is no option to make them a boot step.
 
 The outbox, inbox and elector are OPTIONS of `Module` — `WithOutbox()`, `WithInbox()`, `WithAdvisoryLock()` — not sibling modules: they need the pool, and a sibling module cannot see another module's providers.
+
+**`postgres.Module` without `WithOutbox()` is legal only for an application that registers another commit sink, or `persistence.Discard`.** Without one, any transaction whose aggregates raised events is refused at commit (§3.3) — because the alternative is destroying them silently. The generated contract tests therefore boot `WithOutbox()`: a generated test must not ship in a configuration the generated application would reject.
 
 `WithAdvisoryLock()` is HALF of multi-replica correctness, and the half that
 does nothing alone: it makes the adapter PROVIDE an `outbox.Elector`, and the
@@ -2695,7 +2843,7 @@ What ships in v0.1, with no dependency and no `auth` module:
 
 ```go
 // the policy, per route — transport.Guard runs it BEFORE decode
-transport.Get(r, "/users/{id}", c.get, transport.Guard(app.RequireScope("users:read")))
+r.Get("/users/{id}", c.get, transport.Guard(app.RequireScope("users:read")))
 
 // the identity, in the handler
 id, ok := app.IdentityFromContext(ctx)
@@ -2887,9 +3035,41 @@ func TestRegisterUser(t *testing.T) {
 ```
 
 Context is FIRST, as everywhere else in Warren. `InvokeIn` takes a module
-name for a test spanning several features, and `WithValidator` compiles the
+name for a test spanning several features, `WithValidator` compiles the
 routes against another validator — how a module whose requests carry tags
-core refuses is tested at all.
+core refuses is tested at all — and `WithTelemetry` binds instrumentation, so
+a test can assert on the SPANS a route produces rather than its response.
+
+**`WithMemoryPersistence()` is the counterpart to `WithMemoryBroker()`**, and
+together they boot a module graph with no database, no broker and no Docker.
+It binds five core ports — `persistence.UnitOfWork`, the concrete
+`*persistence.MemoryUnitOfWork` a memory repository takes, `app.UnitOfWork`,
+`outbox.Store` and `inbox.Store` — and wires the unit of work to the outbox
+with `OnCommit(outbox.Sink(...))`, without which an aggregate commits and no
+outbox row is written.
+
+**What it cannot do, and the reason is structural.** It binds PORTS. It does
+not remove a module and it cannot stop one dialling: a driver module connects
+at boot deliberately, and `persistence/postgres` declares `warren.Eager` for
+its pool, so binding a fake `postgres.DB` does not prevent the dial. Nothing
+in `warren` removes a module from a graph — `Imports` carries module VALUES,
+fixed at declaration. A module that imports a driver is therefore testable
+only by declaring a graph that never named it, which is why `warren new
+--db postgres` generates `platform.Memory()` and `user.MemoryModule()`
+alongside the production pair.
+
+**The HTTP seam is `warren/transport/http/servertest`, not this package** —
+and the boundary is a ring rule, not a preference. A harness that booted an
+HTTP server would put the adapter in CORE's `go.mod` and reverse the
+dependency direction §1.1 fixes. `servertest.New(t, m)` boots a graph behind
+a real listener and returns `Get`/`Post`/`Put`/`Patch`/`Delete`, with
+`Response.Code(t)` for the error code — which is what a test asserts on,
+because the code is the contract and the status is the adapter's rendering of
+it. `warrentest.Invoke` calls a handler directly and crosses none of the
+transport, so decode, validation, `param:`/`query:` binding, guards, status
+defaults and the error column need the other seam. Its drain delay is **0**
+by default: whttp's 5s is right in production and costs a suite five seconds
+per booted server.
 
 **Port-conformance suites do NOT live here; they live beside their ports** —
 `broker/brokertest`, `inbox/inboxtest`, `persistence.RunContract` and
@@ -3130,11 +3310,9 @@ func (h *RegisterUserHandler) Handle(ctx context.Context, cmd RegisterUser) (Use
 // No net/http. No pgx. No kgo. That is the entire point.
 
 // ── interfaces (imports: warren/transport) ───────────────────────────
-func (c *UserController) Register(r transport.Registrar) {
-    // v0.1 (Go 1.26): free functions. On 1.27 these become methods with the
-    // same names and argument order — see §3.5.
-    transport.Post(r, "/users", c.register)
-    transport.Method(r, "user.v1.UserService/Register", c.register)
+func (c *UserController) Register(r *transport.Registrar) {
+    r.Post("/users", c.register)
+    r.Method("user.v1.UserService/Register", c.register)
 }
 
 // ── bootstrap ────────────────────────────────────────────────────────
