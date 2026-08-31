@@ -1488,7 +1488,15 @@ aggregate's pending queue was empty, and no error or log line said so.
 asserted the pending queue was EMPTY after commit, which is equally true of
 events that reached the outbox and events that reached the floor.
 Outside a transaction `Track` is a no-op that loses nothing — the events stay
-pending for a later `Do`.
+pending for a later `Do`. **That is true of `Track` and it was wrong as a
+licence for the untransacted WRITE**, which is what this paragraph used to
+generalise it into. In a request-scoped handler there is no later `Do`: the
+row was written, the events went out of scope with the aggregate, and nothing
+said so. Since 2026-08-31 the memory driver refuses a write with no unit of
+work, with the same `ErrNoTransaction` Postgres returns — the permissive
+driver was the one `warren new` defaults to, so the divergence ran from
+development towards production and surfaced only after the tests that should
+have caught it had gone green.
 
 **`Delete` takes the ROOT, not an identifier, and it must enlist exactly as
 `Save` does.** Removing an aggregate is precisely when `OrderCancelled` or
