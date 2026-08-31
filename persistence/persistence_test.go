@@ -612,9 +612,18 @@ func TestSavingAnAggregateWithNoIDIsRefused(t *testing.T) {
 		t.Errorf("the diagnostic does not name the omission that causes it:\n%v", err)
 	}
 
-	// Outside a transaction too — the immediate-write path is the same bug.
-	if err := repo.Save(ctx, orphan); !werrors.Is(err, werrors.CodeInvalid) {
+	// Outside a transaction too — and this half now pins the ORDERING RULE
+	// rather than a second instance of the bug. A Save with no unit of work is
+	// refused with ErrNoTransaction, but an aggregate with no ID is wrong in
+	// every context, so the argument check runs first and this still reports
+	// the missing NewAggregateRoot. One bad aggregate, one diagnostic,
+	// whichever way the caller wrapped the call.
+	err = repo.Save(ctx, orphan)
+	if !werrors.Is(err, werrors.CodeInvalid) {
 		t.Errorf("Save outside a transaction = %v, want INVALID", err)
+	}
+	if err != nil && !strings.Contains(err.Error(), "NewAggregateRoot") {
+		t.Errorf("the context check pre-empted the argument check:\n%v", err)
 	}
 }
 
@@ -1143,4 +1152,66 @@ func (r *recordingRepo) Delete(ctx context.Context, root *order) error {
 		delete(r.items, root.ID())
 		return nil
 	})
+}
+
+// TestMemoryWriteOutsideAUnitOfWorkIsRefused is field test #14's fifth
+// finding, and the direction of the divergence is what made it serious: the
+// permissive driver was the one the scaffold defaults to and the one
+// warrentest binds, so a handler that forgot app.Transactional wrote the row,
+// answered 201, dropped the event, and passed every test it had. The mistake
+// appeared on the switch to Postgres — after the tests meant to catch it had
+// gone green.
+//
+// The measurement the field test took, before the fix:
+//
+//	memory Save outside a unit of work: err = <nil>
+//	row readable afterwards: true (err=<nil>)
+//	events still pending on the saved aggregate: 1
+func TestMemoryWriteOutsideAUnitOfWorkIsRefused(t *testing.T) {
+	t.Parallel()
+
+	uow := persistence.NewMemoryUnitOfWork()
+	uow.OnCommit(persistence.Discard)
+	repo := persistence.NewMemoryRepository[*order, orderID](uow)
+	ctx := context.Background()
+
+	o := newOrder("o1", 100)
+
+	// The error is the EXPORTED one, not a copy. persistence.ErrNoTransaction
+	// is exported precisely so every driver produces the same message, and
+	// postgres reaches it through its own errNoTransaction wrapper. Comparing
+	// against the function rather than a literal is what stops the two drifting
+	// apart: a change to the text moves both sides of this assertion at once,
+	// and a change to the memory driver alone moves only one.
+	err := repo.Save(ctx, o)
+	if err == nil {
+		t.Fatal("Save outside a unit of work succeeded; the row is written, the events are lost, and nothing says so")
+	}
+	if got, want := err.Error(), persistence.ErrNoTransaction("Save").Error(); got != want {
+		t.Errorf("the memory driver's refusal has drifted from the shared one:\n got: %s\nwant: %s", got, want)
+	}
+
+	// Nothing was written: the refusal is not a warning issued after the fact.
+	if _, err := repo.FindByID(ctx, "o1"); err == nil {
+		t.Error("the refused Save wrote the row anyway")
+	}
+
+	// Delete is refused the same way, and the guard runs before the existence
+	// check — a Delete outside a unit of work must not report NOT_FOUND for a
+	// row that is there, because that sends the reader hunting for the wrong
+	// bug entirely.
+	if err := repo.Delete(ctx, o); err == nil {
+		t.Error("Delete outside a unit of work succeeded")
+	} else if got, want := err.Error(), persistence.ErrNoTransaction("Delete").Error(); got != want {
+		t.Errorf("Delete's refusal has drifted:\n got: %s\nwant: %s", got, want)
+	}
+
+	// Reads are unaffected, which ErrNoTransaction's own text promises:
+	// "Reads need no transaction; only writes are refused."
+	if err := uow.Do(ctx, func(ctx context.Context) error { return repo.Save(ctx, o) }); err != nil {
+		t.Fatalf("Save inside a unit of work: %v", err)
+	}
+	if _, err := repo.FindByID(ctx, "o1"); err != nil {
+		t.Errorf("FindByID outside a unit of work was refused: %v", err)
+	}
 }

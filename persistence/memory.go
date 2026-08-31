@@ -266,7 +266,17 @@ func currentVersion(v any) int64 {
 }
 
 // MemoryRepository is the in-process Repository for one aggregate type. Its
-// Save calls Track, as the port's contract requires.
+// Save calls Track, as the port's contract requires, and refuses a write with
+// no unit of work on the context exactly as the Postgres driver does.
+//
+// One asymmetry is deliberate and will not be closed. A MemoryRepository used
+// inside ANOTHER driver's transaction — substituted with
+// warrentest.Replace into a Postgres application, say — writes immediately,
+// and its write is not rolled back when that transaction rolls back. Two
+// stores in one transaction is a distributed transaction, and Warren does not
+// do them; the outbox exists because it does not. The events are still
+// correct in that case: the collector is present, so Track enlists and they
+// drain on commit.
 type MemoryRepository[T domain.Root[K], K domain.ID] struct {
 	uow      *MemoryUnitOfWork
 	kind     string // key namespace: fully qualified, never shown
@@ -450,10 +460,33 @@ func copyUnexported(dst, src reflect.Value) {
 
 // Save stages the aggregate and enlists it, so its events reach the outbox
 // when the transaction commits.
+//
+// It REFUSES a write with no unit of work on the context, with the same
+// ErrNoTransaction the Postgres driver returns. It used to accept one: the row
+// was written, nil came back, and the aggregate's pending events stayed on an
+// object about to go out of scope — so a handler that forgot app.Transactional
+// wrote the row, answered 201, published nothing, and every memory-driver test
+// passed. The mistake surfaced on the switch to Postgres, which is after the
+// tests that were supposed to catch it had gone green.
+//
+// The divergence ran the worst possible way: the driver the scaffold defaults
+// to, and that warrentest.WithMemoryPersistence binds, was more permissive
+// than production. warren.md defended it — "the events stay pending for a
+// later Do" — and the defence does not survive a request-scoped handler, where
+// there is no later Do. "Loses nothing" was true of the API and false of the
+// program.
+//
+// The ID check runs FIRST, and the ordering is deliberate: an aggregate with
+// no ID is wrong in every context, inside a Do as much as outside one, so one
+// bad aggregate always produces one diagnostic instead of two that depend on
+// how the caller wrapped the call.
 func (r *MemoryRepository[T, K]) Save(ctx context.Context, root T) error {
 	var zero K
 	if root.ID() == zero {
 		return errAggregateHasNoID(r.kind)
+	}
+	if !InTransaction(ctx) {
+		return ErrNoTransaction("Save")
 	}
 	Track(ctx, root)
 
@@ -494,10 +527,20 @@ func (r *MemoryRepository[T, K]) Save(ctx context.Context, root T) error {
 		s.mu.Unlock()
 		return nil
 	}
-	// Outside a transaction the write is immediate; the events stay pending
-	// on the aggregate for a later Do. The stored value is a copy, so a
-	// later mutation of the caller's object does not silently rewrite
-	// committed state.
+	// Reached only in the MIXED-DRIVER case: a unit of work is open — the
+	// guard above proved it — but it belongs to another driver, so there is a
+	// collector and no staging. A MemoryRepository substituted into a Postgres
+	// application with warrentest.Replace is the real instance of this.
+	//
+	// The write is immediate, and it is NOT rolled back with the surrounding
+	// transaction. That is inherent rather than a gap to close: two stores in
+	// one transaction is a distributed transaction, and Warren deliberately
+	// does not do them — the outbox exists because it does not. What does work
+	// is the part that matters most: the collector is present, so Track
+	// enlists and the events drain on commit.
+	//
+	// The stored value is a copy, so a later mutation of the caller's object
+	// does not silently rewrite committed state.
 	r.uow.mu.Lock()
 	defer r.uow.mu.Unlock()
 	if versioned {
@@ -520,9 +563,16 @@ func (r *MemoryRepository[T, K]) Save(ctx context.Context, root T) error {
 }
 
 // Delete removes the aggregate, or returns CodeNotFound.
+//
+// Like Save, it refuses a write with no unit of work on the context. The guard
+// runs first here because Delete has no argument-shaped check to run before
+// it.
 func (r *MemoryRepository[T, K]) Delete(ctx context.Context, root T) error {
 	if s, ok := ctx.Value(stagingKey{}).(*staging); ok && s.readOnly {
 		return errReadOnlyWrite("Delete")
+	}
+	if !InTransaction(ctx) {
+		return ErrNoTransaction("Delete")
 	}
 	id := root.ID()
 	if _, err := r.FindByID(ctx, id); err != nil {
@@ -530,9 +580,9 @@ func (r *MemoryRepository[T, K]) Delete(ctx context.Context, root T) error {
 	}
 	// Enlist for the same reason Save does, and only once the row is known to
 	// be there: the farewell fact a handler raised before asking for the
-	// delete lives on THIS object, and nothing else will ever drain it.
-	// Outside a transaction Track is a no-op and the events stay pending, as
-	// they do after an untransacted Save.
+	// delete lives on THIS object, and nothing else will ever drain it. The
+	// guard above means a collector is always present by now, so this cannot
+	// be the no-op it used to be able to be.
 	Track(ctx, root)
 
 	k := r.key(id)
