@@ -25,8 +25,11 @@ import (
 
 	"github.com/MerseniBilel/warren"
 	"github.com/MerseniBilel/warren/broker"
+	"github.com/MerseniBilel/warren/broker/consumer"
 	"github.com/MerseniBilel/warren/health"
+	"github.com/MerseniBilel/warren/inbox"
 	"github.com/MerseniBilel/warren/lifecycle"
+	"github.com/MerseniBilel/warren/transport"
 )
 
 // ModuleName is the name of the module Broker returns — the scope name that
@@ -252,4 +255,102 @@ func Configure(opts ...kgo.Opt) Option {
 // chain this package exists to keep it in.
 func Raw(fn func(context.Context, *kgo.Client) error) Option {
 	return Option{apply: func(c *config) { c.raw = append(c.raw, fn) }}
+}
+
+// ConsumersModuleName is the name of the module Consumers returns.
+const ConsumersModuleName = ModuleName + "/consumers"
+
+// Consumers serves the event subscriptions registered with r.OnEvent over this
+// broker, and claims transport.ProtocolEvent.
+//
+// It is a SEPARATE module from Broker, and the separation is not cosmetic: a
+// service that only PUBLISHES should not acquire a consumer group. A group is
+// a real object in Kafka — it holds partition assignments, it rebalances when
+// members join or leave, and its lag is monitored — so a publish-only service
+// joining one adds a member that never commits an offset and makes every
+// rebalance slower for the services that do consume.
+//
+// Import it alongside Broker:
+//
+//	warren.Imports(platform.Broker(), platform.Consumers())
+//
+// Everything after the subscription list is shared with every other event
+// adapter: broker/consumer.Serve owns the pipeline, the loop's context and the
+// stop ordering, so a second driver cannot get those wrong differently.
+func Consumers(opts ...ConsumerOption) warren.Module {
+	var cfg consumerConfig
+	for _, o := range opts {
+		o.apply(&cfg)
+	}
+
+	return warren.NewModule(ConsumersModuleName,
+		warren.Providers(
+			func(tbl *transport.Table, sub broker.Subscriber, pub broker.Publisher, lc lifecycle.Lifecycle) *consumers {
+				tbl.Claim(transport.ProtocolEvent, ConsumersModuleName)
+
+				store := cfg.inbox
+				if store == nil {
+					// An in-memory inbox on a DURABLE broker is a real
+					// limitation and is stated rather than defaulted quietly:
+					// deduplication is lost on restart, so a redelivered
+					// message is processed twice. A service that needs
+					// exactly-once across restarts supplies a persistent
+					// store — postgres.WithInbox() provides one.
+					store = inbox.NewMemoryStore()
+				}
+				dlq := cfg.dlq
+				if dlq == nil {
+					dlq = pub
+				}
+				codec := cfg.codec
+				if codec == nil {
+					codec = transport.JSON()
+				}
+
+				subs := make([]consumer.Subscription, 0, len(tbl.Events()))
+				for _, route := range tbl.Events() {
+					subs = append(subs, consumer.Subscription{
+						Name:    route.Name,
+						Topic:   route.Topic,
+						Handler: route.Bind(codec),
+						Options: route.Options,
+					})
+				}
+				consumer.Serve(lc, ConsumersModuleName, subs, sub, store, dlq)
+				return &consumers{}
+			},
+		),
+		warren.Eager[*consumers](),
+	)
+}
+
+type consumers struct{}
+
+// ConsumerOption configures Consumers.
+type ConsumerOption struct{ apply func(*consumerConfig) }
+
+type consumerConfig struct {
+	inbox inbox.Store
+	dlq   broker.Publisher
+	codec transport.Codec
+}
+
+// Inbox supplies the deduplication store. The default is an in-memory one,
+// which does not survive a restart — see Consumers' doc comment.
+func Inbox(s inbox.Store) ConsumerOption {
+	return ConsumerOption{apply: func(c *consumerConfig) { c.inbox = s }}
+}
+
+// DeadLetters routes exhausted messages to p. The default is this broker's own
+// publisher, so a dead letter lands on a Kafka topic rather than vanishing.
+func DeadLetters(p broker.Publisher) ConsumerOption {
+	return ConsumerOption{apply: func(c *consumerConfig) { c.dlq = p }}
+}
+
+// Codec decodes message payloads. The default is transport.JSON(), and it is
+// LENIENT deliberately: a decode failure is INVALID, §2.6 dead-letters INVALID
+// without retrying, so a strict codec would take out 100% of a consumer's
+// traffic the moment a producer added a field.
+func Codec(c transport.Codec) ConsumerOption {
+	return ConsumerOption{apply: func(cfg *consumerConfig) { cfg.codec = c }}
 }

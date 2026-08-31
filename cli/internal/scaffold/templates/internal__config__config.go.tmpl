@@ -22,13 +22,20 @@ type Config struct {
 	Env string `config:"env" default:"development"`
 {{- if eq .DB "postgres" }}
 
-	// DatabaseURL is here so the value has ONE documented name, and so
-	// `warren explain config` lists it. The pool itself does not read it
-	// from here: postgres.Module builds the pool's provider, so its DSN is
-	// needed while the module graph is being DECLARED — before this struct
-	// exists. internal/platform reads {{.EnvPrefix}}_DATABASE_URL directly,
-	// which is this same variable.
-	DatabaseURL string `config:"database_url" validate:"required"`
+	// There is deliberately NO DatabaseURL field here, and the reason is
+	// worth knowing before you add one.
+	//
+	// postgres.Module builds the pool's provider, so its DSN is needed while
+	// the module graph is being DECLARED — before this struct exists.
+	// internal/platform therefore reads {{.EnvPrefix}}_DATABASE_URL
+	// directly, and a field here would be read by nothing.
+	//
+	// A scaffold once carried one anyway, marked `validate:"required"`, to
+	// give the value one documented name. Nothing read it, and being
+	// required it failed the boot of every process that did not have a
+	// database — a memory dev run, a test binary, a CI job — for a value
+	// they were not going to use. A configuration field earns its place by
+	// being read.
 {{- end }}
 
 	Outbox struct {

@@ -21,7 +21,7 @@ type {{.Lower}}Subscription struct{}
 // application layer.
 //
 // When the transport adapters ship, this becomes one line in a Register
-// method — transport.OnEvent(r, topic, h) — and the pipeline is assembled
+// method — r.OnEvent(topic, h) — and the pipeline is assembled
 // for you.
 func new{{.Name}}Subscription(
 	h app.Handler[application.{{.Name}}, application.{{.Name}}Handled],

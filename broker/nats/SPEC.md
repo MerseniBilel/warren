@@ -94,7 +94,7 @@ to discover."
 
 The only surface this spec commits to is the one it inherits: this package
 provides implementations of `broker.Publisher` and `broker.Subscriber` (§3.4)
-into the DI graph, and consumers registering through `r.Events().On(...)` with
+into the DI graph, and consumers registering through `r.OnEvent(topic, h)` with
 port-owned options (§5.1) work against it unchanged.
 
 ## Behaviour

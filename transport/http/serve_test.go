@@ -18,8 +18,10 @@ import (
 	"github.com/MerseniBilel/warren/errors"
 	"github.com/MerseniBilel/warren/health"
 	wlog "github.com/MerseniBilel/warren/log"
+	warrentest "github.com/MerseniBilel/warren/testing"
 	"github.com/MerseniBilel/warren/transport"
 	whttp "github.com/MerseniBilel/warren/transport/http"
+	"github.com/MerseniBilel/warren/transport/http/servertest"
 )
 
 // --- health probes --------------------------------------------------------
@@ -191,8 +193,8 @@ func (c *guardedController) get(context.Context, getUser) (userDTO, error) {
 	return userDTO{}, nil
 }
 
-func (c *guardedController) Register(r transport.Registrar) {
-	transport.Get(r, "/guarded/{id}", app.HandlerFunc[getUser, userDTO](c.get),
+func (c *guardedController) Register(r *transport.Registrar) {
+	r.Get("/guarded/{id}", app.HandlerFunc[getUser, userDTO](c.get),
 		transport.Guard(denyPolicy{}))
 }
 
@@ -230,8 +232,8 @@ func (u *uploader) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 type rawController struct{ up *uploader }
 
-func (c *rawController) Register(r transport.Registrar) {
-	transport.Raw(r, transport.ProtocolHTTP, "POST /uploads", c.up)
+func (c *rawController) Register(r *transport.Registrar) {
+	r.Raw(transport.ProtocolHTTP, "POST /uploads", c.up)
 }
 
 func TestRawRouteIsServedWithoutDecodeOrEncode(t *testing.T) {
@@ -260,8 +262,8 @@ type notAHandler struct{}
 
 type badRawController struct{}
 
-func (c *badRawController) Register(r transport.Registrar) {
-	transport.Raw(r, transport.ProtocolHTTP, "POST /uploads", notAHandler{})
+func (c *badRawController) Register(r *transport.Registrar) {
+	r.Raw(transport.ProtocolHTTP, "POST /uploads", notAHandler{})
 }
 
 func TestRawRouteThatIsNotAnHTTPHandlerFailsTheBoot(t *testing.T) {
@@ -326,10 +328,10 @@ type getByUID struct {
 	UID string `param:"uid"`
 }
 
-func (c *conflictController) Register(r transport.Registrar) {
-	transport.Get(r, "/users/{id}", app.HandlerFunc[getUser, userDTO](
+func (c *conflictController) Register(r *transport.Registrar) {
+	r.Get("/users/{id}", app.HandlerFunc[getUser, userDTO](
 		func(context.Context, getUser) (userDTO, error) { return userDTO{}, nil }))
-	transport.Get(r, "/users/{uid}", app.HandlerFunc[getByUID, userDTO](
+	r.Get("/users/{uid}", app.HandlerFunc[getByUID, userDTO](
 		func(context.Context, getByUID) (userDTO, error) { return userDTO{}, nil }))
 }
 
@@ -346,8 +348,8 @@ func (c *blockingController) hold(ctx context.Context, _ getUser) (userDTO, erro
 	return userDTO{ID: "finished"}, nil
 }
 
-func (c *blockingController) Register(r transport.Registrar) {
-	transport.Get(r, "/slow/{id}", app.HandlerFunc[getUser, userDTO](c.hold))
+func (c *blockingController) Register(r *transport.Registrar) {
+	r.Get("/slow/{id}", app.HandlerFunc[getUser, userDTO](c.hold))
 }
 
 // The ordering warren.md §1.3 promises and most hand-rolled Go services get
@@ -627,21 +629,36 @@ func TestProbesProduceNoSpans(t *testing.T) {
 	}
 }
 
+// serveWithTelemetry uses the servertest harness rather than a hand-rolled
+// listener. Dogfooding it here is the point: if this package's own tests
+// cannot be written with the seam it ships, the seam is wrong. This one
+// needed warrentest.WithTelemetry, which did not exist until it was tried.
+//
+// FOUR tests in this file still build their own listener, and each has a
+// reason the harness cannot remove:
+//
+//	TestDrainFinishesInFlightRequestsAfterReadinessCloses — asserts on the
+//	    ordering BETWEEN readiness closing and the listener stopping, so it
+//	    must drive Stop itself and observe in between.
+//	TestRunDrainsOnSIGTERM, TestSecondSignalCancelsTheDrain,
+//	TestAStuckHandlerCannotPreventShutdown — drive App.Run and send real
+//	    signals. The harness owns boot and cleanup by design and models no
+//	    process lifecycle, so a signal has nothing to arrive at.
+//
+// Those are tests OF the shutdown machinery. A harness that hid it could not
+// be used to test it.
 func serveWithTelemetry(t *testing.T, tel app.Telemetry, modules ...warren.Module) string {
 	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
+	if len(modules) == 0 {
+		t.Fatal("serveWithTelemetry needs a module")
 	}
-	a := warren.New(append(modules, whttp.Server(whttp.Listener(ln), whttp.DrainDelay(0)))...)
-	if err := a.Telemetry(tel); err != nil {
-		t.Fatalf("Telemetry: %v", err)
-	}
-	if err := a.Start(context.Background()); err != nil {
-		t.Fatalf("boot: %v", err)
-	}
-	t.Cleanup(func() { _ = a.Stop(context.Background()) })
-	return "http://" + ln.Addr().String()
+	s := servertest.New(t, modules[0],
+		servertest.With(
+			warrentest.WithTelemetry(tel),
+			warrentest.WithModules(modules[1:]...),
+		),
+	)
+	return s.URL
 }
 
 // TestAPanicKeepsTheCorrelationID — a panic's 500 body and its "handler
@@ -768,8 +785,8 @@ func (c *scopedController) get(context.Context, getUser) (userDTO, error) {
 	return userDTO{ID: "u-1"}, nil
 }
 
-func (c *scopedController) Register(r transport.Registrar) {
-	transport.Get(r, "/scoped/{id}", app.HandlerFunc[getUser, userDTO](c.get),
+func (c *scopedController) Register(r *transport.Registrar) {
+	r.Get("/scoped/{id}", app.HandlerFunc[getUser, userDTO](c.get),
 		transport.Guard(app.RequireScope("users:read")))
 }
 
@@ -915,11 +932,11 @@ func (tenantGuard) Authorize(ctx context.Context) error {
 
 type rawTenantController struct{}
 
-func (rawTenantController) Register(r transport.Registrar) {
-	transport.Raw(r, transport.ProtocolHTTP, "GET /raw/t/{tenant}/doc",
+func (rawTenantController) Register(r *transport.Registrar) {
+	r.Raw(transport.ProtocolHTTP, "GET /raw/t/{tenant}/doc",
 		http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(200) }),
 		transport.Guard(tenantGuard{}))
-	transport.Get(r, "/typed/t/{tenant}/doc",
+	r.Get("/typed/t/{tenant}/doc",
 		app.HandlerFunc[tenantReq, userDTO](func(context.Context, tenantReq) (userDTO, error) {
 			return userDTO{ID: "ok"}, nil
 		}),

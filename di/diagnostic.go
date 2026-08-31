@@ -284,14 +284,23 @@ func errConstructorPanicked(scope string, caught *panics.Caught) error {
 	if len(caught.Frames) > 0 {
 		who = caught.Frames[0].Func
 	}
-	detail := fmt.Sprintf("%s panicked while the graph for scope %q was being built.\n", who, scope) +
-		"A panic during boot is one of two things: a refusal Warren raises on\n" +
-		"purpose — the message above says so when it is — or a bug in the\n" +
-		"constructor. Either way the process never served a request."
+	detail := fmt.Sprintf("%s panicked, in scope %q.\n", who, scope) +
+		"This is one of two things: a refusal Warren raises on purpose — the\n" +
+		"message above says so when it is — or a bug in the code that panicked.\n\n" +
+		"READ THE STACK BELOW to see WHICH it is, because this diagnostic\n" +
+		"cannot tell you. The container calls both constructors (at boot, before\n" +
+		"any request) and functions handed to Invoke (which may be a handler,\n" +
+		"mid-request), and it recovers them at the same place. A stack that\n" +
+		"reaches your Handle method is the second kind, and the graph built\n" +
+		"fine — look at the handler, not at your wiring."
 	// This package's own frames are the plumbing that placed the recover, not
 	// the answer to "where did this come from"; internal/panics drops the
 	// universal noise and leaves this one to the caller that knows.
-	return &diagnostic{text: caught.Diagnostic("constructor panicked", detail, selfPrefix).Error()}
+	// "constructor panicked" was the headline until 2026-08-29, and it was a
+	// guess the container is not entitled to make: the same recover catches a
+	// handler panicking under Invoke, and the headline then sent a reader to
+	// their wiring while the stack below it pointed at their handler.
+	return &diagnostic{text: caught.Diagnostic("panic in the container", detail, selfPrefix).Error()}
 }
 
 // selfPrefix is this package's import path, the frames errConstructorPanicked

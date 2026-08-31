@@ -2,6 +2,8 @@ package command_test
 
 import (
 	"bytes"
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -197,11 +199,51 @@ func TestNewRefusesAnUnreleasedTransport(t *testing.T) {
 	}
 }
 
+// TestNewLeavesNothingBehindOnRefusal — "Nothing was written." is a standard,
+// not a sentence. Every refusal `warren new` can produce has to survive an
+// os.Stat on the target, because the alternative is what this test was written
+// for: the command created the directory before scaffold.New validated
+// anything, so `warren new svc` with no --module printed "✗ missing module
+// path" AND left `svc/` behind — and the obvious retry then hit the different
+// "target is not empty" refusal. Two errors for one mistake, the second of
+// them the tool's own doing.
+//
+// The fix is an ordering, not a message: validate, check conflicts, then
+// write — scaffold.New creates every parent directory as it writes a file, so
+// nothing above it needs to create one first.
+func TestNewLeavesNothingBehindOnRefusal(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{"missing module", []string{"new", "svc"}},
+		{"invalid module path", []string{"new", "svc", "--module", "example.com/my app"}},
+		{"unreleased db", []string{"new", "svc", "--module", "example.com/svc", "--db", "mysql"}},
+		{"unreleased transport", []string{"new", "svc", "--module", "example.com/svc", "--transport", "grpc"}},
+		{"two positional args", []string{"new", "svc", "extra", "--module", "example.com/svc"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			dir := filepath.Join(t.TempDir(), "svc")
+			_, err := run(t, append(tc.args, "--dir", dir)...)
+			if err == nil {
+				t.Fatalf("new was accepted; it must be refused")
+			}
+			if _, statErr := os.Stat(dir); !errors.Is(statErr, fs.ErrNotExist) {
+				t.Errorf("the refusal left %s behind (stat: %v)\nrefusal was:\n%v", dir, statErr, err)
+			}
+		})
+	}
+}
+
 func TestLintArchExitCodes(t *testing.T) {
 	t.Parallel()
 
 	clean := t.TempDir()
-	if err := os.WriteFile(filepath.Join(clean, "go.mod"), []byte("module example.com/c\n\ngo 1.26.3\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(clean, "go.mod"), []byte("module example.com/c\n\ngo 1.27.0\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	out, err := run(t, "lint", "arch", clean)

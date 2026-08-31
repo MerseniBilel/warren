@@ -281,7 +281,7 @@ func Stamp(name string, t Telemetry) func(context.Context) context.Context {
 // middleware observes cancellation between attempts and during waits. A nil
 // policy panics at composition time, like Chain's guards.
 func Retrying[Req, Res any](policy RetryPolicy) Middleware[Req, Res] {
-	return retrying[Req, Res](policy, retryable)
+	return retrying[Req, Res]("Retrying", policy, retryable)
 }
 
 // retrying is the loop both Retrying and RetryingOn use. They differ only in
@@ -289,9 +289,15 @@ func Retrying[Req, Res any](policy RetryPolicy) Middleware[Req, Res] {
 // the parts that are easy to get wrong — the last error on exhaustion,
 // cancellation observed during a wait, and a zero delay still checking the
 // context — identical between them.
-func retrying[Req, Res any](policy RetryPolicy, shouldRetry func(error) bool) Middleware[Req, Res] {
+//
+// caller is the exported function's name, and it is a parameter rather than a
+// constant because this guard's message names it. It said "Retrying"
+// unconditionally until 2026-08-09, so a user who had written RetryingOn(nil,
+// …) was sent to look for a call site that does not exist in their code — a
+// diagnostic naming the wrong function is worse than one naming none.
+func retrying[Req, Res any](caller string, policy RetryPolicy, shouldRetry func(error) bool) Middleware[Req, Res] {
 	if policy == nil {
-		panic("app: Retrying composed with a nil policy — construct the policy before boot step 5 composes the route table")
+		panic("app: " + caller + " composed with a nil policy — construct the policy before boot step 5 composes the route table")
 	}
 	return func(next Handler[Req, Res]) Handler[Req, Res] {
 		return retryingHandler[Req, Res]{policy: policy, shouldRetry: shouldRetry, next: next}
@@ -300,7 +306,7 @@ func retrying[Req, Res any](policy RetryPolicy, shouldRetry func(error) bool) Mi
 
 // RetryingOn is Retrying with the retryable set given explicitly. The legal
 // set is CONTENTION, UNAVAILABLE and INTERNAL — the three codes for which the
-// same request may succeed later. The other five are terminal, and composing
+// same request may succeed later. The other six are terminal, and composing
 // on one panics at boot.
 //
 // Prefer Retrying. It already covers CONTENTION and UNAVAILABLE, which is
@@ -359,7 +365,7 @@ func RetryingOn[Req, Res any](policy RetryPolicy, codes ...errors.Code) Middlewa
 		panic("app: RetryingOn requires at least one code — with none it would retry " +
 			"nothing, which is app.Chain without it.\n\n" +
 			"  The codes it accepts are " + retryableList() + " — the ones for which " +
-			"the same request may succeed later; the other five are terminal and are " +
+			"the same request may succeed later; the others are terminal and are " +
 			"refused.\n\n" +
 			"  app.Retrying(policy) is CONTENTION and UNAVAILABLE, and is what almost " +
 			"every handler wants:\n\n" +
@@ -372,7 +378,7 @@ func RetryingOn[Req, Res any](policy RetryPolicy, codes ...errors.Code) Middlewa
 			panic(errTerminalRetry(c))
 		}
 	}
-	return retrying[Req, Res](policy, func(err error) bool {
+	return retrying[Req, Res]("RetryingOn", policy, func(err error) bool {
 		var e *errors.Error
 		if !stderrors.As(err, &e) {
 			return false
@@ -409,8 +415,9 @@ func retryable(err error) bool {
 // the whole backoff budget, and a transaction per attempt, to return the
 // answer it already had.
 var terminal = []errors.Code{
-	errors.CodeInvalid, errors.CodeNotFound, errors.CodeConflict,
-	errors.CodeUnauthenticated, errors.CodePermissionDenied,
+	errors.CodeInvalid, errors.CodeUnsupportedMedia, errors.CodeMethodNotAllowed,
+	errors.CodeNotFound, errors.CodeConflict, errors.CodeUnauthenticated,
+	errors.CodePermissionDenied,
 }
 
 // retryableCodes returns the codes RetryingOn accepts: the closed vocabulary
@@ -536,6 +543,11 @@ func Metered[Req, Res any]() Middleware[Req, Res] {
 // reader who arrives here has just learnt that some codes are refused and has
 // no other way to learn which: the signature takes errors.Code, and there is
 // no type that says "the three retryable ones".
+//
+// The third paragraph is terminalReason's, and it varies by code: it used to
+// be the CONFLICT reasoning for all five, and "A stale write is not
+// UNAUTHENTICATED. It is CONTENTION" is a non-sequitur nobody arrives at this
+// refusal holding.
 func errTerminalRetry(code errors.Code) string {
 	return fmt.Sprintf(
 		"app: RetryingOn was composed on %s, which can never succeed on a retry — "+
@@ -543,12 +555,45 @@ func errTerminalRetry(code errors.Code) string {
 			"attempt, so this would spend the whole backoff budget and a database "+
 			"transaction per attempt to return the same answer.\n\n"+
 			"  RetryingOn accepts %s — the codes for which the same request may "+
-			"succeed later. The other five are terminal.\n\n"+
-			"  A stale write is not %s. It is CONTENTION, and app.Retrying already "+
-			"retries it:\n\n"+
+			"succeed later. The rest are terminal.\n\n"+
+			"  %s\n\n"+
 			"      app.Chain(h, app.Retrying(policy), app.Transactional(uow))\n\n"+
 			"  Retrying re-invokes the HANDLER, so your handler must re-read its "+
-			"aggregate on each attempt.", code, retryableList(), code)
+			"aggregate on each attempt.", code, retryableList(), terminalReason(code))
+}
+
+// terminalReason names the mistake a reader composing RetryingOn on this
+// particular terminal code has probably made, and points at the code they
+// should have returned instead.
+//
+// Two answers, because there are two mistakes. On INVALID, NOT_FOUND and
+// CONFLICT the likely error is the optimistic-concurrency one: a lost
+// conditional write reported as a business-rule refusal. CONTENTION is the
+// code for that, and Retrying already covers it.
+//
+// On the two AUTH codes that reading is a non-sequitur — nobody confuses a
+// 401 with a stale write. The mistake there is the one AGENT.md's error table
+// already answers: a service that cannot authenticate to something DOWNSTREAM
+// reports its own outage as the caller's missing credential, and then wants
+// to retry it. UNAVAILABLE is that code, it is retryable, and it is the whole
+// reason the two auth codes are terminal in the first place.
+//
+// The default arm is the stale-write reading, so a ninth terminal code gets a
+// paragraph rather than an empty one — and the golden file it must gain makes
+// the choice visible in review rather than silent.
+func terminalReason(code errors.Code) string {
+	switch code {
+	case errors.CodeUnauthenticated, errors.CodePermissionDenied:
+		return fmt.Sprintf(
+			"A service that fails to authenticate to something downstream — Postgres, "+
+				"S3, another API — returns UNAVAILABLE, not %s: the two auth codes "+
+				"describe the CALLER's identity, not yours. Return UNAVAILABLE for that "+
+				"failure and app.Retrying already retries it:", code)
+	default:
+		return fmt.Sprintf(
+			"A stale write is not %s. It is CONTENTION, and app.Retrying already "+
+				"retries it:", code)
+	}
 }
 
 // --- composition identity ---------------------------------------------------
@@ -563,6 +608,14 @@ func errTerminalRetry(code errors.Code) string {
 // fails open tomorrow: the ".funcN" suffix is assigned by closure order
 // within the file, so adding an unrelated closure above renumbers it and the
 // check quietly stops firing.
+//
+// Go 1.27 is that tomorrow, and it vindicates the choice twice over. The 1.27
+// compiler picks a function literal's name independently of inlining AND may
+// give MULTIPLE INSTANCES OF THE SAME LITERAL A SHARED CODE POINTER — so two
+// distinct closures can now answer to one name, and neither the name nor the
+// pointer distinguishes them. A FuncForPC-based composition check would not
+// merely renumber on 1.27; it could conflate. Named handler types are immune
+// to both, which is why this file has them.
 
 // Unwrapper is the interface a middleware's handler implements to make itself
 // TRANSPARENT to Chain's composition checks.

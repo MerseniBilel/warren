@@ -19,7 +19,8 @@ import (
 // yields one identity.
 var Module = sync.OnceValue(func() warren.Module {
 	return warren.NewModule("billing",
-		warren.Imports(platform.Module()),
+		warren.Imports(platform.Module(),
+			platform.Broker()),
 		warren.Controllers(NewController),
 		warren.Providers(
 			infrastructure.NewInvoiceRepository,

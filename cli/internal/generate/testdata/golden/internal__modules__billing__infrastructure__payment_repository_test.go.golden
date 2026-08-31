@@ -47,7 +47,7 @@ func TestPaymentRepositoryVersionedContract(t *testing.T) {
 		domain.PaymentID("version-1"), domain.PaymentID("version-2"),
 		domain.PaymentID("version-3"), domain.PaymentID("version-4"),
 		domain.PaymentID("version-5"), domain.PaymentID("version-6"),
-		domain.PaymentID("version-7"))
+		domain.PaymentID("version-7"), domain.PaymentID("version-8"))
 }
 
 // connectPaymentRepository boots a pool once, applies the migrations, and
@@ -93,7 +93,12 @@ To run it:
 		db  postgres.DB
 		uow *postgres.UnitOfWork
 	)
-	pg := postgres.Module(postgres.DSN(dsn))
+	// WithOutbox() is not optional here. Without a commit sink the unit of
+	// work REFUSES any transaction that raised events — because dropping
+	// them is silent and permanent — so a contract test without it would
+	// ship in a configuration the generated application itself rejects.
+	// The outbox table is already created by the Migrate call above.
+	pg := postgres.Module(postgres.DSN(dsn), postgres.WithOutbox())
 	// Named for the AGGREGATE, not the feature: modules are deduplicated by
 	// identity, so a second postgres repository in this feature would
 	// otherwise declare a module sharing this one's name.

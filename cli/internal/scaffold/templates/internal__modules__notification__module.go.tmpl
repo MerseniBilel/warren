@@ -2,16 +2,11 @@
 package notification
 
 import (
-	"context"
-	"encoding/json"
 	"sync"
 
 	"github.com/MerseniBilel/warren"
 	"github.com/MerseniBilel/warren/app"
-	"github.com/MerseniBilel/warren/broker"
-	"github.com/MerseniBilel/warren/errors"
-	"github.com/MerseniBilel/warren/inbox"
-	"github.com/MerseniBilel/warren/lifecycle"
+	"github.com/MerseniBilel/warren/transport"
 
 	"{{.Module}}/internal/modules/notification/application"
 	"{{.Module}}/internal/platform"
@@ -41,64 +36,35 @@ var Module = sync.OnceValue(func() warren.Module {
 {{- else }}
 		warren.Imports(platform.Module()),
 {{- end }}
-		warren.Providers(application.NewOnUserRegisteredHandler, newSubscription),
-		// Eager, not Consumers: this subscription wires its own pipeline and
-		// its own lifecycle hook rather than registering through
-		// transport.OnEvent, so it is not a transport.Controller. Eager is
-		// what builds a type at boot that nothing else depends on.
-		warren.Eager[*subscription](),
+		warren.Providers(application.NewOnUserRegisteredHandler),
+		// Consumers, not Eager: this subscription registers through
+		// r.OnEvent at boot step 5, and the broker module serves the frozen
+		// table. It used to wire its own broker.Pipeline and its own
+		// lifecycle hook — 88 lines that are now one line in Register.
+		warren.Consumers(NewConsumer),
 	)
 })
 
-type subscription struct{}
+// Consumer registers this feature's subscriptions. It is a
+// transport.Controller like an HTTP controller is — one Register call, and
+// the framework assembles the consumer chain: decode, dedupe through the
+// inbox, retry, dead-letter.
+type Consumer struct {
+	handle app.Handler[application.UserRegistered, application.Sent]
+}
 
-// newSubscription wires the handler into the consumer chain and starts it
-// as a lifecycle component.
+// NewConsumer is listed in warren.Consumers, so boot step 5 calls Register on
+// it exactly once.
+func NewConsumer(h app.Handler[application.UserRegistered, application.Sent]) *Consumer {
+	return &Consumer{handle: h}
+}
+
+// Register subscribes the handler to the topic.
 //
-// When the transport adapters ship, this becomes one line in a Register
-// method — transport.OnEvent(r, "user.registered", h) — and the pipeline is
-// assembled for you.
-func newSubscription(
-	h app.Handler[application.UserRegistered, application.Sent],
-	pub broker.Publisher,
-	sub broker.Subscriber,
-	store inbox.Store,
-	lc lifecycle.Lifecycle,
-) *subscription {
-	// This subscription's name, unique in the process. It scopes the
-	// deduplication key, which is what lets another feature consume this
-	// same topic without one of them suppressing the other.
-	const name = "notification.user_registered"
-	const topic = "user.registered"
-
-	// Decode the payload into the typed event; a malformed message is
-	// INVALID, which dead-letters without retrying.
-	handle := func(ctx context.Context, msg broker.Message) error {
-		var e application.UserRegistered
-		if err := json.Unmarshal(msg.Payload, &e); err != nil {
-			return errors.Invalid("payload", err)
-		}
-		_, err := h.Handle(ctx, e)
-		return err
-	}
-
-	// The chain: recover, drain, trace, dedupe, dead-letter, require-id,
-	// retry, limit.
-	pipeline, wait := broker.Pipeline(name, topic, handle, store, pub)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	lc.Append(lifecycle.Hook{
-		Name:    "notification consumer",
-		// Subscribe returns once the subscription is LIVE, so OnStart
-		// returning means this consumer is genuinely listening. Do not wrap
-		// it in a goroutine: that reports "started" before the subscription
-		// exists, and anything published in the gap is discarded — by a
-		// Publish that reports success, so the outbox marks it published.
-		OnStart: func(context.Context) error { return sub.Subscribe(ctx, topic, pipeline) },
-		OnStop: func(c context.Context) error {
-			cancel()
-			return wait(c)
-		},
-	})
-	return &subscription{}
+// This is the whole of it. The pipeline — inbox deduplication scoped to THIS
+// subscription, the retry policy, the dead-letter destination — is assembled
+// by the broker module from the frozen route table, exactly as the HTTP
+// adapter assembles decode/validate/bind for r.Post.
+func (c *Consumer) Register(r *transport.Registrar) {
+	r.OnEvent("user.registered", c.handle)
 }

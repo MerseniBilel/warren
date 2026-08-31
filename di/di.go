@@ -141,6 +141,16 @@ func (r Resolution) render(b *strings.Builder, depth int) {
 }
 
 // Resolve resolves T from c.
+//
+// It is a generic FREE FUNCTION and it will never become a method, which Go
+// 1.27 settled permanently rather than merely for now. 1.27 added generic
+// methods, but only on concrete types: the spec forbids type parameters on
+// INTERFACE methods, and forbids a generic method from satisfying one.
+// Verified against go1.27.0 — `Resolve[T any]() (T, error)` in an interface
+// is rejected at compile time with "interface method must have no type
+// parameters". `Container` is an interface, so `c.Resolve[T]()` is not
+// expressible in any future Go, and this shape is final. The same reasoning
+// fixes validate.PlanFor[T], whose Validator is likewise an interface.
 func Resolve[T any](c Container) (T, error) {
 	var out T
 	err := c.Invoke(func(t T) { out = t })

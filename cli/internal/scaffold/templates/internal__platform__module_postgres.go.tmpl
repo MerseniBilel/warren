@@ -6,6 +6,7 @@
 package platform
 
 import (
+	"time"
 	"context"
 	"log/slog"
 	"os"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/MerseniBilel/warren"
 	"github.com/MerseniBilel/warren/app"
+	"github.com/MerseniBilel/warren/domain"
 	"github.com/MerseniBilel/warren/broker"
 {{- if eq .Broker "kafka" }}
 	"github.com/MerseniBilel/warren/broker/kafka"
@@ -139,6 +141,8 @@ var Module = sync.OnceValue(func() warren.Module {
 			subscriber,
 {{- end }}
 			appUnitOfWork,
+			clock,
+			ids,
 			elector,
 			newRelay,
 		),
@@ -153,8 +157,55 @@ var Module = sync.OnceValue(func() warren.Module {
 		warren.Exports[broker.Subscriber](),
 {{- end }}
 		warren.Exports[app.UnitOfWork](),
+		warren.Exports[app.Clock](),
+		warren.Exports[domain.IDs](),
 		// Nothing consumes the relay, so without Eager it would never be
 		// built — and the outbox would never drain.
+		warren.Eager[*outbox.Relay](),
+	)
+})
+
+// Memory is Module WITHOUT the postgres adapter, and it is what the feature
+// tests boot. Everything else is the same: the same relay, the same elector,
+// the same app.UnitOfWork seam, the same in-process broker.
+//
+// It exists because a driver module CONNECTS at boot — deliberately, so a
+// misconfigured service fails its boot rather than request 1 — and the
+// postgres pool is Eager, so it is built and dials whether or not anything
+// injects it. No substitution prevents that, and nothing in warren removes a
+// module from a graph: Imports carries module VALUES, fixed at declaration.
+// The only graph without postgres in it is one that never named postgres.
+//
+// It shares the name "platform" with Module deliberately. Two modules with
+// one name would be a boot error IF BOTH WERE IN THE SAME GRAPH; these never
+// are — Module is what cmd/ builds, Memory is what `go test` builds.
+//
+// The persistence PORTS it leaves unprovided — persistence.UnitOfWork,
+// outbox.Store, inbox.Store — are supplied by
+// warrentest.WithMemoryPersistence(), which the feature's module_test.go
+// passes.
+var Memory = sync.OnceValue(func() warren.Module {
+	return warren.NewModule("platform",
+		warren.Imports(ConfigModule(){{if eq .Broker "kafka"}}, Broker(){{end}}),
+		warren.Providers(
+{{- if ne .Broker "kafka" }}
+			newBroker,
+			publisher,
+			subscriber,
+{{- end }}
+			appUnitOfWork,
+			clock,
+			ids,
+			elector,
+			newRelay,
+		),
+{{- if ne .Broker "kafka" }}
+		warren.Exports[broker.Publisher](),
+		warren.Exports[broker.Subscriber](),
+{{- end }}
+		warren.Exports[app.UnitOfWork](),
+		warren.Exports[app.Clock](),
+		warren.Exports[domain.IDs](),
 		warren.Eager[*outbox.Relay](),
 	)
 })
@@ -270,6 +321,19 @@ func newRelay(
 func publisher(p brokerPorts) broker.Publisher   { return broker.Correlating(p.pub) }
 func subscriber(p brokerPorts) broker.Subscriber { return p.sub }
 {{- end }}
+
+// clock is where every handler gets the time. Injecting it rather than
+// calling time.Now() inside a handler is what makes a time-dependent rule
+// testable: a test passes a closure over a fixed instant and asserts an exact
+// result, instead of asserting a range and hoping.
+func clock() app.Clock { return time.Now }
+
+// ids generates aggregate identifiers, as time-ordered UUIDv7 — so a primary
+// key index appends rather than fragmenting. Convert at the point of
+// creation: ParcelID(ids()).
+//
+// It costs no dependency: uuid is in the Go 1.27 standard library.
+func ids() domain.IDs { return domain.UUIDs() }
 
 // appUnitOfWork is the seam app.Transactional takes: the two interfaces
 // differ only in Do's transaction options, which app deliberately does not

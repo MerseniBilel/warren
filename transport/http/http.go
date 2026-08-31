@@ -47,6 +47,7 @@ type config struct {
 	maxHeaderBytes    int
 	maxBodyBytes      int64
 	drainDelay        time.Duration
+	logRoutes         bool
 	shutdownTimeout   time.Duration
 	tls               *tls.Config
 	certFile, keyFile string
@@ -160,6 +161,24 @@ func IdleTimeout(d time.Duration) Option {
 	return Option{apply: func(c *config) { c.idleTimeout = d }}
 }
 
+// LogRoutes prints the frozen route table at boot, one INFO line per route.
+//
+// It answers "what does this service serve?" without reading every Register
+// method — the first question a new joiner and every incident asks. The table
+// is built at boot step 5 and is complete and final by the time the server
+// starts, so this is a faithful list rather than a guess.
+//
+// It is an option rather than a `warren routes` CLI command because the route
+// table only exists inside a booted process: it is assembled from
+// constructors the container ran, so nothing outside the process can read it
+// without starting one. A command that lied would be worse than no command.
+//
+// Off by default — a service with 200 routes should not print 200 lines on
+// every restart — and boot-time only, so it costs a request nothing.
+func LogRoutes() Option {
+	return Option{apply: func(c *config) { c.logRoutes = true }}
+}
+
 // MaxHeaderBytes bounds the request headers. The default is 1 MiB.
 func MaxHeaderBytes(n int) Option {
 	return Option{apply: func(c *config) { c.maxHeaderBytes = n }}
@@ -225,7 +244,7 @@ func H2C() Option {
 // and no decode, validate or encode.
 //
 // A raw handler that needs a repository or a storage port is registered from
-// the controller instead — transport.Raw(r, transport.ProtocolHTTP,
+// the controller instead — r.Raw(transport.ProtocolHTTP,
 // "POST /uploads", h) — so that the module's own container builds it.
 func Handle(pattern string, h http.Handler) Option {
 	return Option{apply: func(c *config) {

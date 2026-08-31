@@ -4,7 +4,6 @@ package command
 import (
 	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 
 	"github.com/spf13/cobra"
@@ -37,8 +36,21 @@ func versionCmd() *cobra.Command {
 			"built from a checkout — that build has no released version, so it says\n" +
 			"so and scaffolds against the last one.",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			_, err := fmt.Fprintf(cmd.OutOrStdout(), "warren %s (framework %s)\n",
-				Version(), FrameworkVersion())
+			out := cmd.OutOrStdout()
+			if _, err := fmt.Fprintf(out, "warren %s (framework %s)\n",
+				Version(), FrameworkVersion()); err != nil {
+				return err
+			}
+			// The version a scaffold PINS is baked into every generated
+			// go.mod, so a stale binary silently writes require lines for a
+			// release that may not resolve — which is exactly what happened
+			// to v0.1.0, where the CLI tagged core alone and no scaffold
+			// resolved. Nothing said so; the reader found out at `go mod
+			// tidy`. One line here is cheap insurance against repeating it.
+			_, err := fmt.Fprint(out,
+				"\n  A scaffold pins the framework version above. If that is behind,\n"+
+					"  upgrade before generating a project:\n\n"+
+					"      go install github.com/MerseniBilel/warren/cli/cmd/warren@latest\n")
 			return err
 		},
 	}
@@ -136,9 +148,15 @@ func newCmd() *cobra.Command {
 			if opts.Dir == "" {
 				opts.Dir = args[0]
 			}
-			if err := os.MkdirAll(opts.Dir, 0o755); err != nil {
-				return err
-			}
+			// No MkdirAll here, deliberately. It used to run first, and it
+			// made every refusal leave the target directory behind: `warren
+			// new svc` with no --module printed "✗ missing module path" and
+			// created `svc/` anyway, so the obvious retry hit the DIFFERENT
+			// "target is not empty" refusal — two errors for one mistake, the
+			// second one ours. scaffold.New validates, checks for conflicts,
+			// and only then writes, creating each file's parents as it goes;
+			// directory creation belongs behind those checks, not in front of
+			// them. "Nothing was written." is a standard, not a sentence.
 			if err := scaffold.New(opts); err != nil {
 				return err
 			}

@@ -204,11 +204,23 @@ func IdentityFromContext(ctx context.Context) (Identity, bool) {
 
 // Claim reads a typed claim out of an identity's Claims map.
 //
-// It is a generic FREE FUNCTION rather than a method because Go 1.26 has no
-// generic methods, and a generic Identity[T] would give every instantiation
-// its own context key. It never panics: a missing key, a wrong type and a nil
-// map all return the zero value and false, because this runs on the request
-// path over a map some verifier produced.
+// It is a generic FREE FUNCTION, and it STAYS one on Go 1.27. The original
+// reason was that 1.26 had no generic methods; that reason expired on
+// 2026-08-29, and the shape did not change with it, because the second half of
+// the rationale never depended on the Go version: Identity carries ONE context
+// key, and a generic Identity[T] would give every instantiation its own — so a
+// guard seeding one T and a handler reading another would silently miss.
+//
+// A generic METHOD on the non-generic Identity would avoid that, and is legal
+// now. It is still not worth it: id.Claim[float64]("exp") and
+// Claim[float64](id, "exp") are the same keystrokes, the conversion breaks
+// every call site, and it buys nothing measurable. Do not re-open this on the
+// strength of invariant 9 alone — invariant 9 asks you to delete constructs
+// that exist ONLY because 1.26 lacked something, and this is not one.
+//
+// It never panics: a missing key, a wrong type and a nil map all return the
+// zero value and false, because this runs on the request path over a map some
+// verifier produced.
 //
 // JSON NUMBERS DECODE AS float64. This is the wrong type every JWT user
 // reaches for first, and it fails silently:

@@ -304,15 +304,17 @@ func TestStopDuringStart(t *testing.T) {
 	<-hookRunning
 
 	stopErr := make(chan error, 1)
-	go func() { stopErr <- l.Stop(context.Background()) }()
+	go func() { stopErr <- stopDuringStart(l) }()
 	// Stop's first section (readiness + state, under mu) has provably run
 	// once its goroutine is parked on runMu waiting for Start's loop — spin
 	// on the goroutine dump until it is, then release the boot hook. No
-	// sleeps: this waits on an observable state, not on wall time.
+	// sleeps: this waits on an observable state, not on wall time. (l.mu is
+	// free throughout this window — the boot hook holds nothing — so a park
+	// inside Stop can only be runMu.)
 	buf := make([]byte, 1<<20)
 	for {
 		stacks := string(buf[:runtime.Stack(buf, true)])
-		if strings.Contains(stacks, "lifecycle.(*lifecycle).Stop") && strings.Contains(stacks, "sync.(*Mutex).Lock") {
+		if parkedOnMutex(stacks, "lifecycle_test.stopDuringStart") {
 			break
 		}
 		runtime.Gosched()
@@ -334,6 +336,30 @@ func TestStopDuringStart(t *testing.T) {
 	if got := j.all(); !slices.Equal(got, want) {
 		t.Errorf("activity = %v, want %v — Stop unwinds what started; never-started stays untouched", got, want)
 	}
+}
+
+// stopDuringStart names TestStopDuringStart's Stop goroutine so the stack dump
+// can find that one and no other. It is not inlined: an elided frame is an
+// invisible marker.
+//
+//go:noinline
+func stopDuringStart(l lifecycle.Lifecycle) error { return l.Stop(context.Background()) }
+
+// parkedOnMutex reports whether the goroutine whose stack carries marker is
+// blocked acquiring a mutex — matched inside ONE goroutine's block.
+//
+// The dump is every running test's goroutines at once, and this file's other
+// tests call Stop concurrently. A scan across the whole dump therefore paired
+// this test's Stop frame with some other test's mutex wait and released the
+// boot hook before Stop had run at all: roughly one full-suite run in twenty
+// failed with "start never-started" in the journal.
+func parkedOnMutex(stacks, marker string) bool {
+	for _, g := range strings.Split(stacks, "\n\n") {
+		if strings.Contains(g, marker) && strings.Contains(g, "sync.(*Mutex).Lock") {
+			return true
+		}
+	}
+	return false
 }
 
 // TestAppendFromInsideAHook covers the review's deadlock: a hook whose
@@ -605,6 +631,202 @@ func TestPanickingHookStackHasNoFrameworkFrames(t *testing.T) {
 			t.Errorf("the diagnostic shows machinery %q:\n%s", noise, got)
 		}
 	}
+}
+
+// --- hooks that exit without returning -------------------------------------
+//
+// runtime.Goexit terminates the calling goroutine after running its deferred
+// functions; recover() sees nil on the way out, so panics.Do returns normally
+// and then never returns at all — every statement after it is dead. Until
+// 2026-08-10 the report of a hook's outcome was one of those statements, so a
+// hook that called Goexit hung the boot FOREVER: no diagnostic, no timeout,
+// nothing to read.
+//
+// This is not a curiosity. t.Fatal, t.Fatalf, t.FailNow and t.Skip are all
+// runtime.Goexit, and an assertion inside a lifecycle hook is an ordinary
+// thing to write in a test. The observed result was "panic: test timed out
+// after 25s" with the assertion's message destroyed.
+
+// goexitHook is a package-level helper for the same reason panickingHook is:
+// it is what t.Fatal does, spelled out.
+func goexitHook(context.Context) error {
+	runtime.Goexit()
+	return nil
+}
+
+// within runs a Start or a Stop and returns its error, failing the test rather
+// than hanging when it does not return. Without the bound the defect under
+// test kills the whole binary at its own timeout and destroys every other
+// test's result along with it — which is exactly the experience being fixed.
+func within(t *testing.T, what string, fn func() error) error {
+	t.Helper()
+	errc := make(chan error, 1)
+	go func() { errc <- fn() }()
+	select {
+	case err := <-errc:
+		return err
+	case <-time.After(5 * time.Second):
+		t.Fatalf("%s never returned: the hook goroutine exited without reporting and nothing is waiting to be woken", what)
+		return nil
+	}
+}
+
+// TestOnStartHookCallingGoexitIsReported is the regression test: Start must
+// return a diagnostic, not hang.
+func TestOnStartHookCallingGoexitIsReported(t *testing.T) {
+	t.Parallel()
+
+	l := lifecycle.New()
+	l.Append(lifecycle.Hook{Name: "user", OnStart: goexitHook})
+
+	err := within(t, "Start with an OnStart that called runtime.Goexit", func() error {
+		return l.Start(context.Background())
+	})
+	if err == nil {
+		t.Fatal("Start with an OnStart that called runtime.Goexit returned nil")
+	}
+	for _, want := range []string{
+		"lifecycle hook exited without returning",
+		`"user"`,
+		"OnStart",
+		"t.Fatal",
+		"runtime.Goexit",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the diagnostic does not carry %q:\n%v", want, err)
+		}
+	}
+	if l.Ready() {
+		t.Error("readiness opened after a hook exited without returning")
+	}
+}
+
+// TestGoexitInStartHookRunsPriorStopHooks holds the rollback guarantee for the
+// exit path: it is the same guarantee a panicking hook gets, and the same one
+// a hook that returns an error gets.
+func TestGoexitInStartHookRunsPriorStopHooks(t *testing.T) {
+	t.Parallel()
+
+	j := &journal{}
+	l := lifecycle.New()
+	l.Append(hook("pool", j))
+	l.Append(lifecycle.Hook{
+		Name:    "user",
+		OnStart: goexitHook,
+		OnStop:  func(context.Context) error { j.add("stop user"); return nil },
+	})
+
+	err := within(t, "Start with an OnStart that called runtime.Goexit", func() error {
+		return l.Start(context.Background())
+	})
+	if err == nil {
+		t.Fatal("Start with an OnStart that called runtime.Goexit returned nil")
+	}
+	got := j.all()
+	if !slices.Contains(got, "stop pool") {
+		t.Errorf("the prior hook's OnStop did not run — the rollback guarantee is void: %v", got)
+	}
+	if slices.Contains(got, "stop user") {
+		t.Errorf("a hook whose OnStart exited was stopped as if it had started: %v", got)
+	}
+}
+
+// TestGoexitInStopHookDoesNotAbandonTheDrain is the OnStop half: the hooks
+// below the one that exited still stop, and everything that failed on the way
+// down is reported joined.
+func TestGoexitInStopHookDoesNotAbandonTheDrain(t *testing.T) {
+	t.Parallel()
+
+	j := &journal{}
+	l := lifecycle.New()
+	l.Append(hook("pool", j))
+	l.Append(lifecycle.Hook{Name: "kafka", OnStop: goexitHook})
+	l.Append(lifecycle.Hook{
+		Name:   "relay",
+		OnStop: func(context.Context) error { j.add("stop relay"); return stderrors.New("flush failed") },
+	})
+
+	if err := l.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	err := within(t, "Stop with an OnStop that called runtime.Goexit", func() error {
+		return l.Stop(context.Background())
+	})
+	if err == nil {
+		t.Fatal("Stop with an OnStop that called runtime.Goexit returned nil")
+	}
+	got := j.all()
+	if !slices.Contains(got, "stop pool") {
+		t.Errorf("the drain was abandoned below the exiting hook: %v", got)
+	}
+	if !slices.Contains(got, "stop relay") {
+		t.Errorf("the hook above the exiting one did not stop: %v", got)
+	}
+	for _, want := range []string{"lifecycle hook exited without returning", "flush failed"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the joined error does not carry %q:\n%v", want, err)
+		}
+	}
+}
+
+// TestGoexitHookIsNotReportedAsAbandoned pins the classification, and it is
+// the reason this is a new sentinel rather than errHookAbandoned. "Abandoned"
+// means "we stopped waiting; the hook may still be running", and its remedy is
+// about timeouts. A Goexit is the opposite: nothing is still running, and a
+// reader sent hunting a hang that does not exist loses the afternoon.
+func TestGoexitHookIsNotReportedAsAbandoned(t *testing.T) {
+	t.Parallel()
+
+	j := &journal{}
+	l := lifecycle.New()
+	l.Append(hook("pool", j))
+	l.Append(lifecycle.Hook{Name: "kafka", OnStop: goexitHook})
+
+	if err := l.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	err := within(t, "Stop with an OnStop that called runtime.Goexit", func() error {
+		return l.Stop(context.Background())
+	})
+	if err == nil {
+		t.Fatal("Stop with an OnStop that called runtime.Goexit returned nil")
+	}
+	for _, forbidden := range []string{"was abandoned", "still stopping", "force-exit deadline", "hook panicked"} {
+		if strings.Contains(err.Error(), forbidden) {
+			t.Errorf("a hook that exited is reported as %q:\n%v", forbidden, err)
+		}
+	}
+	if !slices.Contains(j.all(), "stop pool") {
+		t.Error("the force-exit short-circuit fired and stranded the hooks below")
+	}
+}
+
+// TestGoexitHookDiagnosticIsGolden pins both phases' wording.
+func TestGoexitHookDiagnosticIsGolden(t *testing.T) {
+	t.Parallel()
+
+	l := lifecycle.New()
+	l.Append(lifecycle.Hook{Name: "user", OnStart: goexitHook})
+	err := within(t, "Start with an OnStart that called runtime.Goexit", func() error {
+		return l.Start(context.Background())
+	})
+	if err == nil {
+		t.Fatal("Start with an OnStart that called runtime.Goexit returned nil")
+	}
+	assertGolden(t, "hook_exited_onstart", err.Error())
+
+	l2 := lifecycle.New()
+	l2.Append(lifecycle.Hook{Name: "warren/broker/kafka", OnStop: goexitHook})
+	if err := l2.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	err = within(t, "Stop with an OnStop that called runtime.Goexit", func() error {
+		return l2.Stop(context.Background())
+	})
+	if err == nil {
+		t.Fatal("Stop with an OnStop that called runtime.Goexit returned nil")
+	}
+	assertGolden(t, "hook_exited_onstop", err.Error())
 }
 
 // elideFrames replaces the "Where it came from" frames with a marker, so a

@@ -1,0 +1,19 @@
+✗ lifecycle hook exited without returning
+
+  Hook "user" ended its goroutine during OnStart without
+  returning and without panicking, so Warren stopped the hooks that had
+  already started, in reverse order, and the process never opened readiness.
+
+  That is what runtime.Goexit does — and t.Fatal, t.Fatalf, t.FailNow and
+  t.Skip are all runtime.Goexit. An assertion inside a lifecycle hook ends the
+  hook's goroutine where it stands, and recover() sees nil on the way out, so
+  Warren reports the exit and cannot report its cause: the message you wrote
+  is already gone.
+
+  Two ways to fix it:
+
+    • Assert outside the hook. Let the hook record what it saw and return,
+      then call t.Fatal from the test's own goroutine, where the message
+      survives.
+    • Return an error instead of failing inside the hook. A hook that returns
+      an error gets the same rollback, and the error reaches you intact.

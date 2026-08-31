@@ -83,7 +83,7 @@ cd notes
 ```go
 module example.com/notes
 
-go 1.26.3
+go 1.27.0
 
 require (
 	github.com/MerseniBilel/warren v0.2.0
@@ -291,9 +291,9 @@ func NewController(
 //
 // The pattern is the PATH ALONE — Post already names the method. Post
 // defaults to 201, Get to 200, Delete to 204.
-func (c *Controller) Register(r transport.Registrar) {
-	transport.Post(r, "/notes", c.write)
-	transport.Get(r, "/notes/{id}", c.read)
+func (c *Controller) Register(r *transport.Registrar) {
+	r.Post("/notes", c.write)
+	r.Get("/notes/{id}", c.read)
 }
 ```
 
@@ -771,7 +771,7 @@ correct behaviour but worth knowing.
 | Retrying a lost connection | `app.Retrying(broker.ExponentialBackoff(3))` — retries `UNAVAILABLE` **and `CONTENTION`**, the two codes for which the same request may succeed later unchanged, and nothing else |
 | **Contention on one aggregate** | `app.Retrying(p)` — no code list. A stale write is `CONTENTION`, which `Retrying` covers along with `UNAVAILABLE`. **Write it exactly like this**, and read the note under this table before you change the order: `app.Chain(h, app.Retrying(p), app.Transactional(uow))`. Your handler must also **RE-READ** the aggregate on each attempt — `Retrying` re-invokes the handler, not the transaction, so one closing over a stale aggregate contends for ever. `RetryingOn(p, errors.CodeConflict)` is a boot panic: a business refusal is refused identically on every attempt, and retrying it cost a measured 6 transactions and 1.25s against 7ms |
 | Bounding a slow dependency | `app.Timeout(3*time.Second)` — inside `Retrying` bounds each attempt, outside bounds the sequence |
-| File upload, download, SSE, WebSocket | `transport.Raw(r, transport.ProtocolHTTP, "POST /uploads", h)` from your controller — note the pattern carries the method here |
+| File upload, download, SSE, WebSocket | `r.Raw(transport.ProtocolHTTP, "POST /uploads", h)` from your controller — note the pattern carries the method here |
 | `pprof`, static assets, a webhook receiver | `whttp.Handle("GET /debug/pprof/", h)` — for handlers needing no module dependency |
 | **Refusing a misspelled field** | `whttp.Codec(transport.StrictJSON())`. The default codec IGNORES unknown members, so a client sending `reorderPoint` for `reorder_point` gets a 201 and a record with the field it asked for left at zero. That default is deliberate — one codec decodes HTTP *and* events, and an INVALID on a consumer dead-letters without retry, so a producer adding a field would DLQ 100% of a consumer's traffic — but on an HTTP-only service strict is usually what you want |
 | A test that boots the app | `warren/testing` — `NewModuleTest`, `Replace`, `Invoke` for a handler, and `Resolve[T]` for anything else the boot built (a repository, the publisher, a sweeper). `Resolve` returns the instance the boot made, not a second construction |
@@ -867,8 +867,8 @@ keep in step.
 Guard the routes that need it, in `Register`:
 
 ```go
-transport.Post(r, "/documents", c.create, transport.Guard(app.RequireScope("docs:write")))
-transport.Get(r, "/documents/{id}", c.get, transport.Guard(app.RequireAuthenticated()))
+r.Post("/documents", c.create, transport.Guard(app.RequireScope("docs:write")))
+r.Get("/documents/{id}", c.get, transport.Guard(app.RequireAuthenticated()))
 ```
 
 `Guard` runs **before decode**, so an unauthorized caller's malformed body is

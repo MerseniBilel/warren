@@ -117,6 +117,7 @@ func TestDiagnosticsAreGolden(t *testing.T) {
 		b.WriteString("\n\n")
 	}
 	write("no DSN", errNoDSN())
+	write("empty DSN", errEmptyDSN())
 	write("bad DSN", errBadDSN("postgres://app:hunter2@:not-a-port/app", context.DeadlineExceeded))
 	write("cannot connect", errCannotConnect("postgres://app:hunter2@db:5432/app", context.DeadlineExceeded))
 	write("not started", errNotStarted())
@@ -140,6 +141,39 @@ func TestMissingDSNFailsAtWiring(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "postgres.DSN") {
 		t.Errorf("diagnostic must name the fix:\n%s", err)
+	}
+}
+
+// TestAnEmptyDSNIsNotReportedAsAMissingOption is SBX-003.
+//
+// The two cases have OPPOSITE remedies. "You did not pass postgres.DSN(...)"
+// tells the reader to add a line; "the string you passed is empty" tells them
+// to look at where the value came from. A scaffolded project always passes
+// the option — postgres.DSN(os.Getenv("APP_DATABASE_URL")) — so reporting the
+// first when the truth is the second sent every new user to the one file
+// where the thing said to be missing was plainly present, on the very first
+// error they ever saw.
+func TestAnEmptyDSNIsNotReportedAsAMissingOption(t *testing.T) {
+	t.Parallel()
+
+	cfg := defaults()
+	for _, opt := range []Option{DSN("")} {
+		opt.apply(&cfg)
+	}
+
+	_, err := newPool(cfg, nil, nil)
+	if err == nil {
+		t.Fatal("an empty DSN must still fail")
+	}
+	if strings.Contains(err.Error(), "was declared without") {
+		t.Errorf("an EMPTY DSN was reported as a MISSING option — the option is right there:\n%s", err)
+	}
+	if !strings.Contains(err.Error(), "empty") {
+		t.Errorf("the diagnostic must say the value is empty:\n%s", err)
+	}
+	// The remedy a scaffolded project actually needs.
+	if !strings.Contains(err.Error(), "environment variable") {
+		t.Errorf("the diagnostic must point at the unset variable:\n%s", err)
 	}
 }
 

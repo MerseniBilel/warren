@@ -30,6 +30,9 @@ import (
 	"github.com/MerseniBilel/warren/broker"
 	"github.com/MerseniBilel/warren/broker/memory"
 	"github.com/MerseniBilel/warren/domain"
+	"github.com/MerseniBilel/warren/inbox"
+	"github.com/MerseniBilel/warren/outbox"
+	"github.com/MerseniBilel/warren/persistence"
 	"github.com/MerseniBilel/warren/transport"
 	"github.com/MerseniBilel/warren/validate"
 )
@@ -46,10 +49,11 @@ type App struct {
 type Option struct{ apply func(*config) }
 
 type config struct {
-	subs     []warren.Substitution
-	extra    []warren.Module
-	inModule string
-	broker   bool
+	subs        []warren.Substitution
+	extra       []warren.Module
+	inModule    string
+	broker      bool
+	persistence bool
 }
 
 // Replace substitutes the provider of T with v, in every module that
@@ -92,11 +96,60 @@ func WithValidator(v validate.Validator) Option {
 	}}
 }
 
+// WithTelemetry binds t as the application's instrumentation, so boot step 5
+// wraps app.Traced and app.Metered around every handler — which is how a test
+// asserts on the SPANS a route produces rather than on its response.
+//
+// It binds rather than calling App.Telemetry for the same reason
+// WithValidator does: NewModuleTest calls Start itself, so an App method has
+// no moment to be called in. Boot resolves app.Telemetry from the container
+// when the App field is unset, so a binding reaches the same place.
+//
+//	rec := &spanRecorder{}
+//	a := warrentest.NewModuleTest(t, user.Module(), warrentest.WithTelemetry(rec))
+func WithTelemetry(t app.Telemetry) Option {
+	return Option{apply: func(c *config) {
+		c.subs = append(c.subs, warren.Bind[app.Telemetry](t))
+	}}
+}
+
 // WithMemoryBroker binds the in-process broker as Publisher and Subscriber
 // in the root scope, wrapped in a recorder Published and AssertPublished
 // read.
 func WithMemoryBroker() Option {
 	return Option{apply: func(c *config) { c.broker = true }}
+}
+
+// WithMemoryPersistence binds Warren's in-process persistence in the root
+// scope: the unit of work, the outbox store and the inbox store. It is the
+// counterpart to WithMemoryBroker, and together they boot a module graph with
+// no database, no broker and no Docker.
+//
+// It binds, rather than substituting, for the same reason WithMemoryBroker
+// does: a module graph that already provides these ports is the normal case,
+// and an ambiguous-binding failure there would be useless. See warren.Bind.
+//
+// The unit of work is wired to the outbox store with OnCommit, so an
+// aggregate's drained events reach the outbox exactly as they do in
+// production. Without that wiring the option would be a trap: aggregates
+// would commit, no outbox row would be written, and AssertPublished would
+// fail with a harness-shaped error that reads like an application bug.
+//
+// WHAT IT CANNOT DO, and this is the part worth reading. It binds PORTS. It
+// does not remove a module, and it cannot stop one dialling. A graph that
+// imports a driver module — postgres.Module, kafka.Broker — still builds that
+// driver's pool or client at boot step 4 and still runs its OnStart, because
+// a driver connects at boot deliberately, so that a misconfigured service
+// fails its boot rather than request 1. postgres.Module declares
+// warren.Eager[*pool](), so the pool is built whether or not anything injects
+// it, and binding a fake postgres.DB does not prevent the dial.
+//
+// So this option makes a module testable when that module depends on the
+// PORTS. It does not make a module testable when that module imports the
+// driver. For the second case, declare a test module that imports your
+// memory-wired platform instead — which is what `warren new` generates.
+func WithMemoryPersistence() Option {
+	return Option{apply: func(c *config) { c.persistence = true }}
 }
 
 // NewModuleTest boots m for the duration of the test and registers cleanup,
@@ -143,6 +196,23 @@ func NewModuleTest(t *testing.T, m warren.Module, opts ...Option) *App {
 		cfg.subs = append(cfg.subs,
 			warren.Bind[broker.Publisher](a.recorder),
 			warren.Bind[broker.Subscriber](a.recorder),
+		)
+	}
+	if cfg.persistence {
+		uow := persistence.NewMemoryUnitOfWork()
+		store := outbox.NewMemoryStore()
+		// The line that keeps the option honest: without it an aggregate
+		// commits and no outbox row is written, so AssertPublished fails in a
+		// way that looks like the application's fault.
+		uow.OnCommit(outbox.Sink(store, outbox.JSONEncoder()))
+		cfg.subs = append(cfg.subs,
+			warren.Bind[persistence.UnitOfWork](uow),
+			// The concrete type too: a memory repository takes
+			// *persistence.MemoryUnitOfWork, not the interface.
+			warren.Bind[*persistence.MemoryUnitOfWork](uow),
+			warren.Bind[app.UnitOfWork](persistence.ForApp(uow)),
+			warren.Bind[outbox.Store](store),
+			warren.Bind[inbox.Store](inbox.NewMemoryStore()),
 		)
 	}
 

@@ -31,6 +31,8 @@ import (
 // to errors without this test noticing.
 var codeByIdent = map[string]werrors.Code{
 	"CodeInvalid":          werrors.CodeInvalid,
+	"CodeUnsupportedMedia": werrors.CodeUnsupportedMedia,
+	"CodeMethodNotAllowed": werrors.CodeMethodNotAllowed,
 	"CodeNotFound":         werrors.CodeNotFound,
 	"CodeConflict":         werrors.CodeConflict,
 	"CodeContention":       werrors.CodeContention,
@@ -187,44 +189,152 @@ func TestRetryingOnPanicsEnumerateTheLegalSet(t *testing.T) {
 	}
 }
 
+// TestRetryingOnUnauthenticatedDoesNotMentionAStaleWrite — the terminal
+// refusal used to emit the CONFLICT reasoning for all five terminal codes,
+// and "A stale write is not UNAUTHENTICATED. It is CONTENTION" is a
+// non-sequitur: nobody reaches this refusal on an auth code by confusing it
+// with optimistic concurrency. They reach it by returning UNAUTHENTICATED for
+// a failure to authenticate to something DOWNSTREAM — which AGENT.md's error
+// table already answers, and which is what the message has to say.
+func TestRetryingOnUnauthenticatedDoesNotMentionAStaleWrite(t *testing.T) {
+	t.Parallel()
+
+	for _, code := range []werrors.Code{werrors.CodeUnauthenticated, werrors.CodePermissionDenied} {
+		t.Run(string(code), func(t *testing.T) {
+			t.Parallel()
+
+			msg := recoveredMessage(t, func() {
+				_ = app.RetryingOn[string, string](&countingPolicy{max: 3}, code)
+			})
+			if strings.Contains(msg, "stale write") {
+				t.Errorf("the refusal explains %s as a stale write, which it is not:\n%s", code, msg)
+			}
+			// The sentence the error table carries and this message should
+			// have been carrying: the codes describe the caller, not you.
+			if !strings.Contains(msg, "UNAVAILABLE") {
+				t.Errorf("the refusal does not name the code a downstream auth failure carries:\n%s", msg)
+			}
+			for _, want := range []string{"downstream", "caller"} {
+				if !strings.Contains(strings.ToLower(msg), want) {
+					t.Errorf("the refusal does not say %q — it has to name the mistake the reader has probably made:\n%s", want, msg)
+				}
+			}
+		})
+	}
+
+	// And the three codes for which the stale-write reading IS the likely
+	// mistake must keep it. Correcting one paragraph is not licence to drop it.
+	for _, code := range []werrors.Code{werrors.CodeInvalid, werrors.CodeNotFound, werrors.CodeConflict} {
+		t.Run(string(code), func(t *testing.T) {
+			t.Parallel()
+
+			msg := recoveredMessage(t, func() {
+				_ = app.RetryingOn[string, string](&countingPolicy{max: 3}, code)
+			})
+			if !strings.Contains(msg, "A stale write is not "+string(code)) {
+				t.Errorf("the refusal lost the CONTENTION reading, which is correct for %s:\n%s", code, msg)
+			}
+		})
+	}
+}
+
 // TestRetryingOnPanicMessagesAreGolden — the diagnostics are the product
 // (AGENT.md invariant 2), so the text is pinned. Regenerate with
 // `go test ./app -run Golden -update`.
+//
+// One golden per REFUSED code, and the set is derived from errors.Codes()
+// rather than listed: the message varies by code now, so a single golden for
+// "a terminal code" pinned one fifth of the text and let the other four drift.
+// A code that stops panicking must lose its golden, and a code that starts
+// panicking gains one — both are failures here until the file is regenerated.
 func TestRetryingOnPanicMessagesAreGolden(t *testing.T) {
 	t.Parallel()
 
-	for _, tc := range []struct {
-		name   string
-		golden string
-		call   func()
-	}{
-		{
-			"terminal code",
-			"retrying_on_terminal.golden",
-			func() { _ = app.RetryingOn[string, string](&countingPolicy{max: 3}, werrors.CodeConflict) },
-		},
-		{
-			"no codes",
-			"retrying_on_no_codes.golden",
-			func() { _ = app.RetryingOn[string, string](&countingPolicy{max: 3}) },
-		},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			got := recoveredMessage(t, tc.call)
-			path := filepath.Join("testdata", tc.golden)
-			if *update {
-				if err := os.WriteFile(path, []byte(got), 0o644); err != nil {
-					t.Fatalf("writing golden file: %v", err)
+	for _, code := range werrors.Codes() {
+		t.Run(string(code), func(t *testing.T) {
+			path := filepath.Join("testdata", "retrying_on_"+strings.ToLower(string(code))+".golden")
+
+			var got string
+			var panicked bool
+			func() {
+				defer func() {
+					if r := recover(); r != nil {
+						panicked = true
+						s, ok := r.(string)
+						if !ok {
+							t.Fatalf("panicked with %T, want a string: %v", r, r)
+						}
+						got = s
+					}
+				}()
+				_ = app.RetryingOn[string, string](&countingPolicy{max: 3}, code)
+			}()
+
+			if !panicked {
+				if _, err := os.Stat(path); err == nil {
+					t.Errorf("%s is accepted by RetryingOn but still has a golden refusal at %s", code, path)
 				}
+				return
 			}
-			want, err := os.ReadFile(path)
-			if err != nil {
-				t.Fatalf("reading golden file: %v", err)
-			}
-			if got != string(want) {
-				t.Errorf("panic text changed:\ngot:\n%s\n\nwant:\n%s", got, want)
-			}
+			compareGolden(t, path, got)
 		})
+	}
+
+	t.Run("no codes", func(t *testing.T) {
+		compareGolden(t, filepath.Join("testdata", "retrying_on_no_codes.golden"),
+			recoveredMessage(t, func() { _ = app.RetryingOn[string, string](&countingPolicy{max: 3}) }))
+	})
+}
+
+// compareGolden pins got against the file at path, rewriting it under -update.
+func compareGolden(t *testing.T, path, got string) {
+	t.Helper()
+
+	if *update {
+		if err := os.WriteFile(path, []byte(got), 0o644); err != nil {
+			t.Fatalf("writing golden file: %v", err)
+		}
+	}
+	want, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading golden file: %v", err)
+	}
+	if got != string(want) {
+		t.Errorf("panic text changed:\ngot:\n%s\n\nwant:\n%s", got, want)
+	}
+}
+
+// TestRetryingOnWithANilPolicyNamesRetryingOn — a panic that names the wrong
+// function is worse than one that names none: it sends the reader to a call
+// site that does not exist in their code. Retrying and RetryingOn share one
+// loop, and the loop used to hardcode "Retrying" in the nil-policy guard, so
+// everyone who reached it through RetryingOn went looking for the wrong thing.
+func TestRetryingOnWithANilPolicyNamesRetryingOn(t *testing.T) {
+	t.Parallel()
+
+	msg := recoveredMessage(t, func() {
+		_ = app.RetryingOn[string, string](nil, werrors.CodeContention)
+	})
+	if !strings.Contains(msg, "RetryingOn") {
+		t.Errorf("the panic does not name the function that was called:\n%s", msg)
+	}
+	// "Retrying(" — the call, not the substring inside "RetryingOn".
+	if strings.Contains(msg, "Retrying(") || strings.Contains(msg, "Retrying composed") {
+		t.Errorf("the panic sends the reader to app.Retrying, which they did not call:\n%s", msg)
+	}
+}
+
+// TestRetryingWithANilPolicyStillNamesRetrying is the other half: naming the
+// caller must not have been done by naming the OTHER caller.
+func TestRetryingWithANilPolicyStillNamesRetrying(t *testing.T) {
+	t.Parallel()
+
+	msg := recoveredMessage(t, func() { _ = app.Retrying[string, string](nil) })
+	if !strings.Contains(msg, "Retrying composed with a nil policy") {
+		t.Errorf("the panic no longer names Retrying:\n%s", msg)
+	}
+	if strings.Contains(msg, "RetryingOn") {
+		t.Errorf("the panic names RetryingOn, which the caller did not call:\n%s", msg)
 	}
 }
 

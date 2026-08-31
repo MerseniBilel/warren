@@ -1,0 +1,29 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "{{.GoVersion}}"
+
+      # `warren lint arch` is a binary, not a library, so CI installs it. It
+      # is pinned to the framework version this project was scaffolded with,
+      # so the rules a pull request is held to do not change under you when a
+      # new CLI is released.
+      - name: install warren
+        run: go install github.com/MerseniBilel/warren/cli/cmd/warren@{{.Version}}
+
+      - name: ci
+        run: make ci

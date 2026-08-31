@@ -3,7 +3,12 @@ package persistence_test
 import (
 	"context"
 	stderrors "errors"
+	"flag"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -135,6 +140,10 @@ func TestMemoryDriverContract(t *testing.T) {
 	t.Parallel()
 	persistence.RunContract(t, func(*testing.T) (persistence.UnitOfWork, persistence.Repository[*order, orderID]) {
 		uow := persistence.NewMemoryUnitOfWork()
+		// This test is not about events, so it says so. Without a sink the
+		// commit is now REFUSED — which is the point: dropping drained events
+		// silently is the defect persistence.Deliver exists to prevent.
+		uow.OnCommit(persistence.Discard)
 		return uow, persistence.NewMemoryRepository[*order, orderID](uow)
 	}, func(id orderID) *order { return newOrder(id, 1) }, orderID("first"), orderID("second"))
 }
@@ -143,9 +152,14 @@ func TestMemoryDriverVersionedContract(t *testing.T) {
 	t.Parallel()
 	persistence.RunVersionedContract(t, func(*testing.T) (persistence.UnitOfWork, persistence.Repository[*payment, orderID]) {
 		uow := persistence.NewMemoryUnitOfWork()
+		// This test is not about events, so it says so. Without a sink the
+		// commit is now REFUSED — which is the point: dropping drained events
+		// silently is the defect persistence.Deliver exists to prevent.
+		uow.OnCommit(persistence.Discard)
 		return uow, persistence.NewMemoryRepository[*payment, orderID](uow)
 	}, func(id orderID) *payment { return newPayment(id, 1) },
-		orderID("v1"), orderID("v2"), orderID("v3"), orderID("v4"), orderID("v5"), orderID("v6"), orderID("v7"))
+		orderID("v1"), orderID("v2"), orderID("v3"), orderID("v4"), orderID("v5"), orderID("v6"), orderID("v7"),
+		orderID("v8"))
 }
 
 func TestMemoryUnitOfWorkCommitAndRollback(t *testing.T) {
@@ -225,6 +239,10 @@ func TestMemoryUnitOfWorkCommitAndRollback(t *testing.T) {
 	t.Run("options on a nested Do are an error, not a silent downgrade", func(t *testing.T) {
 		t.Parallel()
 		uow := persistence.NewMemoryUnitOfWork()
+		// This test is not about events, so it says so. Without a sink the
+		// commit is now REFUSED — which is the point: dropping drained events
+		// silently is the defect persistence.Deliver exists to prevent.
+		uow.OnCommit(persistence.Discard)
 		err := uow.Do(context.Background(), func(ctx context.Context) error {
 			return uow.Do(ctx, func(context.Context) error { return nil }, persistence.ReadOnly())
 		})
@@ -239,6 +257,10 @@ func TestMemoryUnitOfWorkCommitAndRollback(t *testing.T) {
 	t.Run("a panic rolls back and re-panics", func(t *testing.T) {
 		t.Parallel()
 		uow := persistence.NewMemoryUnitOfWork()
+		// This test is not about events, so it says so. Without a sink the
+		// commit is now REFUSED — which is the point: dropping drained events
+		// silently is the defect persistence.Deliver exists to prevent.
+		uow.OnCommit(persistence.Discard)
 		repo := persistence.NewMemoryRepository[*order, orderID](uow)
 
 		func() {
@@ -264,7 +286,15 @@ func TestMemoryUnitOfWorkCommitAndRollback(t *testing.T) {
 		uow.OnCommit(func(context.Context, []domain.Event) error {
 			return stderrors.New("outbox write failed")
 		})
-		err := uow.Do(context.Background(), func(context.Context) error { return nil })
+		// The transaction must actually RAISE something. Deliver does not
+		// call sinks for a transaction that drained nothing — an empty
+		// commit is not a delivery — so a body that writes no aggregate
+		// would never reach the failing sink, and this test would assert on
+		// a code path it did not execute.
+		repo := persistence.NewMemoryRepository[*order, orderID](uow)
+		err := uow.Do(context.Background(), func(ctx context.Context) error {
+			return repo.Save(ctx, newOrder("a", 1))
+		})
 		if !werrors.Is(err, werrors.CodeUnavailable) {
 			t.Errorf("commit failure = %v, want UNAVAILABLE", err)
 		}
@@ -378,6 +408,10 @@ func TestRollbackDoesNotReachThroughAReferenceField(t *testing.T) {
 	t.Parallel()
 
 	uow := persistence.NewMemoryUnitOfWork()
+	// This test is not about events, so it says so. Without a sink the
+	// commit is now REFUSED — which is the point: dropping drained events
+	// silently is the defect persistence.Deliver exists to prevent.
+	uow.OnCommit(persistence.Discard)
 	repo := persistence.NewMemoryRepository[*invoice, orderID](uow)
 	ctx := context.Background()
 
@@ -424,6 +458,10 @@ func TestTwoReadersDoNotShareMutableState(t *testing.T) {
 	t.Parallel()
 
 	uow := persistence.NewMemoryUnitOfWork()
+	// This test is not about events, so it says so. Without a sink the
+	// commit is now REFUSED — which is the point: dropping drained events
+	// silently is the defect persistence.Deliver exists to prevent.
+	uow.OnCommit(persistence.Discard)
 	repo := persistence.NewMemoryRepository[*invoice, orderID](uow)
 	ctx := context.Background()
 
@@ -463,6 +501,10 @@ func TestUnsupportedTransactionOptionsAreRefused(t *testing.T) {
 	t.Parallel()
 
 	uow := persistence.NewMemoryUnitOfWork()
+	// This test is not about events, so it says so. Without a sink the
+	// commit is now REFUSED — which is the point: dropping drained events
+	// silently is the defect persistence.Deliver exists to prevent.
+	uow.OnCommit(persistence.Discard)
 	ctx := context.Background()
 
 	err := uow.Do(ctx, func(context.Context) error { return nil },
@@ -482,6 +524,10 @@ func TestReadOnlyRefusesAWrite(t *testing.T) {
 	t.Parallel()
 
 	uow := persistence.NewMemoryUnitOfWork()
+	// This test is not about events, so it says so. Without a sink the
+	// commit is now REFUSED — which is the point: dropping drained events
+	// silently is the defect persistence.Deliver exists to prevent.
+	uow.OnCommit(persistence.Discard)
 	repo := persistence.NewMemoryRepository[*order, orderID](uow)
 	ctx := context.Background()
 
@@ -504,6 +550,10 @@ func TestAReadOnlyTransactionStillReads(t *testing.T) {
 	t.Parallel()
 
 	uow := persistence.NewMemoryUnitOfWork()
+	// This test is not about events, so it says so. Without a sink the
+	// commit is now REFUSED — which is the point: dropping drained events
+	// silently is the defect persistence.Deliver exists to prevent.
+	uow.OnCommit(persistence.Discard)
 	repo := persistence.NewMemoryRepository[*order, orderID](uow)
 	ctx := context.Background()
 
@@ -541,6 +591,10 @@ func TestSavingAnAggregateWithNoIDIsRefused(t *testing.T) {
 	t.Parallel()
 
 	uow := persistence.NewMemoryUnitOfWork()
+	// This test is not about events, so it says so. Without a sink the
+	// commit is now REFUSED — which is the point: dropping drained events
+	// silently is the defect persistence.Deliver exists to prevent.
+	uow.OnCommit(persistence.Discard)
 	repo := persistence.NewMemoryRepository[*order, orderID](uow)
 	ctx := context.Background()
 
@@ -579,6 +633,10 @@ func TestNotFoundDoesNotLeakTheGoTypeName(t *testing.T) {
 	t.Parallel()
 
 	uow := persistence.NewMemoryUnitOfWork()
+	// This test is not about events, so it says so. Without a sink the
+	// commit is now REFUSED — which is the point: dropping drained events
+	// silently is the defect persistence.Deliver exists to prevent.
+	uow.OnCommit(persistence.Discard)
 	repo := persistence.NewMemoryRepository[*order, orderID](uow)
 
 	_, err := repo.FindByID(context.Background(), "o-1")
@@ -608,6 +666,10 @@ func TestTwoAggregateTypesWithOneIDDoNotCollide(t *testing.T) {
 	t.Parallel()
 
 	uow := persistence.NewMemoryUnitOfWork()
+	// This test is not about events, so it says so. Without a sink the
+	// commit is now REFUSED — which is the point: dropping drained events
+	// silently is the defect persistence.Deliver exists to prevent.
+	uow.OnCommit(persistence.Discard)
 	orders := persistence.NewMemoryRepository[*order, orderID](uow)
 	invoices := persistence.NewMemoryRepository[*invoice, orderID](uow)
 	ctx := context.Background()
@@ -740,6 +802,10 @@ func TestVersionedContractReturnsContention(t *testing.T) {
 
 	ctx := context.Background()
 	uow := persistence.NewMemoryUnitOfWork()
+	// This test is not about events, so it says so. Without a sink the
+	// commit is now REFUSED — which is the point: dropping drained events
+	// silently is the defect persistence.Deliver exists to prevent.
+	uow.OnCommit(persistence.Discard)
 	repo := persistence.NewMemoryRepository[*payment, orderID](uow)
 	save := func(p *payment) error {
 		return uow.Do(ctx, func(ctx context.Context) error { return repo.Save(ctx, p) })
@@ -773,4 +839,308 @@ func TestVersionedContractReturnsContention(t *testing.T) {
 	if werrors.Is(err, werrors.CodeConflict) {
 		t.Errorf("the loser got %v, which is ALSO CodeConflict — a consumer acks that code, so the message would be destroyed with its work not done", err)
 	}
+}
+
+// --- the event-sink refusal (FT14-2) ---------------------------------------
+//
+// Every test below fails on the code as it stood before this change, where a
+// unit of work with no sink drained an aggregate's events and dropped them:
+// the row committed, warren_outbox held nothing, the aggregate's pending queue
+// was empty, and no error or log line said so.
+
+func TestDeliverRefusesEventsWithNoSink(t *testing.T) {
+	t.Parallel()
+
+	events := []domain.Event{placed{ID: "a", At: time.Unix(1, 0)}}
+	err := persistence.Deliver(context.Background(), events, nil)
+	if err == nil {
+		t.Fatal("Deliver dropped the events and returned nil — the whole defect")
+	}
+	// CodeOf, not Is: this is a bare diagnostic, exactly like
+	// ErrNoTransaction, because errors.Internal would prefix "unexpected
+	// failure:" and bury the first line of a message whose text is its whole
+	// value. CodeOf is what the transport edge calls, and it maps an
+	// unclassified error to INTERNAL — so the caller sees 500, which is
+	// right: nothing about the next attempt is different.
+	if got := werrors.CodeOf(err); got != werrors.CodeInternal {
+		t.Errorf("code = %s, want INTERNAL — a wiring mistake is not retryable", got)
+	}
+	for _, want := range []string{"nowhere to put them", "persistence.Discard", "WithOutbox()"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the diagnostic does not mention %q:\n%s", want, err)
+		}
+	}
+}
+
+func TestDeliverWithNoEventsIsNotAMisconfiguration(t *testing.T) {
+	t.Parallel()
+
+	// Most transactions raise nothing. Refusing those would make the check
+	// useless by making it fire everywhere.
+	if err := persistence.Deliver(context.Background(), nil, nil); err != nil {
+		t.Errorf("Deliver with no events and no sink = %v, want nil", err)
+	}
+}
+
+func TestDeliverRunsSinksInRegistrationOrderWithTheSameSlice(t *testing.T) {
+	t.Parallel()
+
+	events := []domain.Event{placed{ID: "a", At: time.Unix(1, 0)}, placed{ID: "b", At: time.Unix(1, 0)}}
+	var order []string
+	sink := func(name string) persistence.EventSink {
+		return func(_ context.Context, got []domain.Event) error {
+			order = append(order, name)
+			if len(got) != len(events) {
+				t.Errorf("%s saw %d events, want %d", name, len(got), len(events))
+			}
+			return nil
+		}
+	}
+	if err := persistence.Deliver(context.Background(), events,
+		[]persistence.EventSink{sink("first"), nil, sink("second")}); err != nil {
+		t.Fatalf("Deliver: %v", err)
+	}
+	if strings.Join(order, ",") != "first,second" {
+		t.Errorf("sinks ran %v, want first,second — and the nil skipped, not panicked", order)
+	}
+}
+
+func TestDeliverWrapsAFailingSinkAsUnavailable(t *testing.T) {
+	t.Parallel()
+
+	err := persistence.Deliver(context.Background(),
+		[]domain.Event{placed{ID: "a", At: time.Unix(1, 0)}},
+		[]persistence.EventSink{func(context.Context, []domain.Event) error {
+			return stderrors.New("outbox write failed")
+		}})
+	if !werrors.Is(err, werrors.CodeUnavailable) {
+		t.Errorf("failing sink = %v, want UNAVAILABLE — the next attempt may succeed", err)
+	}
+}
+
+// TestErrNoEventSinkIsGolden pins the text, because the text IS the value of
+// this error: an operator meeting it has already lost the events that
+// transaction raised, and the two ways out have to be in front of them.
+//
+// Regenerate with:  go test ./persistence -run Golden -update
+func TestErrNoEventSinkIsGolden(t *testing.T) {
+	t.Parallel()
+
+	var b strings.Builder
+	b.WriteString("── one event\n")
+	b.WriteString(persistence.ErrNoEventSink(1).Error())
+	b.WriteString("\n\n── three events\n")
+	b.WriteString(persistence.ErrNoEventSink(3).Error())
+	b.WriteString("\n")
+
+	path := filepath.Join("testdata", "no_event_sink.golden")
+	if *updateGolden {
+		if err := os.MkdirAll("testdata", 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(b.String()), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
+	want, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("no golden file — run: go test ./persistence -run Golden -update\n%v", err)
+	}
+	if b.String() != string(want) {
+		t.Errorf("diagnostic drifted from the golden:\n--- got\n%s\n--- want\n%s", b.String(), want)
+	}
+}
+
+var updateGolden = flag.Bool("update", false, "rewrite golden files")
+
+func TestDiscardIsAWorkingOptOut(t *testing.T) {
+	t.Parallel()
+
+	uow := persistence.NewMemoryUnitOfWork()
+	uow.OnCommit(persistence.Discard)
+	repo := persistence.NewMemoryRepository[*order, orderID](uow)
+
+	ctx := context.Background()
+	if err := uow.Do(ctx, func(ctx context.Context) error {
+		return repo.Save(ctx, newOrder("a", 1))
+	}); err != nil {
+		t.Fatalf("a commit with Discard registered must succeed: %v", err)
+	}
+	// The write is real. Discard says the EVENTS go nowhere, not the row.
+	if _, err := repo.FindByID(ctx, "a"); err != nil {
+		t.Errorf("the row is not there after a Discard commit: %v", err)
+	}
+}
+
+func TestMemoryCommitWithNoSinkRollsBackTheWrite(t *testing.T) {
+	t.Parallel()
+
+	uow := persistence.NewMemoryUnitOfWork() // deliberately no OnCommit
+	repo := persistence.NewMemoryRepository[*order, orderID](uow)
+
+	ctx := context.Background()
+	err := uow.Do(ctx, func(ctx context.Context) error {
+		return repo.Save(ctx, newOrder("a", 1))
+	})
+	if err == nil {
+		t.Fatal("the commit succeeded and the events were destroyed — the defect")
+	}
+	if got := werrors.CodeOf(err); got != werrors.CodeInternal {
+		t.Errorf("code = %s, want INTERNAL", got)
+	}
+	// The refusal must roll back. A row that committed while its events were
+	// destroyed is the half-done state the whole check exists to prevent.
+	if _, err := repo.FindByID(ctx, "a"); !werrors.Is(err, werrors.CodeNotFound) {
+		t.Errorf("FindByID after the refusal = %v, want NOT_FOUND — the write was not rolled back", err)
+	}
+}
+
+// --- the canaries: proving the CONTRACT SUITE can fail ---------------------
+//
+// FT14-2 was not only a driver defect. RunContract certified the drivers and
+// could not see it, because its enlistment subtests assert the aggregate's
+// pending queue is EMPTY after commit — equally true of events that reached
+// the outbox and events that reached the floor. A suite that cannot fail on
+// the thing it exists to certify is worse than no suite: it converts an
+// unchecked property into a checked-looking one.
+//
+// These two run the suite against deliberately broken drivers in a SUBPROCESS,
+// because a failing subtest fails its parent — the only way to assert that a
+// test suite fails is to run it as a test binary and read the exit code.
+
+// droppingUnitOfWork drains the enlisted aggregates and throws the events
+// away. It is what every driver would look like with persistence.Deliver's
+// refusal removed.
+type droppingUnitOfWork struct{}
+
+func (u *droppingUnitOfWork) Do(ctx context.Context, fn func(context.Context) error, _ ...persistence.Option) error {
+	ctx, drain := persistence.Collect(ctx)
+	if err := fn(ctx); err != nil {
+		return err
+	}
+	drain() // the whole defect, in one line: destructive, and nothing receives it
+	return nil
+}
+
+// sinkableDroppingUnitOfWork is CORRECT IN EVERY RESPECT BUT ONE. It is the
+// real MemoryUnitOfWork — real transactions, real rollback, real optimistic
+// concurrency — wrapped so that a sink registered through OnCommit is
+// swallowed instead of forwarded.
+//
+// That isolation is the whole point. A fake that is broken in several ways
+// would fail RunContract for some other reason, and the canary would prove
+// only that the suite rejects rubbish — not that the DELIVERY assertion is
+// what caught it. This one passes every other subtest.
+type sinkableDroppingUnitOfWork struct {
+	*persistence.MemoryUnitOfWork
+	swallowed []persistence.EventSink
+}
+
+func newSinkableDroppingUnitOfWork() *sinkableDroppingUnitOfWork {
+	inner := persistence.NewMemoryUnitOfWork()
+	// Registered on the INNER unit of work so commits still succeed: the
+	// modelled defect is "the sink the caller registered never runs", not
+	// "the unit of work refuses".
+	inner.OnCommit(persistence.Discard)
+	return &sinkableDroppingUnitOfWork{MemoryUnitOfWork: inner}
+}
+
+// OnCommit accepts the sink and never calls it — a driver that says it
+// delivers and does not.
+func (u *sinkableDroppingUnitOfWork) OnCommit(fn persistence.EventSink) {
+	u.swallowed = append(u.swallowed, fn)
+}
+
+const canaryEnv = "WARREN_CONTRACT_CANARY"
+
+// runCanary re-executes this test binary with only the named test enabled and
+// returns whether it passed. A canary must FAIL.
+func runCanary(t *testing.T, name string) (passed bool, output string) {
+	t.Helper()
+	cmd := exec.Command(os.Args[0], "-test.run=^"+name+"$", "-test.v")
+	cmd.Env = append(os.Environ(), canaryEnv+"=1")
+	out, err := cmd.CombinedOutput()
+	return err == nil, string(out)
+}
+
+func TestRunContractRefusesADriverThatIsNotAnEventSource(t *testing.T) {
+	if os.Getenv(canaryEnv) != "" {
+		persistence.RunContract(t, func(*testing.T) (persistence.UnitOfWork, persistence.Repository[*order, orderID]) {
+			uow := &droppingUnitOfWork{}
+			return uow, newRecordingRepo()
+		}, func(id orderID) *order { return newOrder(id, 1) }, orderID("first"), orderID("second"))
+		return
+	}
+
+	passed, out := runCanary(t, t.Name())
+	if passed {
+		t.Errorf("RunContract PASSED a unit of work with nowhere to deliver events:\n%s", out)
+	}
+	if !strings.Contains(out, "persistence.EventSource") {
+		t.Errorf("the failure does not name the missing seam:\n%s", out)
+	}
+}
+
+func TestRunContractRefusesADriverThatDrainsAndDiscards(t *testing.T) {
+	if os.Getenv(canaryEnv) != "" {
+		persistence.RunContract(t, func(*testing.T) (persistence.UnitOfWork, persistence.Repository[*order, orderID]) {
+			uow := newSinkableDroppingUnitOfWork()
+			return uow, persistence.NewMemoryRepository[*order, orderID](uow.MemoryUnitOfWork)
+		}, func(id orderID) *order { return newOrder(id, 1) }, orderID("first"), orderID("second"))
+		return
+	}
+
+	passed, out := runCanary(t, t.Name())
+	if passed {
+		t.Errorf("RunContract PASSED a driver that registers sinks and never calls them —\n"+
+			"which is FT14-2 exactly, and the suite could not see it:\n%s", out)
+	}
+	if !strings.Contains(out, "destroyed at commit") && !strings.Contains(out, "never ran") {
+		t.Errorf("the failure does not say the events were destroyed:\n%s", out)
+	}
+}
+
+// recordingRepo is the smallest Repository the contract suite accepts. It
+// exists so a canary can pair a BROKEN unit of work with a CORRECT repository
+// — otherwise a failure could be blamed on the repository and the canary would
+// prove nothing.
+type recordingRepo struct {
+	mu    sync.Mutex
+	items map[orderID]*order
+}
+
+func newRecordingRepo() *recordingRepo {
+	return &recordingRepo{items: map[orderID]*order{}}
+}
+
+func (r *recordingRepo) FindByID(_ context.Context, id orderID) (*order, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	o, ok := r.items[id]
+	if !ok {
+		return nil, werrors.NotFound("order", id)
+	}
+	return o, nil
+}
+
+func (r *recordingRepo) Save(ctx context.Context, root *order) error {
+	// Through persistence.Write, so the aggregate is enlisted exactly as a
+	// real repository enlists it. The canary's defect is in the unit of work,
+	// not here.
+	return persistence.Write(ctx, "order.save", root, func(context.Context) error {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		r.items[root.ID()] = root
+		return nil
+	})
+}
+
+func (r *recordingRepo) Delete(ctx context.Context, root *order) error {
+	return persistence.Write(ctx, "order.delete", root, func(context.Context) error {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		delete(r.items, root.ID())
+		return nil
+	})
 }

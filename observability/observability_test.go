@@ -41,8 +41,8 @@ func (c *controller) hello(_ context.Context, g greet) (greeting, error) {
 	return greeting{Text: "hello " + g.Name}, nil
 }
 
-func (c *controller) Register(r transport.Registrar) {
-	transport.Post(r, "/greet", app.HandlerFunc[greet, greeting](c.hello))
+func (c *controller) Register(r *transport.Registrar) {
+	r.Post("/greet", app.HandlerFunc[greet, greeting](c.hello))
 }
 
 // fakeTelemetry is an in-process app.Telemetry: no collector, no network, no

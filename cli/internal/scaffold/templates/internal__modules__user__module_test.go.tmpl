@@ -2,7 +2,7 @@ package user_test
 
 import (
 	"context"
-{{- if or (eq .DB "postgres") (eq .Broker "kafka") }}
+{{- if eq .Broker "kafka" }}
 	"os"
 {{- end }}
 	"testing"
@@ -10,9 +10,6 @@ import (
 
 	"github.com/MerseniBilel/warren/broker"
 	werrors "github.com/MerseniBilel/warren/errors"
-{{- if eq .DB "postgres" }}
-	"github.com/MerseniBilel/warren/persistence/postgres"
-{{- end }}
 	warrentest "github.com/MerseniBilel/warren/testing"
 
 	"{{.Module}}/internal/modules/user"
@@ -85,64 +82,38 @@ func TestInvalidEmailIsRejected(t *testing.T) {
 }
 
 {{- if eq .DB "postgres" }}
-// boot starts the feature. Its imports come with it — user imports platform,
-// which imports config and the postgres adapter — so the test names one
-// module and the harness swaps in the recording broker.
+// boot starts the feature with NO DATABASE, so these tests run on a clean
+// checkout with nothing exported and nothing installed.
 //
-// Two things this has to do that a memory-driver test does not.
+// It boots user.MemoryModule rather than user.Module, and the difference is
+// the whole point. user.Module imports the postgres adapter; a driver module
+// CONNECTS at boot, deliberately, so a misconfigured service fails its boot
+// instead of request 1 — and the pool is Eager, so it dials whether or not
+// anything injects it. No substitution can prevent that, because nothing in
+// warren removes a module from a graph. So the test graph is one that never
+// named postgres.
 //
-// It SKIPS without a database. `go test ./...` on a fresh checkout has to
-// pass, and a test that fails because you have not exported a DSN teaches
-// people to ignore red.
-//
-// And it TRUNCATES first. These tests share one real database, so without
-// this the second one to run finds the first one's user already registered
-// and fails on a duplicate — a test that passes exactly once, on an empty
-// database, and never again.
+// These tests are about the use case, the aggregate's invariants, the outbox
+// and the event reaching the broker — none of which is SQL. The SQL has its
+// own test: user_repository_postgres_test.go runs the repository contract
+// against a real database and skips without one. That is the ONLY test here
+// that needs {{.EnvPrefix}}_DATABASE_URL.
 func boot(t *testing.T) *warrentest.App {
 	t.Helper()
-	if os.Getenv("{{.EnvPrefix}}_DATABASE_URL") == "" {
-		t.Skip("{{.EnvPrefix}}_DATABASE_URL is not set; these tests need a database")
-	}
 {{- if eq .Broker "kafka" }}
 	// The graph includes the Kafka module, and a driver module CONNECTS at
 	// boot — deliberately, so a misconfigured broker fails the boot rather
 	// than request 1. WithMemoryBroker below substitutes the ports this test
 	// reads, but it cannot stop the client dialling, so these tests need a
-	// reachable broker the same way the ones above need a database.
+	// reachable broker.
 	if os.Getenv("{{.EnvPrefix}}_KAFKA_BROKERS") == "" {
 		t.Skip("{{.EnvPrefix}}_KAFKA_BROKERS is not set; these tests need a broker")
 	}
 {{- end }}
-	app := warrentest.NewModuleTest(t, user.Module(), warrentest.WithMemoryBroker())
-	reset(t, app)
-	return app
-}
-
-// reset empties what these tests write, so each run starts from the same
-// state. It goes through the application's own postgres.DB rather than
-// opening a second pool — no driver import in your test, and no second set
-// of connection settings to keep in step.
-//
-// DELETE, not TRUNCATE, and that matters. The app is ALREADY RUNNING by the
-// time this executes, and its outbox relay polls warren_outbox on an
-// interval. TRUNCATE needs ACCESS EXCLUSIVE, so it waits for the relay's
-// read to finish and the relay waits behind it — long enough that the first
-// test's event misses its deadline and the suite fails only on the runs
-// where there was data to clear. DELETE takes row locks and never fights it.
-func reset(t *testing.T, app *warrentest.App) {
-	t.Helper()
-	err := app.Warren().Invoke("user", func(db postgres.DB) {
-		ctx := context.Background()
-		for _, table := range []string{"users", "warren_outbox", "warren_inbox"} {
-			if _, execErr := db(ctx).Exec(ctx, "DELETE FROM "+table); execErr != nil {
-				t.Fatalf("clearing %s: %v — has `go run ./cmd/migrate` been run?", table, execErr)
-			}
-		}
-	})
-	if err != nil {
-		t.Fatalf("resolving postgres.DB: %v", err)
-	}
+	return warrentest.NewModuleTest(t, user.MemoryModule(),
+		warrentest.WithMemoryBroker(),
+		warrentest.WithMemoryPersistence(),
+	)
 }
 {{- else }}
 // boot starts the feature. Its imports come with it — user imports

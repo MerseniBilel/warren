@@ -44,3 +44,36 @@ var Module = sync.OnceValue(func() warren.Module {
 		warren.Exports[domain.UserRepository](),
 	)
 })
+{{- if eq .DB "postgres" }}
+
+// MemoryModule is Module with the in-memory repository and WITHOUT the
+// postgres adapter. It is what module_test.go boots, and it is the reason
+// `go test ./...` passes on a clean checkout with no database.
+//
+// Why a second module rather than a substitution. A driver module CONNECTS at
+// boot, deliberately, so a misconfigured service fails its boot instead of
+// request 1 — and persistence/postgres declares warren.Eager for its pool, so
+// the pool is built and dials whether or not anything injects it. Binding a
+// fake postgres.DB therefore does not prevent the dial, and nothing in
+// warren removes a module from a graph: Imports carries module VALUES, fixed
+// at declaration. The only graph without postgres in it is one that never
+// named postgres — this one.
+//
+// Pair it with warrentest.WithMemoryPersistence(), which binds the core
+// persistence ports the application layer resolves.
+//
+// The application and domain code under test is identical either way. What
+// this does NOT cover is the SQL: user_repository_postgres_test.go runs the
+// repository contract against a real database, and skips without one.
+var MemoryModule = sync.OnceValue(func() warren.Module {
+	return warren.NewModule("user",
+		warren.Imports(platform.Memory()),
+		warren.Providers(
+			infrastructure.NewMemoryUserRepository,
+			application.NewRegisterUserHandler,
+		),
+		warren.Controllers(NewController),
+		warren.Exports[domain.UserRepository](),
+	)
+})
+{{- end }}

@@ -30,7 +30,7 @@ type MemoryUnitOfWork struct {
 
 	mu       sync.Mutex
 	entities map[string]any // committed state, keyed by type+id
-	commit   []func(context.Context, []domain.Event) error
+	commit   []EventSink
 }
 
 // NewMemoryUnitOfWork returns an in-process UnitOfWork.
@@ -44,7 +44,16 @@ var _ UnitOfWork = (*MemoryUnitOfWork)(nil)
 // outbox writer attaches in tests, and how a test asserts on what was
 // published. Sinks run inside the commit: a failing sink fails the
 // transaction, which is the atomicity the outbox depends on.
-func (u *MemoryUnitOfWork) OnCommit(fn func(context.Context, []domain.Event) error) {
+// OnCommit registers a sink for the events drained at commit. Registration is
+// a boot-time act: a sink added after the first commit is not supported.
+//
+// A nil sink is refused HERE, at registration, where the stack names the line
+// that registered it — not on the commit path, where it would surface as a
+// request failure far from its cause.
+func (u *MemoryUnitOfWork) OnCommit(fn EventSink) {
+	if fn == nil {
+		panic("persistence: OnCommit registered a nil sink")
+	}
 	u.mu.Lock()
 	defer u.mu.Unlock()
 	u.commit = append(u.commit, fn)
@@ -154,16 +163,20 @@ func (u *MemoryUnitOfWork) Do(ctx context.Context, fn func(context.Context) erro
 	// outbox writer is exactly that — and holding u.mu across the callback
 	// would deadlock the commit against itself.
 	u.mu.Lock()
-	sinks := append([]func(context.Context, []domain.Event) error(nil), u.commit...)
+	sinks := append([]EventSink(nil), u.commit...)
 	u.mu.Unlock()
 
 	// The sinks run inside the transaction: txCtx, not ctx, so a sink's own
 	// writes join it, and a failing sink fails the whole transaction — that
 	// atomicity is what the outbox depends on.
-	for _, sink := range sinks {
-		if err := sink(txCtx, events); err != nil {
-			return errors.Unavailable("unit of work commit", err)
-		}
+	//
+	// Deliver, not a loop: it is the only sanctioned way to dispose of drained
+	// events, and it REFUSES when there are events and nowhere to put them.
+	// This loop used to be inline, and with no sink registered it discarded
+	// them — committing the row while the events it raised ceased to exist,
+	// with no error and no log line.
+	if err := Deliver(txCtx, events, sinks); err != nil {
+		return err
 	}
 
 	u.mu.Lock()
@@ -460,6 +473,22 @@ func (r *MemoryRepository[T, K]) Save(ctx context.Context, root T) error {
 			if _, seen := s.expect[k]; !seen {
 				s.expect[k] = ver.Version()
 			}
+			// ADVANCE THE CALLER'S AGGREGATE HERE, not only at commit.
+			//
+			// domain.Versioned's contract is that a repository sets the
+			// version "after a successful write", and the postgres driver
+			// does it inside Save. This driver used to do it only at commit,
+			// so a handler that read agg.Version() inside its own
+			// transaction — to build a view, or an ETag — got the STALE
+			// number on memory and the advanced one on postgres. Two drivers
+			// implementing one port differently is exactly what the port
+			// exists to prevent, and no contract test could see it because
+			// the suite only looked after commit.
+			//
+			// expect+1, not current+1, so it is idempotent: a second Save of
+			// the same key in one transaction is still one logical write and
+			// still lands on the same version the commit will set.
+			ver.SetVersion(s.expect[k] + 1)
 		}
 		delete(s.deletes, k)
 		s.mu.Unlock()

@@ -11,8 +11,8 @@
     • Move the type you need into the domain, and let the other layer
       depend on it.
     • Declare a port in the domain and implement it in infrastructure,
-      then wire the two in module.go — the one file permitted to see
-      all four layers.
+      then wire the two in the feature's own module.go — the one file
+      permitted to see all four layers.
 
 1 violation(s) in 2 packages.
 

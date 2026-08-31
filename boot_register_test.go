@@ -34,9 +34,9 @@ func (c *echoController) hello(_ context.Context, g greet) (greeting, error) {
 	return greeting{Text: "hello " + g.Name}, nil
 }
 
-func (c *echoController) Register(r transport.Registrar) {
+func (c *echoController) Register(r *transport.Registrar) {
 	c.registered++
-	transport.Post(r, "/greet", app.HandlerFunc[greet, greeting](c.hello))
+	r.Post("/greet", app.HandlerFunc[greet, greeting](c.hello))
 }
 
 // silentController is the failure §1.3 exists to prevent: a type listed in
@@ -264,8 +264,8 @@ type rawUploadController struct{}
 
 type upload struct{}
 
-func (c *rawUploadController) Register(r transport.Registrar) {
-	transport.Raw(r, transport.ProtocolHTTP, "POST /uploads", &upload{})
+func (c *rawUploadController) Register(r *transport.Registrar) {
+	r.Raw(transport.ProtocolHTTP, "POST /uploads", &upload{})
 }
 
 func TestRawRouteRequiresAnAdapterToo(t *testing.T) {
@@ -427,11 +427,11 @@ func TestAControllerSomethingDependsOnIsNotRefused(t *testing.T) {
 
 type deadController struct{}
 
-func (*deadController) Register(transport.Registrar) {}
+func (*deadController) Register(*transport.Registrar) {}
 
 type parentController struct{ sub *deadController }
 
-func (p *parentController) Register(r transport.Registrar) { p.sub.Register(r) }
+func (p *parentController) Register(r *transport.Registrar) { p.sub.Register(r) }
 
 // TestANilProviderFailsTheBoot — warren.md §1.3's headline rule is "every
 // error the framework can detect surfaces at boot, never on request 1". A
@@ -584,7 +584,7 @@ func (fixedPricing) Price() int { return 1 }
 
 type pricedController struct{ p pricing }
 
-func (*pricedController) Register(transport.Registrar) {}
+func (*pricedController) Register(*transport.Registrar) {}
 
 // newCatalogPricing is a package-level constructor so the diagnostic has a
 // real name to print. A literal closure would print as a file:line func, and
@@ -1069,9 +1069,9 @@ type brokenController struct{ svc *greetService }
 
 type greetService struct{ prefix string }
 
-func (c *brokenController) Register(r transport.Registrar) {
+func (c *brokenController) Register(r *transport.Registrar) {
 	// c.svc is nil: this is the nil dereference, inside Register, at boot.
-	transport.Post(r, "/greet/"+c.svc.prefix,
+	r.Post("/greet/"+c.svc.prefix,
 		app.HandlerFunc[greet, greeting](func(context.Context, greet) (greeting, error) {
 			return greeting{}, nil
 		}))
@@ -1081,8 +1081,8 @@ func (c *brokenController) Register(r transport.Registrar) {
 // the shape that makes the consequence checks report artefacts of the panic.
 type halfController struct{ svc *greetService }
 
-func (c *halfController) Register(r transport.Registrar) {
-	transport.Post(r, "/half", app.HandlerFunc[greet, greeting](
+func (c *halfController) Register(r *transport.Registrar) {
+	r.Post("/half", app.HandlerFunc[greet, greeting](
 		func(context.Context, greet) (greeting, error) { return greeting{}, nil }))
 	panic("half-registered: " + c.svc.prefix)
 }
@@ -1204,7 +1204,7 @@ func TestNoWarrenInvokedUserCodePanicsUncontained(t *testing.T) {
 	}{
 		{
 			name:     "constructor",
-			headline: "✗ constructor panicked",
+			headline: "✗ panic in the container",
 			run: func(*testing.T) error {
 				m := warren.NewModule("user",
 					warren.Controllers(func() *echoController { panic("constructor refusal") }),

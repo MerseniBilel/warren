@@ -11,6 +11,23 @@
       postgres://user:pass@localhost:5432/app?sslmode=disable
       host=localhost user=app dbname=app sslmode=disable
 
+── empty DSN
+✗ postgres connection string is empty
+
+    postgres.DSN(...) was given an empty string.
+
+  The option is present — this is about the VALUE, not the wiring.
+  If it reads an environment variable, that variable is unset:
+
+      postgres.DSN(os.Getenv("MYAPP_DATABASE_URL"))
+
+  A scaffolded project reads <APPNAME>_DATABASE_URL, upper-cased,
+  with dashes as underscores. Export it, or pass the DSN directly.
+
+  Either form works:
+      postgres://user:pass@localhost:5432/app?sslmode=disable
+      host=localhost user=app dbname=app sslmode=disable
+
 ── bad DSN
 ✗ postgres connection string is not valid
 
@@ -31,7 +48,7 @@
   that the role exists — using the variable you set the DSN in, since
   the one printed above has its password removed and would fail auth:
 
-      psql "$DATABASE_URL" -c 'select 1'
+      psql "$YOUR_DSN_VARIABLE" -c 'select 1'
 
 ── not started
 ✗ postgres pool used before it was started

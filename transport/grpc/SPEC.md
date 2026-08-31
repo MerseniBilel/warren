@@ -29,9 +29,16 @@ never `warren/transport/http`.
 
 ## Goals
 
-- Implement `transport.GRPCRegistrar` (§3.5) so
-  `r.GRPC().Method("user.v1.UserService/Register", c.register)` exposes an
-  existing handler.
+- Serve §3.5's existing `Registrar.Method` so
+  `r.Method("user.v1.UserService/Register", c.register)` exposes an existing
+  handler over gRPC.
+
+  > **Corrected 2026-08-29.** This bullet used to say "Implement
+  > `transport.GRPCRegistrar` (§3.5) so `r.GRPC().Method(...)`". Neither
+  > `transport.GRPCRegistrar` nor `r.GRPC()` was ever built: §3.5 shipped
+  > **one** concrete `Registrar` whose `Method` generic method already carries
+  > gRPC registration. This package supplies the adapter that serves it, and
+  > adds no registrar of its own.
 - Own the gRPC column of the error table (§2.6).
 - Own the gRPC edge ring: interceptors, decode from proto, encode to proto
   (§1.4).
@@ -208,8 +215,8 @@ Wrap exists to prevent.
 1. `Server`, `Port`, `Interceptors`, `Recovery`, `Tracing`, `TLS`, and `Raw`
    implemented with the signatures above (once Open question 1 is answered),
    each with a doc comment starting with its identifier.
-2. `transport.GRPCRegistrar` implemented; `r.GRPC().Method(...)` serves an
-   existing `app.Handler` end to end.
+2. `r.Method(...)` — already registered by §3.5's `Registrar` — serves an
+   existing `app.Handler` end to end over gRPC.
 3. Interceptors register through the same middleware chain as HTTP, demonstrated
    by the parity test.
 4. Every row of the gRPC column mapped, with golden files.
@@ -231,7 +238,7 @@ Wrap exists to prevent.
 what makes the adapter wait.
 
 **(a) The handler's `Req` IS the generated proto type — DISQUALIFIED, and not
-on purity.** The same handler serves `transport.Post(r, "/users", c.register)`,
+on purity.** The same handler serves `r.Post("/users", c.register)`,
 and the HTTP adapter would then JSON-encode a generated struct with
 `encoding/json`, which is not protojson: wrong field names, wrong enums, broken
 oneofs, `nil`-versus-empty confusion. **(a) breaks the HTTP adapter for the very
@@ -344,9 +351,9 @@ adapter is built:
 `http.ErrAbortHandler`. gRPC has no documented equivalent; if one is found,
 this is the seam for it.
 
-**2. Streaming is out, and `transport.Raw` already covers it — no core change.**
+**2. Streaming is out, and `r.Raw` already covers it — no core change.**
 Same ruling as HTTP: typed byte-in/byte-out is the only typed shape.
-`transport.Raw(r, transport.ProtocolGRPC, "user.v1.UserService/Watch", h)`,
+`r.Raw(transport.ProtocolGRPC, "user.v1.UserService/Watch", h)`,
 where the pattern is the full method name and carries no verb because gRPC has
 none. The adapter asserts `grpc.StreamHandler` and fails the boot naming the
 route and the type, exactly as the HTTP adapter asserts `http.Handler`. That

@@ -92,7 +92,7 @@ func generateCmd() *cobra.Command {
 		Args: cobra.ExactArgs(2),
 		RunE: run(generate.Command, true),
 	}
-	command.Flags().StringVar(&opts.Route, "route", "", "the path the controller serves (default: derived from the name)")
+	command.Flags().StringVar(&opts.Route, "route", "", "the path the controller serves. Recommended: only Create<X> derives a\nREST-shaped path (/xs); every other name falls back to the literal\nsnake_case of the method, which is rarely what you want to ship")
 	command.Flags().StringVar(&opts.Method, "method", "", "the HTTP method: get, post, put, patch, delete (default: post)")
 
 	repository := &cobra.Command{

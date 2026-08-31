@@ -9,7 +9,9 @@
 --
 -- version carries the optimistic lock. The repository writes
 -- `WHERE id = $1 AND version = $n`, so two concurrent updates that both read
--- version 3 cannot both commit — the loser matches no row and gets CONFLICT.
+-- version 3 cannot both commit — the loser matches no row and gets CONTENTION,
+-- which is the RETRYABLE code: the next attempt reads the new version and may
+-- succeed. CONFLICT is for a uniqueness violation, where retrying cannot help.
 -- Drop the column only if the aggregate also drops domain.VersionedRoot.
 CREATE TABLE IF NOT EXISTS {{.Plural}} (
     id         TEXT        PRIMARY KEY,

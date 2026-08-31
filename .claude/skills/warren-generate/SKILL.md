@@ -95,8 +95,8 @@ func NewController(
     suspendUser app.Handler[application.SuspendUser, application.SuspendUserResult],
 ) *Controller { … }
 
-func (c *Controller) Register(r transport.Registrar) {
-    transport.Post(r, "/suspend_user", c.suspendUser)
+func (c *Controller) Register(r *transport.Registrar) {
+    r.Post("/suspend_user", c.suspendUser)
 }
 ```
 
@@ -105,8 +105,8 @@ constructor and a method body it did not create. Forgetting them is not
 silent — the handler simply has no route — but it is the one part of `g
 command` that is not wiring you get for free.
 
-**The pattern is the PATH ALONE.** `transport.Post` already names the method;
-`transport.Post(r, "POST /x", h)` fails the boot. Only `transport.Raw` takes
+**The pattern is the PATH ALONE.** `r.Post` already names the method;
+`r.Post("POST /x", h)` fails the boot. Only `r.Raw` takes
 `"METHOD /path"`, because it names no method of its own.
 
 ## `warren g repository --driver postgres`

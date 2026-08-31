@@ -1,0 +1,21 @@
+✗ lifecycle hook exited without returning
+
+  Hook "warren/broker/kafka" ended its goroutine during OnStop without
+  returning and without panicking. The remaining hooks were stopped anyway —
+  shutdown does not abandon the drain because one hook failed — and this is
+  reported with whatever else failed on the way down. The resources this hook
+  owns may not have been released.
+
+  That is what runtime.Goexit does — and t.Fatal, t.Fatalf, t.FailNow and
+  t.Skip are all runtime.Goexit. An assertion inside a lifecycle hook ends the
+  hook's goroutine where it stands, and recover() sees nil on the way out, so
+  Warren reports the exit and cannot report its cause: the message you wrote
+  is already gone.
+
+  Two ways to fix it:
+
+    • Assert outside the hook. Let the hook record what it saw and return,
+      then call t.Fatal from the test's own goroutine, where the message
+      survives.
+    • Return an error instead of failing inside the hook. A hook that returns
+      an error is reported the same way, and the error reaches you intact.

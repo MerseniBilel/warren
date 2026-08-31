@@ -123,7 +123,19 @@ func Check(dir string, opts Options) (*Report, error) {
 		if err != nil {
 			return err
 		}
+		// Every early return below happens BEFORE the file is parsed, so each
+		// one suppresses the rules for that file AND the import EDGES it
+		// would have contributed to the graph — which means every chain
+		// through it goes unreported too. Say both, always: the comment on
+		// the module.go skip that used to live here was true about the
+		// intent and silent about the effect, and that is how a black hole
+		// swallowing every edge out of internal/platform survived review.
+		// A rule that must exempt a file exempts it AFTER parsing, next to
+		// the rule it belongs to.
 		if d.IsDir() {
+			// All four rules, and all edges, for everything beneath: test
+			// fixtures are meant to break rules, and vendored code is not
+			// the reader's to restructure.
 			if path == dir {
 				return nil // never skip the root, whatever it is called
 			}
@@ -133,6 +145,8 @@ func Check(dir string, opts Options) (*Report, error) {
 			}
 			return nil
 		}
+		// All four rules, and all edges, for non-Go files and for tests. A
+		// test importing its own infrastructure is how it is written.
 		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
 			return nil
 		}
@@ -153,22 +167,40 @@ func Check(dir string, opts Options) (*Report, error) {
 			}
 		}
 
-		// module.go is the one file permitted to see all four layers: it is
-		// where a feature is wired together.
-		if filepath.Base(rel) == "module.go" {
-			return nil
-		}
-
 		fset := token.NewFileSet()
 		f, perr := parser.ParseFile(fset, path, nil, parser.ImportsOnly)
 		if perr != nil {
 			// A file that will not parse is skipped, not fatal: the check
-			// exists to run on broken code.
+			// exists to run on broken code. This suppresses all four rules
+			// for the file and every edge out of it, so a chain through an
+			// unparseable package is silently short. Nothing better is
+			// available — there are no imports to read.
 			return nil
 		}
 
 		layer := layerOf(pkgPath)
 		feature := featureOf(pkgPath)
+
+		// wiringFile is a feature's own module.go — internal/modules/<f>/ —
+		// or the platform's. It is the file that wires a feature together,
+		// and its ONE exemption is the cross-module rule below.
+		//
+		// The other three need no exemption and do not get one. The layer
+		// rule fires only where layerOf is non-empty; the transport and
+		// driver rules only in domain/ and application/. A wiring file at a
+		// feature root or in internal/platform is unlayered, so all three
+		// already pass over it by construction — the same argument
+		// handlerLayers makes for controller.go. Honouring the NAME inside
+		// application/ would hand every project a one-word opt-out of three
+		// rules, which is why `layer == ""` is part of the test rather than
+		// filepath.Base alone.
+		//
+		// The cross-module rule is different: featureOf IS non-empty at a
+		// feature root, so without this the rule fires there — and the
+		// linter's own remedy tells the reader to import "the owner's module
+		// value in module.go". A tool that refuses the fix it prescribes is
+		// worse than one with no remedy at all.
+		wiringFile := filepath.Base(rel) == "module.go" && layer == ""
 
 		for _, spec := range f.Imports {
 			imported, uerr := strconv.Unquote(spec.Path.Value)
@@ -217,7 +249,7 @@ func Check(dir string, opts Options) (*Report, error) {
 					})
 					continue
 				}
-				if other := featureOf(imported); feature != "" && other != "" && other != feature {
+				if other := featureOf(imported); !wiringFile && feature != "" && other != "" && other != feature {
 					report.Violations = append(report.Violations, Violation{
 						File: rel, Line: pos.Line, Package: pkgPath, Layer: layer,
 						Imported: imported, ImportedLayer: layerOf(imported), Rule: "cross-module",
@@ -459,6 +491,7 @@ var transportPackages = []string{
 	"github.com/gofiber/fiber",
 	"google.golang.org/grpc",
 	"github.com/gorilla/websocket",
+	"github.com/valyala/fasthttp",
 }
 
 // isTransportPackage reports whether path is one of them, or lives beneath
@@ -467,55 +500,162 @@ func isTransportPackage(path string) bool {
 	return matchesPrefix(path, transportPackages)
 }
 
-// driverPackages are the import prefixes that make a package a driver: SQL
-// and NoSQL clients, message-broker clients, and Warren's own adapter
-// modules. The list is explicit rather than heuristic, for the same reason
+// driverPackages are the import prefixes that make a package a driver. The
+// list is explicit rather than heuristic, for the same reason
 // transportPackages is: a linter that guesses is one people switch off.
 //
-// Cloud and SaaS SDKs are deliberately absent — aws-sdk-go-v2,
-// cloud.google.com/go, Stripe, Twilio and the rest. A domain importing the S3
-// SDK is the same violation in principle, and the list of SaaS clients is
-// unbounded: a list maintained by whoever last hit a false negative IS a
-// heuristic in a different hat, permanently incomplete, and its
-// incompleteness is indistinguishable from approval. The rule that catches
-// those is the layer rule, the moment the port is declared in the domain and
-// implemented in infrastructure.
+// # Membership is decided by three tests, and all three must hold
+//
+// Apply them instead of re-arguing the list. Every entry below passes all
+// three, and a candidate that fails any one of them does not go in — the
+// remedy for it is the layer rule, a doc comment, or nothing.
+//
+//  1. SUBSTRATE, NOT SERVICE. A client for a data store or a message broker
+//     the application ITSELF operates. This is what keeps the S3 SDK, Stripe
+//     and Twilio out: those speak to a third party's product, not to storage
+//     this service runs. A domain importing the S3 SDK is the same violation
+//     in principle, and the rule that catches it is the layer rule, the
+//     moment the port is declared in the domain and implemented in
+//     infrastructure.
+//
+//  2. ENUMERABLE. The population is bounded and auditable. There are perhaps
+//     thirty Go database and broker clients with meaningful use; there is no
+//     bound at all on SaaS clients, so a list of them is permanently
+//     incomplete and its incompleteness is indistinguishable from approval.
+//     That is the real content of "an unbounded list is a heuristic in a
+//     different hat" — the objection is to unboundedness, not to the
+//     maintenance.
+//
+//  3. EVERY PATH IT HAS EVER HAD. A library on this list is on it under each
+//     of its import paths: Shopify/sarama as well as IBM/sarama,
+//     streadway/amqp as well as rabbitmq/amqp091-go, go-redis/redis as well
+//     as redis/go-redis, jinzhu/gorm as well as gorm.io/gorm. Listing only
+//     the current path enforces the rule against projects that have already
+//     upgraded and exempts the ones that have not — which is exactly
+//     backwards, because the codebase most likely to have a layering problem
+//     is the one still on the old import.
+//
+// # Entries the reader will want the reasoning for
 //
 // database/sql IS here, and database/sql/driver with it. The
 // legitimate-looking minority — a value object implementing driver.Valuer so
 // it can be stored — is exactly the coupling Warren argues against.
 //
+// The ORMs and query builders — gorm, sqlx, bun, ent, xorm, squirrel,
+// sqlboiler — follow from that entry rather than extending it. If a domain
+// type implementing driver.Valuer "names its storage technology", a domain
+// type carrying `gorm:"primaryKey"` tags names it harder, and an entity whose
+// definition IS the schema names it hardest of all.
+//
+// warren/observability is here and stays here: warren.md §7.1 records it as a
+// wiring module that wraps setup rather than an API, dragging 24 third-party
+// modules behind it. Nothing in it is meant to be called from a use case. See
+// driverKind — its remedy is not the repository one.
+//
 // warren/persistence and warren/broker are NOT here and must not be: they are
 // contract packages, and a domain naming persistence.UnitOfWork is the
 // pattern, not the violation. That is what the prefix matcher's `p+"/"` is
 // for.
-var driverPackages = []string{
-	"database/sql",
-	"github.com/jackc/pgx",
-	"github.com/lib/pq",
-	"github.com/go-sql-driver/mysql",
-	"go.mongodb.org/mongo-driver",
-	"github.com/redis/go-redis",
-	"github.com/twmb/franz-go",
-	"github.com/segmentio/kafka-go",
-	"github.com/IBM/sarama",
-	"github.com/rabbitmq/amqp091-go",
-	"github.com/nats-io/nats.go",
-	"github.com/MerseniBilel/warren/persistence/postgres",
-	"github.com/MerseniBilel/warren/persistence/mysql",
-	"github.com/MerseniBilel/warren/persistence/mongo",
-	"github.com/MerseniBilel/warren/persistence/redis",
-	"github.com/MerseniBilel/warren/broker/kafka",
-	"github.com/MerseniBilel/warren/broker/rabbitmq",
-	"github.com/MerseniBilel/warren/broker/nats",
-	"github.com/MerseniBilel/warren/broker/memory",
-	"github.com/MerseniBilel/warren/observability",
+var driverPackages = []driverEntry{
+	{"database/sql", store},
+	// Postgres. pgx splits into pgconn/pgtype/pgproto3, each importable on
+	// its own, so each is listed on its own.
+	{"github.com/jackc/pgx", store},
+	{"github.com/jackc/pgconn", store},
+	{"github.com/jackc/pgtype", store},
+	{"github.com/jackc/pgproto3", store},
+	{"github.com/lib/pq", store},
+	// MySQL, SQLite, SQL Server, ClickHouse.
+	{"github.com/go-sql-driver/mysql", store},
+	{"github.com/mattn/go-sqlite3", store},
+	{"modernc.org/sqlite", store},
+	{"github.com/microsoft/go-mssqldb", store},
+	{"github.com/denisenkom/go-mssqldb", store},
+	{"github.com/ClickHouse/clickhouse-go", store},
+	// ORMs, query builders, and generated data layers.
+	{"github.com/jinzhu/gorm", store},
+	{"gorm.io/gorm", store},
+	{"github.com/jmoiron/sqlx", store},
+	{"github.com/uptrace/bun", store},
+	{"entgo.io/ent", store},
+	{"xorm.io/xorm", store},
+	{"github.com/Masterminds/squirrel", store},
+	{"github.com/volatiletech/sqlboiler", store},
+	// Document, wide-column, search, and embedded stores.
+	{"go.mongodb.org/mongo-driver", store},
+	{"github.com/gocql/gocql", store},
+	{"github.com/elastic/go-elasticsearch", store},
+	{"github.com/opensearch-project/opensearch-go", store},
+	{"github.com/couchbase/gocb", store},
+	{"go.etcd.io/bbolt", store},
+	{"github.com/dgraph-io/badger", store},
+	// Key-value and cache.
+	{"github.com/redis/go-redis", store},
+	{"github.com/go-redis/redis", store},
+	// Brokers.
+	{"github.com/twmb/franz-go", broker},
+	{"github.com/segmentio/kafka-go", broker},
+	{"github.com/IBM/sarama", broker},
+	{"github.com/Shopify/sarama", broker},
+	{"github.com/rabbitmq/amqp091-go", broker},
+	{"github.com/streadway/amqp", broker},
+	{"github.com/nats-io/nats.go", broker},
+	{"github.com/apache/pulsar-client-go", broker},
+	// Warren's own adapter modules.
+	{"github.com/MerseniBilel/warren/persistence/postgres", store},
+	{"github.com/MerseniBilel/warren/persistence/mysql", store},
+	{"github.com/MerseniBilel/warren/persistence/mongo", store},
+	{"github.com/MerseniBilel/warren/persistence/redis", store},
+	{"github.com/MerseniBilel/warren/broker/kafka", broker},
+	{"github.com/MerseniBilel/warren/broker/rabbitmq", broker},
+	{"github.com/MerseniBilel/warren/broker/nats", broker},
+	{"github.com/MerseniBilel/warren/broker/memory", broker},
+	{"github.com/MerseniBilel/warren/observability", wiring},
 }
+
+// driverEntry is one listed prefix and the KIND of driver it is. The kind
+// rides on the entry rather than in a second list beside it, because two
+// lists that must agree are two lists that will not: a driver added to one
+// and forgotten in the other would be reported with a remedy written for
+// something else, which is defect 4 in a new shape.
+type driverEntry struct {
+	path string
+	kind string
+}
+
+// The three kinds of driver, which are three different mistakes with three
+// different fixes. "Declare a port and let `warren g repository` write both
+// halves" is sound advice for pgx, useless for a Kafka client, and nonsense
+// for a module that only installs exporters at boot.
+const (
+	// store — a data store: the handler has a port to declare and a
+	// repository to generate.
+	store = "store"
+	// broker — a message broker: the handler has a port to TAKE
+	// (broker.Publisher), or an event to consume.
+	broker = "broker"
+	// wiring — a module that is composed at boot and never called from a use
+	// case. There is nothing to declare; the import simply should not be
+	// there.
+	wiring = "wiring"
+)
 
 // isDriverPackage reports whether path is one of them, or lives beneath one —
 // pgx/v5/pgxpool is as much a driver as pgx itself.
 func isDriverPackage(path string) bool {
-	return matchesPrefix(path, driverPackages)
+	return driverKind(path) != ""
+}
+
+// driverKind classifies a driver import as store, broker or wiring, and
+// returns "" for an import that is not a driver at all. The boundary is a
+// slash, never a string prefix — see matchesPrefix.
+func driverKind(path string) string {
+	for _, e := range driverPackages {
+		if path == e.path || strings.HasPrefix(path, e.path+"/") {
+			return e.kind
+		}
+	}
+	return ""
 }
 
 // matchesPrefix reports whether path is one of the listed packages or lives
@@ -567,8 +707,8 @@ func (r *Report) String() string {
 	if len(r.Violations) == 0 {
 		return fmt.Sprintf("No violations in %d packages.\n\n"+
 			"  Checked: the layer rule, the handler/transport rule and the handler/driver\n"+
-			"  rule — each directly and through a helper package.\n\n%s",
-			r.Packages, r.crossModuleCoverage())
+			"  rule — each directly and through a helper package.\n\n%s\n%s",
+			r.Packages, r.crossModuleCoverage(), coverageNotes())
 	}
 	var b strings.Builder
 	for _, v := range r.Violations {
@@ -650,6 +790,24 @@ func (r *Report) crossModuleCoverage() string {
 		"  across features.\n"
 }
 
+// coverageNotes states what the walk deliberately does NOT look at.
+//
+// Both facts below change what a clean report MEANS, and neither was stated
+// until 2026-08-29 — an external reviewer found the first by planting a
+// two-rule violation in a _test.go file and watching the report say "No
+// violations", and the second by splitting module.go in two and getting a
+// violation they could not explain. A report that discloses its own blind
+// spots is the thing that makes this tool trustworthy; a silent exclusion is
+// the thing that unmakes it.
+func coverageNotes() string {
+	return "  NOT checked: _test.go files. A test importing its own feature's\n" +
+		"  infrastructure is how a test is written, so the walk skips them — which\n" +
+		"  also means a test file is the one place these rules do not reach.\n\n" +
+		"  Carve-out: a feature's module.go MAY import a sibling feature. That is\n" +
+		"  where a module value is wired, so the cross-module rule exempts that one\n" +
+		"  filename and no other.\n"
+}
+
 // chainOf renders the hops between the reported package and the offending
 // import, one indented line each. The first element is the package itself,
 // already printed above it.
@@ -659,6 +817,32 @@ func chainOf(v Violation) string {
 		fmt.Fprintf(&b, "        ↳ %s\n", hop)
 	}
 	return b.String()
+}
+
+// brokerRemedy is the fix list for a handler that named a broker client. It is
+// shared by the direct rule and the chain, indented to suit each, because the
+// advice is identical and two copies of it would drift.
+func brokerRemedy(indent string) string {
+	return indent + "• To PUBLISH, take broker.Publisher. It is a CONTRACT package, so a\n" +
+		indent + "  handler may name it — that is the pattern, not the violation — and\n" +
+		indent + "  main.go decides which technology is behind it.\n" +
+		indent + "• To REACT to something that happened, consume the EVENT rather than\n" +
+		indent + "  driving a client here. `warren g consumer` writes the handler and the\n" +
+		indent + "  subscription; the handler it writes names no broker at all."
+}
+
+// wiringRemedy is the fix list for a handler that named a boot-wiring module.
+// There is no port to declare: the answer is that the handler already has what
+// it was reaching for.
+func wiringRemedy(indent string) string {
+	return indent + "• A handler that needs a SPAN takes the tracer from OpenTelemetry's own\n" +
+		indent + "  global provider, which this module has already configured at boot.\n" +
+		indent + "  No Warren import is involved.\n" +
+		indent + "• Correlation fields — trace_id, span_id, correlation_id — are already\n" +
+		indent + "  on log.FromContext(ctx). Log through it and they are there, with no\n" +
+		indent + "  import at all.\n" +
+		indent + "• Everything else the module exposes is setup, and setup belongs in\n" +
+		indent + "  main.go."
 }
 
 func explain(v Violation) string {
@@ -695,31 +879,75 @@ func explain(v Violation) string {
 	}
 	if v.Rule == "driver-chain" {
 		last := v.Via[len(v.Via)-1]
-		return "  A use case says WHAT must happen, never HOW it is stored, and that holds\n" +
-			"  through a helper as much as directly: this package does not import\n" +
-			"  " + v.Imported + " itself, but everything it depends on comes with it.\n\n" +
-			"  The import is in " + last + ".\n\n" +
-			"  Fix one of:\n" +
-			"    • SPLIT that package. The part the handler needs — an identifier, a\n" +
-			"      decision, a plain value — is almost always driver-free; only the code\n" +
-			"      that talks to the store needs " + v.Imported + ".\n" +
-			"      Two packages, and the handler imports the half without it.\n" +
-			"    • If the handler needs the STORE, declare a port in the domain and put\n" +
-			"      the driver code in infrastructure, where a driver is allowed.\n" +
-			"      `warren g repository` writes both halves."
+		lead := "  A use case says WHAT must happen, never HOW it is stored or delivered, and\n" +
+			"  that holds through a helper as much as directly: this package does not\n" +
+			"  import " + v.Imported + " itself, but everything it depends on comes\n" +
+			"  with it.\n\n" +
+			"  The import is in " + last + ".\n\n"
+		switch driverKind(v.Imported) {
+		case wiring:
+			return "  This is a wiring module, not an API:\n\n" +
+				"      " + v.Imported + "\n\n" +
+				"  installs the exporters and composes app.Traced and app.Metered around\n" +
+				"  every route at BOOT (warren.md §7.1). This package does not import it\n" +
+				"  itself, and everything it depends on comes with it all the same.\n\n" +
+				"  The import is in " + last + ".\n\n" +
+				"  Fix one of:\n" +
+				"    • SPLIT that package, and keep the boot wiring out of the half a\n" +
+				"      handler imports. Setup belongs in main.go.\n" +
+				wiringRemedy("    ")
+		case broker:
+			return lead + "  Fix one of:\n" +
+				"    • SPLIT that package. The part the handler needs — an identifier, a\n" +
+				"      decision, a plain value — is almost always broker-free; only the\n" +
+				"      code that publishes or subscribes needs " + v.Imported + ".\n" +
+				"      Two packages, and the handler imports the half without it.\n" +
+				brokerRemedy("    ")
+		default:
+			return lead + "  Fix one of:\n" +
+				"    • SPLIT that package. The part the handler needs — an identifier, a\n" +
+				"      decision, a plain value — is almost always driver-free; only the code\n" +
+				"      that talks to the store needs " + v.Imported + ".\n" +
+				"      Two packages, and the handler imports the half without it.\n" +
+				"    • If the handler needs the STORE, declare a port in the domain and put\n" +
+				"      the " + v.Imported + " code in infrastructure, where a driver is\n" +
+				"      allowed. `warren g repository` writes both halves."
+		}
 	}
 	if v.Rule == "driver" {
-		return "  A use case says WHAT must happen, never HOW it is stored or delivered. The\n" +
-			"  moment it names pgx it can only run where a Postgres pool can be built: not\n" +
-			"  in a unit test, not behind a second driver, not in another service.\n\n" +
-			"  That rule is what makes app.Handler[Req, Res] the same type on HTTP, gRPC\n" +
-			"  and a consumer, and what lets warren/persistence/postgres be swapped for\n" +
-			"  another driver in one line of main.go.\n\n" +
-			"  Fix:\n" +
-			"    • Declare a PORT in the domain — an interface in the domain's own words —\n" +
-			"      and put the pgx code in infrastructure, where a driver is allowed. Wire\n" +
-			"      the two in module.go, the one file permitted to see all four layers.\n" +
-			"      `warren g repository` writes both halves."
+		switch driverKind(v.Imported) {
+		case wiring:
+			return "  This is a wiring module, not an API:\n\n" +
+				"      " + v.Imported + "\n\n" +
+				"  installs the exporters and composes app.Traced and app.Metered around\n" +
+				"  every route at BOOT (warren.md §7.1). A handler that imports it changes\n" +
+				"  nothing about what it is instrumented with, and pays for the module's\n" +
+				"  transitive dependencies in every build that names it.\n\n" +
+				"  Fix one of:\n" + wiringRemedy("    ")
+		case broker:
+			return "  A use case says WHAT must happen, never HOW it is delivered. The moment it\n" +
+				"  names " + v.Imported + " it can only run where that broker can be\n" +
+				"  reached: not in a unit test, not behind a second driver, not in another\n" +
+				"  service.\n\n" +
+				"  That rule is what makes app.Handler[Req, Res] the same type on HTTP, gRPC\n" +
+				"  and a consumer, and what makes swapping Kafka for RabbitMQ one line of\n" +
+				"  main.go.\n\n" +
+				"  Fix one of:\n" + brokerRemedy("    ")
+		default:
+			return "  A use case says WHAT must happen, never HOW it is stored. The moment it\n" +
+				"  names " + v.Imported + " it can only run where that store can be\n" +
+				"  reached: not in a unit test, not behind a second driver, not in another\n" +
+				"  service.\n\n" +
+				"  That rule is what makes app.Handler[Req, Res] the same type on HTTP, gRPC\n" +
+				"  and a consumer, and what lets warren/persistence/postgres be swapped for\n" +
+				"  another driver in one line of main.go.\n\n" +
+				"  Fix:\n" +
+				"    • Declare a PORT in the domain — an interface in the domain's own words —\n" +
+				"      and put the " + v.Imported + " code in infrastructure, where a driver\n" +
+				"      is allowed. Wire the two in module.go — the feature's own wiring file,\n" +
+				"      and the only one permitted to see all four layers.\n" +
+				"      `warren g repository` writes both halves."
+		}
 	}
 	if v.Rule == "transport-chain" {
 		last := v.Via[len(v.Via)-1]
@@ -807,15 +1035,15 @@ func explain(v Violation) string {
 			"    • Move the type you need into the domain, and let the other layer\n" +
 			"      depend on it.\n" +
 			"    • Declare a port in the domain and implement it in infrastructure,\n" +
-			"      then wire the two in module.go — the one file permitted to see\n" +
-			"      all four layers."
+			"      then wire the two in the feature's own module.go — the one file\n" +
+			"      permitted to see all four layers."
 	case "application":
 		return "  The application layer depends on the domain and on ports, never on a\n" +
 			"  driver or a transport. Declare a port in the domain, implement it in\n" +
 			"  infrastructure, and wire them in module.go."
 	default:
 		return "  Dependencies point inward: interfaces → application → domain ←\n" +
-			"  infrastructure. Only module.go may see all four."
+			"  infrastructure. Only the feature's own module.go may see all four."
 	}
 }
 

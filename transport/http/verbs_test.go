@@ -12,7 +12,7 @@ import (
 	"github.com/MerseniBilel/warren/transport"
 )
 
-// transport.Put and transport.Patch were public API that nothing in the
+// r.Put and r.Patch were public API that nothing in the
 // repository ever called — no test, no template, no scaffold — and Delete was
 // called once. A verb string or a default status is a one-word constant: a
 // wrong one compiles, registers, and serves the wrong thing for ever.
@@ -54,12 +54,12 @@ func (c *verbController) post(_ context.Context, q verbReq) (verbRes, error) {
 	return verbRes{Verb: "POST", ID: q.ID}, nil
 }
 
-func (c *verbController) Register(r transport.Registrar) {
-	transport.Get(r, "/things/{id}", app.HandlerFunc[verbReq, verbRes](c.get))
-	transport.Post(r, "/things/{id}", app.HandlerFunc[verbReq, verbRes](c.post))
-	transport.Put(r, "/things/{id}", app.HandlerFunc[verbReq, verbRes](c.put))
-	transport.Patch(r, "/things/{id}", app.HandlerFunc[verbReq, verbRes](c.patch))
-	transport.Delete(r, "/things/{id}", app.HandlerFunc[verbReq, verbRes](c.del))
+func (c *verbController) Register(r *transport.Registrar) {
+	r.Get("/things/{id}", app.HandlerFunc[verbReq, verbRes](c.get))
+	r.Post("/things/{id}", app.HandlerFunc[verbReq, verbRes](c.post))
+	r.Put("/things/{id}", app.HandlerFunc[verbReq, verbRes](c.put))
+	r.Patch("/things/{id}", app.HandlerFunc[verbReq, verbRes](c.patch))
+	r.Delete("/things/{id}", app.HandlerFunc[verbReq, verbRes](c.del))
 }
 
 func verbModule() warren.Module {

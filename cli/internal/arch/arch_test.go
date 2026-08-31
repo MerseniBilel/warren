@@ -41,7 +41,7 @@ func assertGolden(t *testing.T, name, got string) {
 func fixture(t *testing.T, files map[string]string) string {
 	t.Helper()
 	dir := t.TempDir()
-	files["go.mod"] = "module example.com/fix\n\ngo 1.26.3\n"
+	files["go.mod"] = "module example.com/fix\n\ngo 1.27.0\n"
 	for path, content := range files {
 		full := filepath.Join(dir, path)
 		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
@@ -1271,12 +1271,16 @@ func TestDriverInApplicationGolden(t *testing.T) {
 	assertGolden(t, "driver_application", report.String())
 }
 
-// TestDriverInModuleGoIsExempt — module.go is the one file permitted to wire
-// a feature together, which is where a driver is handed to the repository
-// that will hold it. It is skipped before it is parsed, so its imports reach
-// neither the direct rule nor the graph the chain search walks: the exemption
-// holds for the driver rule as it does for every other.
-func TestDriverInModuleGoIsExempt(t *testing.T) {
+// TestAModuleGoInsideALayerIsNotExempt — the inversion of a test that used to
+// assert the opposite.
+//
+// AGENT.md's "only module.go may see all four layers" describes a FEATURE's
+// wiring file, at the module root, which is unlayered and therefore exempt
+// from the layer, transport and driver rules by construction — the same way
+// controller.go is. Honouring the NAME inside application/ handed every
+// project a one-word opt-out of three rules: rename place.go to module.go and
+// the pgx import stops being reported.
+func TestAModuleGoInsideALayerIsNotExempt(t *testing.T) {
 	t.Parallel()
 
 	dir := fixture(t, map[string]string{
@@ -1287,8 +1291,108 @@ func TestDriverInModuleGoIsExempt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Check: %v", err)
 	}
+	if len(report.Violations) != 1 {
+		t.Fatalf("a module.go inside application/ kept its exemption: violations = %d, want 1:\n%s",
+			len(report.Violations), report)
+	}
+	if got := report.Violations[0].Rule; got != "driver" {
+		t.Errorf("rule = %q, want driver", got)
+	}
+}
+
+// TestAFeatureRootModuleGoKeepsItsExemptions — the other half of the same
+// ruling. A feature's wiring file lives at internal/modules/<f>/, is
+// unlayered, and is where the four layers are wired together. It must still
+// be able to name all four, and to hold the driver it hands to a repository.
+func TestAFeatureRootModuleGoKeepsItsExemptions(t *testing.T) {
+	t.Parallel()
+
+	dir := fixture(t, map[string]string{
+		"internal/modules/orders/domain/order.go":         "package domain\n\ntype Order struct{}\n",
+		"internal/modules/orders/application/place.go":    "package application\n\ntype Place struct{}\n",
+		"internal/modules/orders/infrastructure/repo.go":  "package infrastructure\n\ntype Repo struct{}\n",
+		"internal/modules/orders/interfaces/rest/http.go": "package rest\n\ntype H struct{}\n",
+		"internal/modules/orders/module.go": `package orders
+
+import (
+	_ "database/sql"
+
+	_ "example.com/fix/internal/modules/orders/application"
+	_ "example.com/fix/internal/modules/orders/domain"
+	_ "example.com/fix/internal/modules/orders/infrastructure"
+	_ "example.com/fix/internal/modules/orders/interfaces/rest"
+)
+`,
+	})
+	report, err := arch.Check(dir, arch.Options{Rules: arch.Layers})
+	if err != nil {
+		t.Fatalf("Check: %v", err)
+	}
 	if len(report.Violations) != 0 {
-		t.Errorf("module.go was refused its driver:\n%s", report)
+		t.Errorf("the feature's wiring file was refused:\n%s", report)
+	}
+}
+
+// TestAFeatureRootModuleGoMayImportAnotherFeaturesModule is the one exemption
+// that is load-bearing rather than incidental, and the linter's own remedy
+// depends on it: the cross-module explanation tells the reader to import "the
+// owner's module value in module.go". Without this the tool refuses the fix it
+// prescribes.
+func TestAFeatureRootModuleGoMayImportAnotherFeaturesModule(t *testing.T) {
+	t.Parallel()
+
+	dir := fixture(t, map[string]string{
+		"internal/modules/ordering/module.go":       "package ordering\n\nvar Module = 1\n",
+		"internal/modules/fulfillment/module.go":    "package fulfillment\n\nimport _ \"example.com/fix/internal/modules/ordering\"\n",
+		"internal/modules/fulfillment/domain/f.go":  "package domain\n\ntype F struct{}\n",
+		"internal/modules/ordering/domain/order.go": "package domain\n\ntype Order struct{}\n",
+	})
+	report, err := arch.Check(dir, arch.Options{Rules: arch.Layers})
+	if err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	if len(report.Violations) != 0 {
+		t.Errorf("the remedy the linter prints is refused by the linter:\n%s", report)
+	}
+}
+
+// TestAWiringFileDoesNotHideAChain is defect 1 in its smallest form. The
+// exemption returned BEFORE parser.ParseFile, so no import edge out of any
+// file named module.go ever entered the graph. It suppressed the rules for
+// that file — intended — and the EDGES with them, which is not, and which is
+// a hole: the wiring file is exactly where a project's shared infrastructure
+// is named, so every chain through it was invisible.
+//
+// Verified on a stock `warren new --db postgres`: application/ importing
+// internal/platform printed "No violations in 10 packages" and exited 0, while
+// claiming to have checked "each directly and through a helper package".
+// Renaming that one file to wiring.go made the violation appear.
+func TestAWiringFileDoesNotHideAChain(t *testing.T) {
+	t.Parallel()
+
+	dir := fixture(t, map[string]string{
+		"internal/platform/module.go": `package platform
+
+import _ "github.com/jackc/pgx/v5"
+`,
+		"internal/modules/orders/application/place.go": `package application
+
+import _ "example.com/fix/internal/platform"
+`,
+	})
+	report, err := arch.Check(dir, arch.Options{Rules: arch.Layers})
+	if err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	if len(report.Violations) != 1 {
+		t.Fatalf("violations = %d, want 1 — the chain through the wiring file:\n%s",
+			len(report.Violations), report)
+	}
+	if got := report.Violations[0].Rule; got != "driver-chain" {
+		t.Errorf("rule = %q, want driver-chain", got)
+	}
+	if !strings.Contains(report.String(), "internal/platform") {
+		t.Errorf("the report does not name the wiring package:\n%s", report)
 	}
 }
 
@@ -1373,5 +1477,466 @@ import _ "example.com/fix/internal/store"
 	}
 	if !strings.Contains(out, "driver.Valuer") {
 		t.Errorf("the domain remedy was lost to indirection:\n%s", out)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// The negative control: every rule, mutated into the CLI's OWN output.
+//
+// TestGeneratedAppIsClean is a positive control and there has never been a
+// negative one. Every other rule test in this file runs against a hand-written
+// fixture(), written by whoever wrote the rule, in the shape the rule expects —
+// which is exactly the arrangement under which a rule can stop firing on real
+// trees without a single test noticing. Defect 1 survived review that way: the
+// linter reported the hand-written case and was silent on the generated one.
+//
+// So: scaffold the real tree, seed ONE rule's violation into it, and assert it
+// is reported AND that the command exits 1.
+// ---------------------------------------------------------------------------
+
+// generated writes a stock `warren new` tree and returns its directory and
+// module path.
+func generated(t *testing.T, opts scaffold.Options) (string, string) {
+	t.Helper()
+	opts.Dir = t.TempDir()
+	opts.Name = "myapp"
+	opts.ModulePath = "example.com/myapp"
+	opts.Version = "v0.1.0"
+	if err := scaffold.New(opts); err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	return opts.Dir, opts.ModulePath
+}
+
+// seedImport inserts an import into a generated file, immediately after its
+// package clause. It goes THERE rather than at the end of the file because Go
+// requires import declarations before every other declaration — and because
+// the linter parses with parser.ImportsOnly, an import appended below a type
+// would be read by neither the compiler nor the tool under test.
+func seedImport(t *testing.T, dir, rel, imported string) {
+	t.Helper()
+	path := filepath.Join(dir, filepath.FromSlash(rel))
+	src, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("the generated tree has no %s: %v", rel, err)
+	}
+	lines := strings.Split(string(src), "\n")
+	for i, line := range lines {
+		if strings.HasPrefix(line, "package ") {
+			out := append([]string{}, lines[:i+1]...)
+			out = append(out, "", `import _ "`+imported+`"`)
+			out = append(out, lines[i+1:]...)
+			if werr := os.WriteFile(path, []byte(strings.Join(out, "\n")), 0o644); werr != nil {
+				t.Fatal(werr)
+			}
+			return
+		}
+	}
+	t.Fatalf("%s has no package clause", rel)
+}
+
+// checkGenerated runs the real command over dir and returns its output and
+// exit code — the exit code is the command's, not the report's, and a rule
+// that reports without failing the build enforces nothing.
+func checkGenerated(t *testing.T, dir string) (string, int) {
+	t.Helper()
+	root := command.Root()
+	var out bytes.Buffer
+	root.SetOut(&out)
+	root.SetErr(&out)
+	root.SetArgs([]string{"lint", "arch", dir})
+	return out.String(), command.ExitCode(root.Execute())
+}
+
+// assertSeededViolation is the shared assertion: the report names the rule,
+// the file, and the command exits 1.
+func assertSeededViolation(t *testing.T, dir, rule, file string) {
+	t.Helper()
+	report, err := arch.Check(dir, arch.Options{Rules: arch.Layers})
+	if err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	found := false
+	for _, v := range report.Violations {
+		if v.Rule == rule && v.File == file {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("the %s rule did not fire on the CLI's own output:\nwant rule %q in %s\ngot:\n%s",
+			rule, rule, file, report)
+	}
+	out, code := checkGenerated(t, dir)
+	if code != 1 {
+		t.Errorf("exit = %d, want 1 — a rule that reports without failing the build enforces nothing:\n%s", code, out)
+	}
+}
+
+// TestGeneratedAppLayerRuleActuallyRuns — domain reaching infrastructure, in
+// the tree the CLI writes.
+func TestGeneratedAppLayerRuleActuallyRuns(t *testing.T) {
+	t.Parallel()
+
+	dir, mod := generated(t, scaffold.Options{})
+	seedImport(t, dir, "internal/modules/user/domain/user.go", mod+"/internal/modules/user/infrastructure")
+	assertSeededViolation(t, dir, "layer", "internal/modules/user/domain/user.go")
+}
+
+// TestGeneratedAppCrossModuleRuleActuallyRuns — one feature reaching into
+// another's internals, in the tree the CLI writes. The scaffold ships two
+// feature modules, so this is the import a user would plausibly add.
+func TestGeneratedAppCrossModuleRuleActuallyRuns(t *testing.T) {
+	t.Parallel()
+
+	dir, mod := generated(t, scaffold.Options{})
+	seedImport(t, dir, "internal/modules/user/application/register_user.go",
+		mod+"/internal/modules/notification/application")
+	assertSeededViolation(t, dir, "cross-module", "internal/modules/user/application/register_user.go")
+}
+
+// TestGeneratedAppTransportRuleActuallyRuns — invariant 5 against real output.
+func TestGeneratedAppTransportRuleActuallyRuns(t *testing.T) {
+	t.Parallel()
+
+	dir, _ := generated(t, scaffold.Options{})
+	seedImport(t, dir, "internal/modules/user/application/register_user.go", "net/http")
+	assertSeededViolation(t, dir, "transport", "internal/modules/user/application/register_user.go")
+}
+
+// TestGeneratedAppDriverRuleActuallyRuns is the test that fails before defect
+// 1 is fixed and passes after, and it is the reason the negative control is
+// worth more than the fix.
+//
+// internal/platform is the scaffold's shared wiring package and it holds the
+// drivers — broker/memory by default, persistence/postgres with --db postgres.
+// Every one of those imports lives in a file named module.go, so before the
+// fix NONE of them entered the graph, and an application-layer package
+// importing internal/platform reported nothing at all.
+func TestGeneratedAppDriverRuleActuallyRuns(t *testing.T) {
+	t.Parallel()
+
+	for _, db := range []string{"memory", "postgres"} {
+		t.Run(db, func(t *testing.T) {
+			t.Parallel()
+			dir, mod := generated(t, scaffold.Options{DB: db})
+			seedImport(t, dir, "internal/modules/user/application/register_user.go", mod+"/internal/platform")
+			assertSeededViolation(t, dir, "driver-chain", "internal/modules/user/application/register_user.go")
+		})
+	}
+}
+
+// TestGeneratedAppIsCleanWithEveryDriver is the positive control the four
+// mutations are measured against, widened past the default options: a
+// mutation test proves nothing if the unmutated tree was already dirty.
+func TestGeneratedAppIsCleanWithEveryDriver(t *testing.T) {
+	t.Parallel()
+
+	for _, db := range []string{"memory", "postgres"} {
+		for _, brk := range []string{"memory", "kafka"} {
+			t.Run(db+"/"+brk, func(t *testing.T) {
+				t.Parallel()
+				dir, _ := generated(t, scaffold.Options{DB: db, Broker: brk})
+				report, err := arch.Check(dir, arch.Options{Rules: arch.Layers})
+				if err != nil {
+					t.Fatalf("Check: %v", err)
+				}
+				if len(report.Violations) != 0 {
+					t.Errorf("the scaffold the CLI generates breaks the rules the CLI enforces:\n%s", report)
+				}
+			})
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Defect 3 — the driver list missed the most-used clients.
+// ---------------------------------------------------------------------------
+
+// TestTheDriverListCoversTheClientsPeopleActuallyUse. The list shipped with
+// pgx, lib/pq, mongo-driver and the brokers, and without an ORM or a query
+// builder in it — so the population it enforced against was the population
+// that already writes hand-rolled SQL. A domain type carrying a
+// `gorm:"primaryKey"` tag names its storage technology harder than one
+// implementing driver.Valuer, and database/sql was already on the list for
+// exactly that reason.
+func TestTheDriverListCoversTheClientsPeopleActuallyUse(t *testing.T) {
+	t.Parallel()
+
+	for _, imported := range []string{
+		// Brokers.
+		"github.com/Shopify/sarama",
+		"github.com/streadway/amqp",
+		"github.com/apache/pulsar-client-go/pulsar",
+		// Key-value and cache.
+		"github.com/go-redis/redis/v8",
+		// The pgx family, under every module it splits into.
+		"github.com/jackc/pgconn",
+		"github.com/jackc/pgtype",
+		"github.com/jackc/pgproto3/v2",
+		// ORMs, query builders and generators.
+		"github.com/jinzhu/gorm",
+		"gorm.io/gorm",
+		"github.com/jmoiron/sqlx",
+		"github.com/uptrace/bun",
+		"entgo.io/ent",
+		"xorm.io/xorm",
+		"github.com/Masterminds/squirrel",
+		"github.com/volatiletech/sqlboiler/v4/boil",
+		// Engines and their drivers.
+		"github.com/mattn/go-sqlite3",
+		"modernc.org/sqlite",
+		"github.com/microsoft/go-mssqldb",
+		"github.com/denisenkom/go-mssqldb",
+		"github.com/ClickHouse/clickhouse-go/v2",
+		"github.com/gocql/gocql",
+		"github.com/elastic/go-elasticsearch/v8",
+		"github.com/opensearch-project/opensearch-go",
+		"github.com/couchbase/gocb/v2",
+		"go.etcd.io/bbolt",
+		"github.com/dgraph-io/badger/v4",
+	} {
+		t.Run(imported, func(t *testing.T) {
+			t.Parallel()
+			dir := fixture(t, map[string]string{
+				"internal/modules/orders/application/place.go": "package application\n\nimport _ \"" + imported + "\"\n",
+			})
+			report, err := arch.Check(dir, arch.Options{Rules: arch.Layers})
+			if err != nil {
+				t.Fatalf("Check: %v", err)
+			}
+			if len(report.Violations) != 1 || report.Violations[0].Rule != "driver" {
+				t.Fatalf("importing %q from the application layer was not reported as a driver:\n%s", imported, report)
+			}
+		})
+	}
+}
+
+// TestARenamedLibraryIsListedUnderBothPaths — membership test 3. A library on
+// the list is on it under every import path it has ever had. Omitting the
+// predecessor enforces the rule only against projects that already upgraded,
+// which inverts it: the codebase most likely to have a layering problem is the
+// one that has not.
+func TestARenamedLibraryIsListedUnderBothPaths(t *testing.T) {
+	t.Parallel()
+
+	for _, pair := range [][2]string{
+		{"github.com/Shopify/sarama", "github.com/IBM/sarama"},
+		{"github.com/streadway/amqp", "github.com/rabbitmq/amqp091-go"},
+		{"github.com/go-redis/redis/v8", "github.com/redis/go-redis/v9"},
+		{"github.com/jinzhu/gorm", "gorm.io/gorm"},
+		{"github.com/denisenkom/go-mssqldb", "github.com/microsoft/go-mssqldb"},
+	} {
+		t.Run(pair[0], func(t *testing.T) {
+			t.Parallel()
+			for _, imported := range pair {
+				dir := fixture(t, map[string]string{
+					"internal/modules/orders/domain/order.go": "package domain\n\nimport _ \"" + imported + "\"\n",
+				})
+				report, _ := arch.Check(dir, arch.Options{Rules: arch.Layers})
+				if len(report.Violations) != 1 {
+					t.Errorf("%q is not on the list, so the rule holds only for projects that already upgraded:\n%s",
+						imported, report)
+				}
+			}
+		})
+	}
+}
+
+// TestFasthttpIsATransportPackage — a drop-in replacement for net/http is a
+// transport package by every argument that puts net/http on the list.
+func TestFasthttpIsATransportPackage(t *testing.T) {
+	t.Parallel()
+
+	dir := fixture(t, map[string]string{
+		"internal/modules/orders/application/place.go": "package application\n\nimport _ \"github.com/valyala/fasthttp\"\n",
+	})
+	report, err := arch.Check(dir, arch.Options{Rules: arch.Layers})
+	if err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	if len(report.Violations) != 1 || report.Violations[0].Rule != "transport" {
+		t.Fatalf("fasthttp in application/ was not reported as a transport package:\n%s", report)
+	}
+}
+
+// TestTheSubstrateTestKeepsSaaSSDKsOff — membership test 1, stated as a
+// control. A client for a third-party product's API is not substrate the
+// application operates, the population is unbounded, and a list maintained by
+// whoever last hit a false negative is a heuristic in a different hat. The
+// layer rule catches those, the moment the port is declared.
+func TestTheSubstrateTestKeepsSaaSSDKsOff(t *testing.T) {
+	t.Parallel()
+
+	for _, imported := range []string{
+		"github.com/aws/aws-sdk-go-v2/service/s3",
+		"cloud.google.com/go/storage",
+		"github.com/stripe/stripe-go/v76",
+		"github.com/twilio/twilio-go",
+	} {
+		t.Run(imported, func(t *testing.T) {
+			t.Parallel()
+			dir := fixture(t, map[string]string{
+				"internal/modules/orders/infrastructure/pay.go": "package infrastructure\n\nimport _ \"" + imported + "\"\n",
+			})
+			report, _ := arch.Check(dir, arch.Options{Rules: arch.Layers})
+			if len(report.Violations) != 0 {
+				t.Errorf("a SaaS SDK reached the driver list — the population is unbounded and its incompleteness reads as approval:\n%s", report)
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Defect 4 — the driver remedy was hardcoded to pgx.
+// ---------------------------------------------------------------------------
+
+// TestTheObservabilityRemedyIsNotARepository — the remedy told someone who had
+// imported warren/observability to "declare a PORT in the domain … `warren g
+// repository` writes both halves". There is nothing to store and no repository
+// to generate; observability installs exporters and composes app.Traced and
+// app.Metered around every route at boot (warren.md §7.1). A reader given a
+// fix that cannot apply concludes the tool has not read their code.
+//
+// The module STAYS on the driver list — §7.1 settles that: it is a wiring
+// module that wraps setup, not an API, and it drags 24 third-party modules
+// behind it. Giving it the repository remedy was the bug, not its membership.
+func TestTheObservabilityRemedyIsNotARepository(t *testing.T) {
+	t.Parallel()
+
+	dir := fixture(t, map[string]string{
+		"internal/modules/orders/application/place.go": "package application\n\nimport _ \"github.com/MerseniBilel/warren/observability\"\n",
+	})
+	report, err := arch.Check(dir, arch.Options{Rules: arch.Layers})
+	if err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	if len(report.Violations) != 1 || report.Violations[0].Rule != "driver" {
+		t.Fatalf("observability left the driver list:\n%s", report)
+	}
+	out := report.String()
+	if strings.Contains(out, "warren g repository") {
+		t.Errorf("the wiring module is told to generate a repository:\n%s", out)
+	}
+	for _, want := range []string{"app.Traced", "log.FromContext", "global"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the remedy does not mention %q:\n%s", want, out)
+		}
+	}
+	assertGolden(t, "driver_wiring", out)
+}
+
+// TestABrokerGetsThePublisherRemedy — a handler that imports franz-go has a
+// port to take, not a repository to generate. broker.Publisher is a contract
+// package a handler may name; main.go decides the technology behind it.
+func TestABrokerGetsThePublisherRemedy(t *testing.T) {
+	t.Parallel()
+
+	for _, imported := range []string{
+		"github.com/twmb/franz-go/pkg/kgo",
+		"github.com/IBM/sarama",
+		"github.com/rabbitmq/amqp091-go",
+		"github.com/nats-io/nats.go",
+		"github.com/MerseniBilel/warren/broker/kafka",
+	} {
+		t.Run(imported, func(t *testing.T) {
+			t.Parallel()
+			dir := fixture(t, map[string]string{
+				"internal/modules/orders/application/place.go": "package application\n\nimport _ \"" + imported + "\"\n",
+			})
+			report, _ := arch.Check(dir, arch.Options{Rules: arch.Layers})
+			out := report.String()
+			if strings.Contains(out, "warren g repository") {
+				t.Errorf("a broker import is told to generate a repository:\n%s", out)
+			}
+			for _, want := range []string{"broker.Publisher", "warren g consumer", "main.go"} {
+				if !strings.Contains(out, want) {
+					t.Errorf("the broker remedy does not mention %q:\n%s", want, out)
+				}
+			}
+		})
+	}
+}
+
+// TestTheStoreRemedyNamesTheImportItFound — the store remedy is the one that
+// survives, and it must name the import in the file rather than pgx. A reader
+// whose sqlx import is answered with three paragraphs about Postgres pools has
+// been told the tool is guessing.
+func TestTheStoreRemedyNamesTheImportItFound(t *testing.T) {
+	t.Parallel()
+
+	dir := fixture(t, map[string]string{
+		"internal/modules/orders/application/place.go": "package application\n\nimport _ \"github.com/jmoiron/sqlx\"\n",
+	})
+	report, _ := arch.Check(dir, arch.Options{Rules: arch.Layers})
+	out := report.String()
+	if !strings.Contains(out, "github.com/jmoiron/sqlx") {
+		t.Errorf("the remedy does not name the import it found:\n%s", out)
+	}
+	if strings.Contains(out, "names pgx") || strings.Contains(out, "the pgx code") {
+		t.Errorf("the remedy is still hardcoded to pgx:\n%s", out)
+	}
+	if !strings.Contains(out, "warren g repository") {
+		t.Errorf("the store remedy lost the generator that writes both halves:\n%s", out)
+	}
+}
+
+// TestTheChainRemedySplitsTheSameThreeWays — the through-a-helper variant is
+// the same three mistakes at one remove, and it had one text for all of them.
+func TestTheChainRemedySplitsTheSameThreeWays(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name     string
+		imported string
+		want     []string
+		reject   []string
+	}{
+		{
+			name:     "wiring",
+			imported: "github.com/MerseniBilel/warren/observability",
+			want:     []string{"app.Traced", "log.FromContext"},
+			reject:   []string{"warren g repository"},
+		},
+		{
+			name:     "broker",
+			imported: "github.com/twmb/franz-go/pkg/kgo",
+			want:     []string{"broker.Publisher", "warren g consumer"},
+			reject:   []string{"warren g repository"},
+		},
+		{
+			name:     "store",
+			imported: "github.com/uptrace/bun",
+			want:     []string{"warren g repository", "github.com/uptrace/bun"},
+			reject:   []string{"broker.Publisher"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			dir := fixture(t, map[string]string{
+				"internal/store/store.go":                      "package store\n\nimport _ \"" + tc.imported + "\"\n",
+				"internal/modules/orders/application/place.go": "package application\n\nimport _ \"example.com/fix/internal/store\"\n",
+			})
+			report, _ := arch.Check(dir, arch.Options{Rules: arch.Layers})
+			if len(report.Violations) != 1 || report.Violations[0].Rule != "driver-chain" {
+				t.Fatalf("violations = %v, want one driver-chain:\n%s", report.Violations, report)
+			}
+			out := report.String()
+			// The chain half of the remedy is shared and must survive: the
+			// import is in a package the reader did not suspect.
+			if !strings.Contains(out, "internal/store") {
+				t.Errorf("the chain remedy stopped naming where the import is:\n%s", out)
+			}
+			for _, want := range tc.want {
+				if !strings.Contains(out, want) {
+					t.Errorf("the %s chain remedy does not mention %q:\n%s", tc.name, want, out)
+				}
+			}
+			for _, no := range tc.reject {
+				if strings.Contains(out, no) {
+					t.Errorf("the %s chain remedy still offers %q:\n%s", tc.name, no, out)
+				}
+			}
+		})
 	}
 }

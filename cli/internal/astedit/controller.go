@@ -130,8 +130,8 @@ func AddStatement(src []byte, fn, stmt string) ([]byte, error) {
 	// it — leaving a second, un-asked-for public endpoint that nobody
 	// noticed:
 	//
-	//	transport.Post(r, "/copies/{id}/checkout", c.checkoutCopy)
-	//	transport.Post(r, "/checkout_copy", c.checkoutCopy)      ← new
+	//	r.Post("/copies/{id}/checkout", c.checkoutCopy)
+	//	r.Post("/checkout_copy", c.checkoutCopy)      ← new
 	//
 	// The path is the user's to choose and may well have been edited by
 	// hand; the handler reference is what says this registration already
@@ -149,18 +149,18 @@ func AddStatement(src []byte, fn, stmt string) ([]byte, error) {
 }
 
 // handlerRef extracts the handler argument a route statement ends with —
-// "c.checkoutCopy)" from `transport.Post(r, "/x", c.checkoutCopy)`. It is
+// "c.checkoutCopy)" from `r.Post("/x", c.checkoutCopy)`. It is
 // the part of the statement that identifies WHICH registration this is.
 func handlerRef(stmt string) (string, bool) {
-	close := strings.LastIndex(stmt, ")")
-	if close < 0 {
+	beforeClose, _, ok := strings.CutLast(stmt, ")")
+	if !ok {
 		return "", false
 	}
-	comma := strings.LastIndex(stmt[:close], ",")
-	if comma < 0 {
+	_, arg, ok := strings.CutLast(beforeClose, ",")
+	if !ok {
 		return "", false
 	}
-	ref := strings.TrimSpace(stmt[comma+1 : close])
+	ref := strings.TrimSpace(arg)
 	if ref == "" || !strings.HasPrefix(ref, "c.") {
 		return "", false
 	}
