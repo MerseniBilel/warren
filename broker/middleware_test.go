@@ -1217,7 +1217,7 @@ func TestADiscardedMessageIsLogged(t *testing.T) {
 	}{
 		{"NOT_FOUND", werrors.NotFound("order", "o-9"), "NOT_FOUND"},
 		{"CONFLICT", werrors.Conflict("already applied"), "CONFLICT"},
-	} {
+	} { //nolint:dupl // the level test below shares this shape and asserts something else
 		t.Run(tc.name, func(t *testing.T) {
 			var buf bytes.Buffer
 			prev := slog.Default()
@@ -1306,3 +1306,71 @@ func TestReplayingADeadLetterNeedsANewMessageID(t *testing.T) {
 type droppingPublisher struct{ *capturePublisher }
 
 func (droppingPublisher) Redelivers() bool { return false }
+
+// TestADiscardedConflictIsAWarningAndSaysOnlyWhatIsKnown — field test #15,
+// finding 2, and the two halves of it are one defect.
+//
+// The LEVEL. Two members borrowed the last copy of a one-copy book; both
+// handlers passed the availability check, both published loan.opened, and the
+// catalog consumer refused the second with errors.Conflict — which is exactly
+// what the framework's own generated aggregate instructs, "return
+// errors.Conflict when a RULE refuses — an oversell". The message was acked
+// and destroyed, the two modules were left permanently divergent, and the
+// only record was an INFO line. Nobody pages on INFO. NOT_FOUND stays there,
+// because a missing row genuinely is expected and nothing was lost.
+//
+// The REASON. The line asserted "the work was already applied — an idempotent
+// replay", which was false, and which the framework cannot know either way:
+// the user returns errors.Conflict for a replay AND for a business refusal,
+// so no inspection of the code can separate them. A framework-authored
+// assertion of a fact it cannot check, about a message it has just destroyed,
+// is worse than no line at all.
+func TestADiscardedConflictIsAWarningAndSaysOnlyWhatIsKnown(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		err       error
+		wantLevel string
+		wantSaid  string
+		notSaid   string
+	}{
+		{
+			name:      "CONFLICT",
+			err:       werrors.Conflict("no copy of \"Only One\" is available"),
+			wantLevel: "WARN",
+			wantSaid:  "the handler refused this message with CONFLICT and it has been acked",
+			notSaid:   "idempotent replay, so redelivering it cannot help",
+		},
+		{
+			name:      "NOT_FOUND",
+			err:       werrors.NotFound("order", "o-9"),
+			wantLevel: "INFO",
+			wantSaid:  "the message addressed something that does not exist",
+			notSaid:   "WARN",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			prev := slog.Default()
+			slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, nil)))
+			t.Cleanup(func() { slog.SetDefault(prev) })
+
+			h, _ := pipelineFor(t, func(context.Context, broker.Message) error {
+				return tc.err
+			})
+			if err := h(context.Background(), msg("m-1")); err != nil {
+				t.Fatalf("the message was not acked: %v", err)
+			}
+
+			out := buf.String()
+			if !strings.Contains(out, `"level":"`+tc.wantLevel+`"`) {
+				t.Errorf("a discarded %s must be logged at %s:\n%s", tc.name, tc.wantLevel, out)
+			}
+			if !strings.Contains(out, tc.wantSaid) {
+				t.Errorf("the reason does not say %q:\n%s", tc.wantSaid, out)
+			}
+			if strings.Contains(out, tc.notSaid) {
+				t.Errorf("the line still carries %q, which it must not:\n%s", tc.notSaid, out)
+			}
+		})
+	}
+}

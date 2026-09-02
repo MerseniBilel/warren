@@ -181,8 +181,9 @@ func TestGeneratedCodeCompilesAndPasses(t *testing.T) {
 	// that cannot be reached by an HTTP client fails HERE rather than in a
 	// user's browser.
 	for path, src := range map[string]string{
-		"internal/modules/billing/http_test.go": generatedRoutesOverHTTP,
-		"internal/modules/user/http_test.go":    generatedUserRoutesOverHTTP,
+		"internal/modules/billing/http_test.go":     generatedRoutesOverHTTP,
+		"internal/modules/user/http_test.go":        generatedUserRoutesOverHTTP,
+		"internal/modules/billing/consumer_test.go": generatedConsumerInTheTable,
 	} {
 		if err := os.WriteFile(filepath.Join(dir, path), []byte(src), 0o644); err != nil {
 			t.Fatalf("writing %s: %v", path, err)
@@ -326,5 +327,49 @@ func TestGeneratedUserRoutesAreReachableOverHTTP(t *testing.T) {
 			}
 		})
 	}
+}
+`
+
+// generatedConsumerInTheTable is the regression for field test #15, finding 5,
+// and it is the SECOND-ORDER half of that finding — the half that made a
+// template swap a blocker rather than a matter of taste.
+//
+// `warren g consumer` used to write a subscription that assembled its own
+// broker.Pipeline and its own lifecycle.Hook, wired with warren.Providers plus
+// warren.Eager. That runs: the consumer consumes, and every test of its
+// behaviour passes. What it never does is ENTER THE FROZEN ROUTE TABLE, because
+// only Controllers and Consumers are registered at boot step 5 — so `openapi`,
+// which reads Table.Events(), and every future tool that reads it, were blind
+// to every CLI-generated consumer, silently, with nothing failing anywhere.
+//
+// Asserting the topic is in the table is the only assertion that catches that.
+// A test that the consumer receives its message would have passed throughout.
+const generatedConsumerInTheTable = `package billing_test
+
+import (
+	"testing"
+
+	"github.com/MerseniBilel/warren/testing"
+	"github.com/MerseniBilel/warren/transport"
+
+	"example.com/myapp/internal/modules/billing"
+)
+
+func TestGeneratedConsumerEntersTheRouteTable(t *testing.T) {
+	t.Parallel()
+
+	app := warrentest.NewModuleTest(t, billing.Module(),
+		warrentest.WithMemoryBroker(),
+		warrentest.WithMemoryPersistence())
+
+	table := warrentest.Resolve[*transport.Table](t, app)
+	for _, e := range table.Events() {
+		if e.Topic == "payment.received" {
+			return
+		}
+	}
+	t.Fatalf("the generated consumer is not in the frozen route table, so openapi "+
+		"and every tool reading Table.Events() cannot see it; the table has %d event route(s)",
+		len(table.Events()))
 }
 `

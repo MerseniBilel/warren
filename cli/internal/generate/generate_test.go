@@ -272,28 +272,39 @@ func TestGenerateConsumer(t *testing.T) {
 		t.Error("the handler imports the broker — a consumer handler must not know its transport")
 	}
 
-	// The subscription is the plumbing, and it belongs in the module: it is
-	// the only file allowed to see both the broker and the handler.
-	sub := read(t, dir, "internal/modules/user/on_order_placed_subscription.go")
-	if !strings.Contains(sub, `const topic = "order.placed"`) {
+	// The consumer is the plumbing, and it belongs in the module: it is the
+	// only file allowed to see both the transport package and the handler.
+	sub := read(t, dir, "internal/modules/user/on_order_placed_consumer.go")
+	if !strings.Contains(sub, `r.OnEvent("order.placed", c.handle)`) {
 		t.Errorf("the topic was not derived from the event name:\n%s", sub)
 	}
 
-	// Providers plus Eager, not Consumers: the subscription wires its own
-	// pipeline and lifecycle hook rather than registering through
-	// r.OnEvent, so it is not a transport.Controller — and boot now
-	// refuses a Consumers entry that registers nothing.
+	// Consumers, not Providers plus Eager. Amended 2026-09-02: this block
+	// used to assert the opposite, because the generated subscription wired
+	// its own broker.Pipeline and lifecycle hook and so was not a
+	// transport.Controller. It is one now, and the two generators finally
+	// emit the same idiom — field test #15 found one project containing both.
 	mod := read(t, dir, "internal/modules/user/module.go")
-	if strings.Contains(mod, "warren.Consumers") {
-		t.Errorf("the subscription is not a transport.Controller and must not be listed in Consumers:\n%s", mod)
+	for _, unwanted := range []string{"warren.Eager", "Subscription"} {
+		if strings.Contains(mod, unwanted) {
+			t.Errorf("module.go still carries the superseded %q idiom:\n%s", unwanted, mod)
+		}
 	}
 	for _, want := range []string{
 		"application.NewOnOrderPlacedHandler",
-		"newOrderPlacedSubscription",
-		"warren.Eager[*orderPlacedSubscription]()",
+		"warren.Consumers(",
+		"newOrderPlacedConsumer,",
 	} {
 		if !strings.Contains(mod, want) {
 			t.Errorf("module.go is missing %q:\n%s", want, mod)
+		}
+	}
+
+	// The consumer must not hand-roll what the framework assembles. Every
+	// one of these was in the 82-line template it replaces.
+	for _, unwanted := range []string{"broker.Pipeline", "lifecycle.Hook", "json.Unmarshal", "sub.Subscribe"} {
+		if strings.Contains(sub, unwanted) {
+			t.Errorf("the generated consumer still hand-assembles %q:\n%s", unwanted, sub)
 		}
 	}
 }
@@ -378,8 +389,8 @@ func TestConsumerTopicIsOverridable(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Consumer: %v", err)
 	}
-	if !strings.Contains(read(t, dir, "internal/modules/user/on_order_placed_subscription.go"),
-		`const topic = "billing.order.placed"`) {
+	if !strings.Contains(read(t, dir, "internal/modules/user/on_order_placed_consumer.go"),
+		`r.OnEvent("billing.order.placed", c.handle)`) {
 		t.Error("--topic was ignored")
 	}
 }

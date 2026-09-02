@@ -30,11 +30,19 @@ type setter struct {
 // reason: the Builder joins every registration failure with errRegistration,
 // which indents what it wraps, so a group pre-joined here arrived one indent
 // deeper than its siblings and read as nested under one of them.
-func paramSetters(t reflect.Type) ([]setter, []error) {
+//
+// It also returns the exported fields carrying NEITHER tag. On a route with a
+// body those are ordinary JSON fields and none of this walk's business; on a
+// bodyless one they can never be populated, which is what checkUnbindable
+// refuses. Collecting them here rather than walking the type a second time is
+// the point: this loop already visits every field and already knows which of
+// them a parameter can reach.
+func paramSetters(t reflect.Type) ([]setter, []reflect.StructField, []error) {
 	if t == nil || t.Kind() != reflect.Struct {
-		return nil, nil
+		return nil, nil, nil
 	}
 	var out []setter
+	var untagged []reflect.StructField
 	var errs []error
 	for i := range t.NumField() {
 		sf := t.Field(i)
@@ -56,6 +64,7 @@ func paramSetters(t reflect.Type) ([]setter, []error) {
 					"✗ nested parameter tag\n\n    field %s (%s) contains param:/query: tags, but parameters bind to\n    top-level fields only.\n\n  Move the tagged field up to the request struct, or drop the tag.",
 					sf.Name, sf.Type)))
 			}
+			untagged = append(untagged, sf)
 			continue
 		}
 		set, err := setterFor(sf.Type)
@@ -68,9 +77,184 @@ func paramSetters(t reflect.Type) ([]setter, []error) {
 		out = append(out, setter{name: name, query: query, index: []int{i}, set: set})
 	}
 	if len(errs) > 0 {
-		return nil, errs
+		return nil, nil, errs
 	}
-	return out, nil
+	return out, untagged, nil
+}
+
+// bodyless reports whether an HTTP verb carries no request body.
+//
+// Written as the COMPLEMENT of the verbs that do, deliberately: openapi's
+// hasBody (openapi/emit.go) is the same predicate spelled the same way —
+// "POST, PUT, PATCH, and nothing else" — and its comment already states this
+// package's premise, that "a GET with a body schema is the document telling a
+// client to do something no server will read". Two lists of verbs in two
+// modules is a drift waiting to happen; two complements of one list is not.
+// A verb added to Registrar tomorrow is bodyless in both places until someone
+// deliberately says otherwise, which is the safe default for a refusal.
+//
+// Raw routes name their own verb and never reach here.
+func bodyless(verb string) bool {
+	switch verb {
+	case "POST", "PUT", "PATCH":
+		return false
+	}
+	return true
+}
+
+// checkUnbindable refuses an exported field that nothing can ever populate: no
+// `param:`, no `query:`, on a route with no request body. Field test #15
+// measured all three spellings of it, and the third is the one the framework
+// was already telling people about —
+//
+//	Author string `quesry:"author"`   // a one-character typo in the KEY
+//	Author string                     // no tag at all
+//	Author string `json:"author"`     // a body tag on a bodyless verb
+//
+// each of which boots clean, binds "" for ever, and answers 200 with the
+// filter silently dropped. `warren g` already refuses to write the third:
+// "A Get carries no body, so a `json:` field here would be unsatisfiable."
+//
+// This is the same class as checkWildcards, and it earns a refusal for the
+// same reason: not "this looks wrong" but "no request populates this". What is
+// deliberately NOT refused is the same field on a route WITH a body, where an
+// untagged exported field is bound by encoding/json case-insensitively and a
+// `db:`/`yaml:`/`bson:` tag beside no binding tag is ordinary and legitimate.
+// A check that fired there would be the guessing linter this package has
+// declined three times, and it would be switched off within a month.
+//
+// One honest limit, because the justification overstates without it: the HTTP
+// adapter reads a body on every verb, so a client that sends one on a GET
+// would in fact populate a `json:` field. RFC 9110 gives content on GET no
+// defined semantics, any intermediary may drop it, and Warren's own generator
+// already calls such a field unsatisfiable — so this refusal fixes the
+// contract rather than merely describing it. It is a boot-behaviour change,
+// and that is what it changes.
+//
+// The REFUSAL is provable; only the HINT guesses, and only within a fixed
+// edit distance. That ordering is the whole distinction — a near miss on the
+// tag KEY is the likeliest cause and is worth naming, but nothing is refused
+// because of it.
+func checkUnbindable(verb, pattern, reqType string, untagged []reflect.StructField) []error {
+	if !bodyless(verb) {
+		return nil
+	}
+	errs := make([]error, 0, len(untagged))
+	for _, sf := range untagged {
+		hint := "  Tag it `query:\"" + suggestedName(sf.Name) + "\"`, or `param:` with a matching {wildcard}\n" +
+			"  in the pattern, or unexport the field."
+		if key, ok := nearMissTagKey(sf.Tag); ok {
+			hint = fmt.Sprintf("  The struct tag has a key `%s`, which binds nothing. Did you mean `%s`?\n\n%s",
+				key.got, key.want, hint)
+		}
+		errs = append(errs, diagnostic(fmt.Sprintf(
+			"✗ field can never be bound\n\n    field %s (%s) of %s carries no `param:` or `query:` tag,\n"+
+				"    and %s %s has no request body — so nothing populates it.\n\n"+
+				"    Every request leaves it at the zero value, which is not an error at\n"+
+				"    any layer: the route answers 200 with the field silently ignored.\n\n%s",
+			sf.Name, sf.Type, reqType, verb, pattern, hint)))
+	}
+	return errs
+}
+
+// suggestedName lowercases the first rune of a Go field name, which is the
+// query parameter a caller would most likely be sending. It is the inverse of
+// fieldNameFor and is only ever used inside a hint.
+func suggestedName(field string) string {
+	if field == "" {
+		return "name"
+	}
+	r := []rune(field)
+	r[0] = unicode.ToLower(r[0])
+	return string(r)
+}
+
+type tagKeyMiss struct{ got, want string }
+
+// nearMissTagKey reports a tag key that is a small edit away from "param" or
+// "query" — `quesry:"author"` being the case field test #15 measured.
+//
+// The distance is capped at 2 and the key must be at least four runes, so
+// "db", "json" and "yaml" cannot be dragged into a suggestion. Nothing is
+// refused on this evidence; it only decorates a failure already proven.
+func nearMissTagKey(tag reflect.StructTag) (tagKeyMiss, bool) {
+	best := tagKeyMiss{}
+	bestD := 3
+	for _, got := range tagKeys(tag) {
+		if len(got) < 4 {
+			continue
+		}
+		for _, want := range []string{"param", "query"} {
+			if got == want {
+				continue
+			}
+			if d := editDistance(got, want); d < bestD {
+				best, bestD = tagKeyMiss{got: got, want: want}, d
+			}
+		}
+	}
+	return best, bestD < 3
+}
+
+// tagKeys lists the keys of a struct tag in the conventional format reflect
+// documents: space-separated `key:"value"` pairs. reflect parses this to
+// answer Get and Lookup but exposes no way to enumerate it, and enumerating is
+// exactly what a "did you mean" needs.
+func tagKeys(tag reflect.StructTag) []string {
+	var keys []string
+	for t := string(tag); t != ""; {
+		i := 0
+		for i < len(t) && t[i] == ' ' {
+			i++
+		}
+		t = t[i:]
+		i = 0
+		for i < len(t) && t[i] > ' ' && t[i] != ':' && t[i] != '"' && t[i] != 0x7f {
+			i++
+		}
+		if i == 0 || i+1 >= len(t) || t[i] != ':' || t[i+1] != '"' {
+			break
+		}
+		key := t[:i]
+		t = t[i+1:]
+		j := 1
+		for j < len(t) && t[j] != '"' {
+			if t[j] == '\\' {
+				j++
+			}
+			j++
+		}
+		if j >= len(t) {
+			break
+		}
+		keys = append(keys, key)
+		t = t[j+1:]
+	}
+	return keys
+}
+
+// editDistance is Levenshtein over runes, with one row of state. Tag keys are
+// a handful of ASCII characters and this runs once per unbindable field at
+// boot, so the naive form is the right one.
+func editDistance(a, b string) int {
+	ar, br := []rune(a), []rune(b)
+	prev := make([]int, len(br)+1)
+	curr := make([]int, len(br)+1)
+	for j := range prev {
+		prev[j] = j
+	}
+	for i := 1; i <= len(ar); i++ {
+		curr[0] = i
+		for j := 1; j <= len(br); j++ {
+			cost := 1
+			if ar[i-1] == br[j-1] {
+				cost = 0
+			}
+			curr[j] = min(prev[j]+1, curr[j-1]+1, prev[j-1]+cost)
+		}
+		prev, curr = curr, prev
+	}
+	return prev[len(br)]
 }
 
 // hasParamTag reports whether t or anything beneath it carries a param: or

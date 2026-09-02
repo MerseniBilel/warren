@@ -532,8 +532,8 @@ func Consumer(opts Options) (string, error) {
 	p := &plan{
 		dir: opts.Dir, dryRun: opts.DryRun, force: opts.Force,
 		files: map[string][]byte{
-			base + "/application/on_" + data["Snake"] + ".go":  handler,
-			base + "/on_" + data["Snake"] + "_subscription.go": subscription,
+			base + "/application/on_" + data["Snake"] + ".go": handler,
+			base + "/on_" + data["Snake"] + "_consumer.go":    subscription,
 		},
 		edits: []edit{
 			provide(data, base, "application", "NewOn"+opts.Name+"Handler"),
@@ -541,16 +541,26 @@ func Consumer(opts Options) (string, error) {
 				path: base + "/module.go",
 				what: "consume " + data["Topic"],
 				fn: func(src []byte) ([]byte, error) {
-					// Providers plus Eager, not Consumers: the generated
-					// subscription wires its own pipeline and lifecycle hook
-					// rather than registering through r.OnEvent, so
-					// it is not a transport.Controller. Eager is what builds
-					// a type at boot that nothing else depends on.
-					src, err := astedit.AddArgument(src, "warren.Providers", "new"+opts.Name+"Subscription")
-					if err != nil {
-						return nil, err
-					}
-					return astedit.AddArgument(src, "warren.NewModule", "warren.Eager[*"+data["Lower"]+"Subscription]()")
+					// Consumers, not Providers plus Eager. Amended 2026-09-02,
+					// and this comment used to justify the shape it replaces:
+					// "the generated subscription wires its own pipeline and
+					// lifecycle hook rather than registering through
+					// r.OnEvent, so it is not a transport.Controller."
+					//
+					// It is one now. The generated consumer registers through
+					// r.OnEvent like the scaffold's has since the adapters
+					// shipped, so `warren new` and `warren g consumer` stop
+					// producing two contradictory idioms in one project —
+					// which field test #15 called the single most
+					// confidence-destroying thing it saw.
+					//
+					// The second-order defect is the reason this is not
+					// cosmetic: a Providers+Eager consumer never enters the
+					// frozen route table, so `openapi` and every tool that
+					// reads Table.Events() was blind to every CLI-generated
+					// consumer. TestAGeneratedConsumerEntersTheRouteTable is
+					// the regression that would have caught it.
+					return astedit.AddArgument(src, "warren.Consumers", "new"+opts.Name+"Consumer")
 				},
 			},
 		},
@@ -558,13 +568,16 @@ func Consumer(opts Options) (string, error) {
 			{base + "/application", []string{
 				opts.Name, opts.Name + "Handled", "on" + opts.Name, "NewOn" + opts.Name + "Handler",
 			}},
-			{base, []string{data["Lower"] + "Subscription", "new" + opts.Name + "Subscription"}},
+			{base, []string{data["Lower"] + "Consumer", "new" + opts.Name + "Consumer"}},
 		},
 	}
-	// The generated subscription injects inbox.Store AND broker.Publisher.
-	// In a --db postgres project only the adapter module exports the first;
-	// in a --broker kafka project only the broker MODULE exports the second,
-	// because platform cannot pass on a port it merely imports.
+	// The consumer chain the broker module assembles needs inbox.Store AND
+	// broker.Publisher. In a --db postgres project only the adapter module
+	// exports the first; in a --broker kafka project only the broker MODULE
+	// exports the second, because platform cannot pass on a port it merely
+	// imports. The generated file no longer names either type — the framework
+	// resolves them — but the MODULE still has to import the adapters, so
+	// this edit is unchanged.
 	if adapters := platformAdapters(opts.Dir, "Postgres", "Broker"); len(adapters) > 0 {
 		p.edits = append(p.edits, importAdapter(data, base, adapters))
 	}

@@ -760,7 +760,7 @@ func (r *Registrar) OnEvent[Req, Res any](topic string, h app.Handler[Req, Res],
 		r.fail(errCannotValidate(topic, name, err))
 		return
 	}
-	setters, setterErrs := paramSetters(reflect.TypeFor[Req]())
+	setters, _, setterErrs := paramSetters(reflect.TypeFor[Req]())
 	if len(setterErrs) > 0 {
 		for _, err := range setterErrs {
 			r.fail(err)
@@ -816,7 +816,7 @@ func (r *Registrar) register[Req, Res any](p Protocol, verb, pattern string, h a
 		r.fail(errCannotValidate(pattern, name, err))
 		return
 	}
-	setters, setterErrs := paramSetters(reflect.TypeFor[Req]())
+	setters, untagged, setterErrs := paramSetters(reflect.TypeFor[Req]())
 	if len(setterErrs) > 0 {
 		for _, err := range setterErrs {
 			r.fail(err)
@@ -836,9 +836,16 @@ func (r *Registrar) register[Req, Res any](p Protocol, verb, pattern string, h a
 	// OnEvent already exempts itself by never calling this; gRPC was the odd
 	// one out. A gRPC adapter fills Req from the protobuf message, so the
 	// param setters are simply unused there.
+	//
+	// Both field checks run before either can return, so a route with a
+	// misspelled tag AND an unbound wildcard names both in one boot rather
+	// than one per attempt.
 	if p == ProtocolHTTP {
-		if errs := checkWildcards(pattern, reflect.TypeFor[Req]().String(), setters); len(errs) > 0 {
-			for _, err := range errs {
+		reqName := reflect.TypeFor[Req]().String()
+		fieldErrs := checkUnbindable(verb, pattern, reqName, untagged)
+		fieldErrs = append(fieldErrs, checkWildcards(pattern, reqName, setters)...)
+		if len(fieldErrs) > 0 {
+			for _, err := range fieldErrs {
 				r.fail(err)
 			}
 			return

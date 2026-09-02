@@ -343,7 +343,7 @@ transports:
 |---|---|---|---|
 | `INVALID` | 400 | `InvalidArgument` | → DLQ (never retry) |
 | `NOT_FOUND` | 404 | `NotFound` | ack + log |
-| `CONFLICT` | 409 | `AlreadyExists` | ack (idempotent replay) |
+| `CONFLICT` | 409 | `AlreadyExists` | ack + log at WARN — a replay OR a rule refusing the work, and the code cannot say which |
 | `CONTENTION` | 409 | `Aborted` | nack + backoff retry — nothing was written, so acking destroys work never done |
 | `UNAUTHENTICATED` | 401 | `Unauthenticated` | → DLQ (never retry) |
 | `PERMISSION_DENIED` | 403 | `PermissionDenied` | → DLQ (never retry) |
@@ -352,6 +352,17 @@ transports:
 
 Each adapter owns its column. A handler that maps a code to a status itself has
 broken ring 2.
+
+**`CONFLICT` from a consumer is two events wearing one code, and this is
+deliberate.** A replay whose work is already done, and a domain rule refusing
+the work — an oversell, an illegal transition — both return `errors.Conflict`,
+because the 2026-08-08 CONTENTION ruling chose to keep the familiar name right
+for the common case rather than split it and make every existing
+`Conflict("cannot oversell")` wrong. The consequence is that the framework
+cannot tell them apart, so it acks both and **must not assert which one it
+was**: the log line says only that the handler refused the message and it has
+been acked, at WARN since 2026-09-02. Whether a terminal CONFLICT should
+dead-letter instead is open against §2.6 and belongs to the human.
 
 **`UNAUTHENTICATED` describes the caller's identity, not yours.** A service
 that fails to authenticate to something downstream — Postgres, S3, another

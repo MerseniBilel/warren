@@ -136,8 +136,8 @@ func TestTopicIsQuotedNotConcatenated(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Consumer: %v", err)
 	}
-	sub := read(t, dir, "internal/modules/user/on_injected_subscription.go")
-	if !strings.Contains(sub, `const topic = "a\" + \"b"`) {
+	sub := read(t, dir, "internal/modules/user/on_injected_consumer.go")
+	if !strings.Contains(sub, `r.OnEvent("a\" + \"b", c.handle)`) {
 		t.Errorf("the topic was not quoted:\n%s", sub)
 	}
 

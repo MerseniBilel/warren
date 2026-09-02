@@ -76,8 +76,21 @@ CONTRACTS   app.Handler · broker.Publisher · Registrar · …     ports & shar
 KERNEL      warren · di · lifecycle · config · log · errors    stdlib + dig only
 ```
 
-One handler serves three protocols. Every error the framework can detect
-surfaces at boot — never on request 1.
+One handler is written once and serves HTTP today, with gRPC and message
+consumers reading the same route table — `transport/grpc` is the deferred half,
+so "three protocols" is the design, not yet the present tense.
+
+**Wiring errors surface at boot, not on request 1.** A missing provider, an
+unexported dependency, a duplicate route, a path wildcard no field binds, a
+field on a bodyless route that nothing can populate, a corrupting middleware
+order — all of them refuse to start, with a diagnostic naming the file, the
+line, and the fix. That is the claim, and it is deliberately narrower than the
+one this line used to make. Two known gaps remain, both measured by a field
+test and both scheduled rather than denied: a handler that injects a repository
+but no unit of work is caught on request 1 (a 500, with the cause in the log),
+and `warrentest.Invoke` boots the graph without the transport edge, so
+`validate:` tags do not run under it. "Every error, never on request 1" was an
+absolute with live exceptions, which is worse than a smaller true claim.
 
 Swapping a driver is **one line of `platform`**, not of `main.go`, and how
 many other lines depends on the driver's shape: a driver whose ports
@@ -280,12 +293,14 @@ contract now.
       annotations, no IDL, no checked-in spec file. Raw routes are EMITTED with
       an `x-warren-undescribed` rather than omitted, and constraints are
       published only when the application's validator actually enforces them
-      *(implemented 2026-08-29; zero third-party dependencies. **Unticked
-      again on 2026-08-31**: the module is untagged, so neither documented
-      install route reaches it, and field test #14 found the emitter merges
-      two same-named DTOs from different features into one schema and emits
-      `time.Time` as `{"type":"object"}` — both silently, with `Strict()`
-      booting clean. It ships when those are fixed and it is tagged.)*
+      *(implemented 2026-08-29; zero third-party dependencies. The three
+      defects that unticked this on 2026-08-31 are **all fixed and verified by
+      a stranger** on 2026-09-02: same-named DTOs from two features are
+      disambiguated by the shortest unique path suffix, `time.Time` emits
+      `{"type":"string","format":"date-time"}`, and
+      `go get github.com/MerseniBilel/warren/openapi` resolves. It stays
+      unticked for ONE remaining reason — the module has no released tag, so
+      it resolves only as a pseudo-version.)*
 - [ ] `auth` (verifier)
 
 ### Phase 6 — the CLI *(the discovery engine: scaffolding real apps is how

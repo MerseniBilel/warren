@@ -27,8 +27,9 @@ var Module = sync.OnceValue(func() warren.Module {
 			infrastructure.NewPaymentRepository,
 			application.NewVoidInvoiceHandler,
 			application.NewOnPaymentReceivedHandler,
-			newPaymentReceivedSubscription,
 		),
-		warren.Eager[*paymentReceivedSubscription](),
+		warren.Consumers(
+			newPaymentReceivedConsumer,
+		),
 	)
 })

@@ -1280,10 +1280,13 @@ func TestZeroRegistrarPanicsWithItsOwnDiagnostic(t *testing.T) {
 // that incident, since a boot check that refuses user code and is never
 // exercised is a check nobody can change safely.
 
-// wcNoParams binds no path parameter, so any pattern with a wildcard
-// disagrees with it.
+// wcNoParams binds no PATH parameter, so any pattern with a wildcard
+// disagrees with it. Its one field carries a query: tag so that these routes
+// exercise the wildcard check alone — an exported field with neither tag on a
+// bodyless route is a second, independent failure (checkUnbindable), and a
+// fixture that tripped both would pin two diagnostics in one golden.
 type wcNoParams struct {
-	Note string `json:"note"`
+	Note string `query:"note"`
 }
 
 // wcRest binds a multi-segment wildcard. {rest...} declares the name "rest",
@@ -1570,5 +1573,236 @@ func assertOneIndent(t *testing.T, report string) {
 	if len(seen) > 1 {
 		t.Errorf("the joined failures sit at %d different indents, so one nests under another: %v\n%s",
 			len(seen), seen, report)
+	}
+}
+
+// --- the bodyless-route unbindable-field check ----------------------------
+//
+// Field test #15, finding 1: a one-character typo in a struct tag KEY —
+// `query:"author"` → `quesry:"author"` — booted clean and silently dropped the
+// filter, so GET /books?author=Alice returned Bob's books too, with HTTP 200.
+// The framework already walked every one of those fields at boot; it just had
+// nothing to say about one it could not make sense of.
+
+// ubTypo is the measured case: the key is misspelled, so the tag binds
+// nothing and reflect reports no param: and no query:.
+type ubTypo struct {
+	Author string `quesry:"author"`
+}
+
+// ubUntagged is the second variant: an exported field with no tag at all.
+type ubUntagged struct {
+	Author string
+}
+
+// ubJSONOnGet is the third, and `warren g` already refuses to write it —
+// "A Get carries no body, so a `json:` field here would be unsatisfiable."
+type ubJSONOnGet struct {
+	Author string `json:"author"`
+}
+
+// ubBodyField is the case that must NOT be refused. On a POST the same field
+// is bound by encoding/json, and the db: tag beside it is ordinary.
+type ubBodyField struct {
+	Author string `json:"author" db:"author"`
+	Note   string
+}
+
+// ubUnexported carries nothing bindable and nothing exported, so there is
+// nothing to refuse.
+type ubUnexported struct {
+	author string //nolint:unused // the point of the fixture is that it is skipped
+}
+
+// TestABodylessRouteRefusesAFieldNothingCanPopulate pins the diagnostic.
+func TestABodylessRouteRefusesAFieldNothingCanPopulate(t *testing.T) {
+	t.Parallel()
+
+	b := transport.NewBuilder()
+	b.For("catalog").Get("/books", wcHandler[ubTypo]())
+
+	_, err := b.Table()
+	if err == nil {
+		t.Fatal("a field nothing can populate built a table")
+	}
+	assertGolden(t, "field_can_never_be_bound", err.Error())
+}
+
+// TestAllThreeSpellingsOfAnUnbindableFieldAreRefused — the report measured
+// three, and one check has to catch all three or it is not worth the boot
+// failure it costs.
+func TestAllThreeSpellingsOfAnUnbindableFieldAreRefused(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name     string
+		register func(*transport.Registrar)
+	}{
+		{"misspelled tag key", func(r *transport.Registrar) { r.Get("/books", wcHandler[ubTypo]()) }},
+		{"no tag at all", func(r *transport.Registrar) { r.Get("/books", wcHandler[ubUntagged]()) }},
+		{"json tag on a GET", func(r *transport.Registrar) { r.Get("/books", wcHandler[ubJSONOnGet]()) }},
+		{"delete is bodyless too", func(r *transport.Registrar) { r.Delete("/books", wcHandler[ubUntagged]()) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			b := transport.NewBuilder()
+			tc.register(b.For("catalog"))
+			_, err := b.Table()
+			if err == nil {
+				t.Fatalf("%s built a table", tc.name)
+			}
+			for _, want := range []string{"field can never be bound", "Author", "silently ignored"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("the diagnostic does not carry %q:\n%v", want, err)
+				}
+			}
+		})
+	}
+}
+
+// TestARouteWithABodyIsNotWildcardOrTagChecked — the half that must NOT fire.
+// A POST binds an untagged exported field through encoding/json, and a db: or
+// yaml: tag beside no binding tag is ordinary and legitimate. A check that
+// refused here would be the guessing linter this package has declined three
+// times, and it would be switched off within a month.
+func TestARouteWithABodyIsNotWildcardOrTagChecked(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name     string
+		register func(*transport.Registrar)
+	}{
+		{"POST", func(r *transport.Registrar) { r.Post("/books", wcHandler[ubBodyField]()) }},
+		{"PUT", func(r *transport.Registrar) { r.Put("/books", wcHandler[ubBodyField]()) }},
+		{"PATCH", func(r *transport.Registrar) { r.Patch("/books", wcHandler[ubBodyField]()) }},
+		{"a typo on a body route is still a body field", func(r *transport.Registrar) {
+			r.Post("/books", wcHandler[ubTypo]())
+		}},
+		{"GET with nothing exported", func(r *transport.Registrar) {
+			r.Get("/books", wcHandler[ubUnexported]())
+		}},
+		{"gRPC is not an HTTP verb", func(r *transport.Registrar) {
+			r.Method("book.v1.BookService/List", wcHandler[ubUntagged]())
+		}},
+		{"OnEvent is not an HTTP verb", func(r *transport.Registrar) {
+			r.OnEvent("book.listed", wcHandler[ubUntagged]())
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			b := transport.NewBuilder()
+			tc.register(b.For("catalog"))
+			if _, err := b.Table(); err != nil {
+				t.Errorf("%s must register clean: %v", tc.name, err)
+			}
+		})
+	}
+}
+
+// TestTheTagKeyNearMissIsSuggested — the refusal is provable and the hint is a
+// guess, and they are not interchangeable. The hint fires only inside a
+// failure already proven, and only for a key a small edit away from a real
+// one: `quesry` earns a suggestion, `db` and `json` must not.
+func TestTheTagKeyNearMissIsSuggested(t *testing.T) {
+	t.Parallel()
+
+	t.Run("a near miss is named", func(t *testing.T) {
+		t.Parallel()
+		b := transport.NewBuilder()
+		b.For("catalog").Get("/books", wcHandler[ubTypo]())
+		_, err := b.Table()
+		if err == nil {
+			t.Fatal("the typo built a table")
+		}
+		if want := "The struct tag has a key `quesry`, which binds nothing. Did you mean `query`?"; !strings.Contains(err.Error(), want) {
+			t.Errorf("the hint does not offer %q:\n%v", want, err)
+		}
+	})
+
+	t.Run("a real tag key earns no suggestion", func(t *testing.T) {
+		t.Parallel()
+		b := transport.NewBuilder()
+		b.For("catalog").Get("/books", wcHandler[ubJSONOnGet]())
+		_, err := b.Table()
+		if err == nil {
+			t.Fatal("the json tag built a table")
+		}
+		if strings.Contains(err.Error(), "Did you mean") {
+			t.Errorf("json is not a near miss for param or query, so nothing should be suggested:\n%v", err)
+		}
+	})
+}
+
+// TestBothFieldChecksReportInOneBoot — a route can be wrong in both ways at
+// once, and running one check per registration attempt would make the second
+// mistake invisible until the first was fixed. That is the boot-ordering
+// promise, applied to two checks that both hold their evidence already.
+func TestBothFieldChecksReportInOneBoot(t *testing.T) {
+	t.Parallel()
+
+	type bothWrong struct {
+		Author string `quesry:"author"` // unbindable
+	}
+
+	b := transport.NewBuilder()
+	b.For("catalog").Get("/books/{id}", wcHandler[bothWrong]())
+	_, err := b.Table()
+	if err == nil {
+		t.Fatal("two independent field mistakes built a table")
+	}
+	report := err.Error()
+	for _, want := range []string{"✗ field can never be bound", "✗ path wildcard nothing binds"} {
+		if !strings.Contains(report, want) {
+			t.Errorf("the report does not carry %q:\n%s", want, report)
+		}
+	}
+	assertOneIndent(t, report)
+}
+
+// TestTwoFeaturesOnOneTopicGetDistinctSubscriptionNames answers the blocker
+// question `cli/internal/generate/SPEC.md` refused to let the consumer
+// template swap land without.
+//
+// The hand-rolled subscription that swap replaces set its own name —
+// `const name = "{feature}.{event}"` — with the comment "It scopes the
+// deduplication key, which is what lets another feature consume this same
+// topic without one of them suppressing the other." r.OnEvent derives the
+// name instead, and broker/consumer passes EventRoute.Name straight into
+// broker.Pipeline as the dedupe scope. If the derived name were per-TOPIC
+// rather than per-SUBSCRIPTION, moving the generator onto OnEvent would give
+// two features one dedupe scope and the first to handle a message would
+// silently suppress it for the second.
+//
+// It is per-subscription: handlerName prefixes the MODULE, so the same
+// handler shape in two features cannot collide.
+func TestTwoFeaturesOnOneTopicGetDistinctSubscriptionNames(t *testing.T) {
+	t.Parallel()
+
+	const topic = "loan.opened"
+
+	b := transport.NewBuilder()
+	b.For("catalog").OnEvent(topic, concreteRegisterHandler{})
+	b.For("lending").OnEvent(topic, concreteRegisterHandler{})
+
+	table, err := b.Table()
+	if err != nil {
+		t.Fatalf("two features consuming one topic must both register: %v", err)
+	}
+	events := table.Events()
+	if len(events) != 2 {
+		t.Fatalf("two subscriptions registered, table has %d", len(events))
+	}
+	if events[0].Name == events[1].Name {
+		t.Fatalf("both subscriptions are named %q, so they share one dedupe scope and "+
+			"whichever handles a message first suppresses it for the other", events[0].Name)
+	}
+	for _, e := range events {
+		if e.Topic != topic {
+			t.Errorf("topic = %q, want %q", e.Topic, topic)
+		}
+	}
+	if !strings.HasPrefix(events[0].Name, "catalog.") || !strings.HasPrefix(events[1].Name, "lending.") {
+		t.Errorf("the subscription name must carry its module, got %q and %q",
+			events[0].Name, events[1].Name)
 	}
 }

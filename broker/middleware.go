@@ -4,6 +4,7 @@ import (
 	"context"
 	stderrors "errors"
 	"fmt"
+	"log/slog"
 	"maps"
 	"math/rand/v2"
 	"runtime/debug"
@@ -499,9 +500,33 @@ func DeadLetter(pub Publisher, originTopic, dlqTopic string) Middleware {
 				// is missing produced no record anywhere: a queue draining
 				// to nothing looked exactly like a queue being handled.
 				//
-				// At INFO, not WARN: both dispositions are correct and
-				// expected. What was missing was the fact, not an alarm.
-				log.FromContext(ctx).InfoContext(ctx, "message discarded",
+				// NOT_FOUND at INFO, CONFLICT at WARN. Amended 2026-09-02,
+				// and this comment used to state the opposite ruling — "at
+				// INFO, not WARN: both dispositions are correct and expected"
+				// — which was true of one of them.
+				//
+				// A missing row genuinely is expected: the message addressed
+				// something that is gone, redelivery cannot help, nothing was
+				// lost that existed. A CONFLICT is not. 4a1d152 deliberately
+				// routed user business refusals to errors.Conflict so that "a
+				// developer who never reads this ruling is right by reaching
+				// for the familiar name" — and the framework's own generated
+				// aggregate tells you to return it "when a RULE refuses — an
+				// oversell". Field test #15 did exactly that: two loans
+				// against a one-copy book, the second event refused, acked,
+				// and gone, with the two modules permanently divergent. That
+				// is the outcome the outbox exists to prevent, and INFO is
+				// not a level anyone pages on.
+				//
+				// What is NOT changed here, deliberately: the disposition.
+				// Whether a terminal CONFLICT should ack or dead-letter is a
+				// §2.6 semantic change and belongs to the human, not to a log
+				// fix. The level is what makes the loss visible meanwhile.
+				logger, level := log.FromContext(ctx), slog.LevelInfo
+				if codeOf(err) == errors.CodeConflict {
+					level = slog.LevelWarn
+				}
+				logger.Log(ctx, level, "message discarded",
 					"topic", originTopic,
 					"message_id", msg.ID,
 					"code", string(codeOf(err)),
@@ -706,12 +731,30 @@ func InjectTrace(ctx context.Context, msgs []Message) {
 	}
 }
 
-// discardReason says which of the two acked dispositions this was, because
-// they are not the same event: one means the work is already done, the other
-// means it can never be done here.
+// discardReason says what is KNOWN about an acked discard, and nothing more.
+//
+// The CONFLICT string used to assert "the work was already applied — an
+// idempotent replay". The framework cannot know that. CONFLICT reaches here
+// from two different events that the code alone cannot separate, because the
+// user returns the same code for both: a genuine idempotent replay, and a
+// domain rule refusing the work — an oversell, an illegal transition — which
+// is what the generated aggregate's own doc comment instructs. Field test #15
+// measured the second, logged under the first's explanation, over a message
+// that was then destroyed. A framework-authored line asserting a fact it
+// cannot check, about data it has just discarded, is worse than no line.
+//
+// NOT_FOUND's string is different in kind and is unchanged: a handler that
+// reports NOT_FOUND has told us the thing is not there, which IS the fact.
+//
+// The signal that would separate the two is real and currently unused: with
+// inbox dedupe enabled a genuine replay never reaches the handler at all, so
+// a CONFLICT that does reach it is overwhelmingly a business refusal. Acting
+// on that means changing the disposition, which is a §2.6 change for the
+// human; it is recorded here so the next reader does not re-derive it.
 func discardReason(code errors.Code) string {
 	if code == errors.CodeConflict {
-		return "the work was already applied — an idempotent replay, so redelivering it cannot help"
+		return "the handler refused this message with CONFLICT and it has been acked; " +
+			"the framework cannot tell an idempotent replay from a domain rule refusing the work"
 	}
 	return "the message addressed something that does not exist, so redelivering it cannot help"
 }

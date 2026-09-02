@@ -897,7 +897,7 @@ stays the standard library (see §6.1).
 |---|---|---|---|
 | `INVALID` | 400 | `InvalidArgument` | → DLQ (never retry) |
 | `NOT_FOUND` | 404 | `NotFound` | ack + log |
-| `CONFLICT` | 409 | `AlreadyExists` | ack (idempotent replay) |
+| `CONFLICT` | 409 | `AlreadyExists` | ack + log at WARN — a replay OR a rule refusing the work, and the code cannot say which |
 | `CONTENTION` | 409 | `Aborted` | nack + backoff retry (never DLQ while the broker redelivers) |
 | `UNAUTHENTICATED` | 401 | `Unauthenticated` | → DLQ (never retry) |
 | `PERMISSION_DENIED` | 403 | `PermissionDenied` | → DLQ (never retry) |

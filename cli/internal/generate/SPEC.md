@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | **PROPOSED (2026-08-31) — NOT APPROVED.** Confirmed independently twice: by a Go 1.27 audit of the templates and by field test #14 building a real service. Changes generated output. |
+| **Status** | **APPROVED 2026-09-02 → IMPLEMENTED, PENDING REVIEW; retires on merge.** Confirmed independently three times: a Go 1.27 audit of the templates, field test #14, and field test #15, which found one generated project containing both idioms and called it the single most confidence-destroying thing it saw. Changes generated output; no user code. The blocker open question below is ANSWERED, by test. |
 | **Source** | Field test #14 (`fieldtest14/REPORT.md`, finding 6); Go 1.27 audit finding Q. Verified against `cli/internal/generate/templates/subscription.go.tmpl`, `cli/internal/generate/generate.go:530-575`, and `cli/internal/scaffold/templates/internal__modules__notification__module.go.tmpl:40-70` |
 | **Module** | `github.com/MerseniBilel/warren/cli` — build-time only |
 | **Mode** | Build |
@@ -75,6 +75,16 @@ two topics gets two `OnEvent` lines in one `Register`, not two files.
 subscription name that scopes the dedupe key. `r.OnEvent(topic, h, opts...)`
 takes `...broker.SubscribeOption` — so five of the six pass through unchanged.
 
+**ANSWERED 2026-09-02, by test, and the answer is that the derived name is
+per-SUBSCRIPTION.** `handlerName` (`transport/transport.go:934`) prefixes the
+MODULE — `module + "." + handler` — and `broker/consumer.Serve` passes
+`EventRoute.Name` straight into `broker.Pipeline` as the dedupe scope. Two
+features consuming one topic therefore get two names and two scopes.
+`TestTwoFeaturesOnOneTopicGetDistinctSubscriptionNames` registers `loan.opened`
+from `catalog` and from `lending` and asserts the two names differ and each
+carries its module; it fails if the derivation is ever changed to key on the
+topic. No name option is needed, and the migration carries none.
+
 **The sixth is the subscription NAME.** The generated pipeline sets it
 explicitly:
 
@@ -106,15 +116,37 @@ feature had one subscription, so it did not exercise it.
 
 ## Definition of done
 
-- [ ] The dedupe-scope question above is answered, in writing, with a test that
+- [x] The dedupe-scope question above is answered, in writing, with a test that
       subscribes two features to one topic.
-- [ ] `warren g consumer` on a feature with no consumer writes the `Consumer`
-      type, `Register`, and the `warren.Consumers` edit. Golden test.
-- [ ] `warren g consumer` on a feature that already has one appends an
-      `OnEvent` line to the existing `Register` and adds no type. Golden test.
-- [ ] The generated feature package imports neither `broker`, `inbox`,
-      `lifecycle` nor `encoding/json`.
-- [ ] `warren new` followed by `warren g consumer` produces exactly one
-      consumer idiom in the tree — asserted, not eyeballed.
-- [ ] `.claude/skills/warren-generate/SKILL.md:24` already claims this command
-      wires `warren.Consumers(...)`. It becomes true; the line stays.
+      `transport`'s `TestTwoFeaturesOnOneTopicGetDistinctSubscriptionNames`.
+- [x] `warren g consumer` on a feature with no consumer writes the consumer
+      type, `Register`, and the `warren.Consumers` edit. Golden test:
+      `testdata/golden/internal__modules__billing__on_payment_received_consumer.go.golden`
+      and `…__billing__module.go.golden`.
+- [x] The generated feature package imports neither `broker`, `inbox`,
+      `lifecycle` nor `encoding/json`. `TestGenerateConsumer` asserts the
+      absence of `broker.Pipeline`, `lifecycle.Hook`, `json.Unmarshal` and
+      `sub.Subscribe` by name.
+- [x] `warren new` followed by `warren g consumer` produces exactly one
+      consumer idiom in the tree — asserted, not eyeballed:
+      `TestGenerateConsumer` fails if `module.go` still carries
+      `warren.Eager` or the word `Subscription`.
+- [x] `.claude/skills/warren-generate/SKILL.md:24` already claims this command
+      wires `warren.Consumers(...)`. It is true now; the line stays.
+
+Added while implementing, and the reason this was a blocker rather than a
+matter of taste:
+
+- [x] A generated consumer ENTERS THE FROZEN ROUTE TABLE.
+      `cli/internal/generate/compile_test.go`'s
+      `TestGeneratedConsumerEntersTheRouteTable` boots the generated module and
+      asserts `payment.received` is in `Table.Events()`. A `Providers`+`Eager`
+      consumer runs correctly and is invisible to `openapi` and to every tool
+      that reads the table; no behavioural test of the consumer catches that.
+
+NOT done, and deliberately out of scope: **a feature that already has a
+consumer still gets a second consumer type rather than an appended `OnEvent`
+line.** The spec asked for the append; it is a second astedit operation
+(find the existing `Register`, add a statement) and is not needed to close
+either finding. Recorded here so it is a decision, not an omission — it goes
+on the v0.3 list.

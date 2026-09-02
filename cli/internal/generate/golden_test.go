@@ -83,7 +83,7 @@ func TestGolden(t *testing.T) {
 		"internal/modules/billing/application/void_invoice.go",
 		"internal/modules/billing/application/void_invoice_test.go",
 		"internal/modules/billing/application/on_payment_received.go",
-		"internal/modules/billing/on_payment_received_subscription.go",
+		"internal/modules/billing/on_payment_received_consumer.go",
 		"internal/modules/billing/module_test.go",
 		"internal/modules/billing/module.go",
 	} {

@@ -1060,3 +1060,102 @@ func TestTheDirectRefusalStillPrescribesTheSwap(t *testing.T) {
 		app.Transactional[string, string](&countingUoW{}),
 		app.Retrying[string, string](broker.ExponentialBackoff(3)))
 }
+
+// opaqueMW is a user middleware with no Unwrap — the shape GETTING_STARTED §9
+// warns about.
+type opaqueMW[Req, Res any] struct{ next app.Handler[Req, Res] }
+
+func (h opaqueMW[Req, Res]) Handle(ctx context.Context, r Req) (Res, error) {
+	return h.next.Handle(ctx, r)
+}
+
+// transparentMW is the same middleware with the one method the page
+// prescribes.
+type transparentMW[Req, Res any] struct{ next app.Handler[Req, Res] }
+
+func (h transparentMW[Req, Res]) Handle(ctx context.Context, r Req) (Res, error) {
+	return h.next.Handle(ctx, r)
+}
+func (h transparentMW[Req, Res]) Unwrap() app.Handler[Req, Res] { return h.next }
+
+// TestWhereAUserMiddlewareBlindsTheWalkAndWhereItDoesNot pins the exact edge
+// of the composition check, because it was reported wrong and believed.
+//
+// Field test #15 wrote an opaque middleware between Transactional and
+// Retrying, saw it refused, and concluded GETTING_STARTED's fail-open warning
+// was stale. It is not: the two placements behave differently, and only one of
+// them was tested.
+//
+//   - INSIDE ONE Chain CALL the walk cannot be blinded. Chain remembers having
+//     applied a Retrying — sawRetry is a flag carried through the loop — so a
+//     middleware layered on top of it hides nothing.
+//   - ACROSS A NESTED Chain it fails OPEN. The Retrying arrives already wrapped
+//     inside the handler, and finding it means walking that handler's layers,
+//     which stops at the first one implementing neither a Warren middleware
+//     type nor app.Unwrapper.
+//
+// The second row is a silent data-corruption path — one transaction around
+// every retry attempt — so it is pinned here rather than left to a page.
+func TestWhereAUserMiddlewareBlindsTheWalkAndWhereItDoesNot(t *testing.T) {
+	t.Parallel()
+
+	handler := func() app.Handler[string, string] {
+		return app.HandlerFunc[string, string](func(context.Context, string) (string, error) {
+			return "", nil
+		})
+	}
+	opaque := func(next app.Handler[string, string]) app.Handler[string, string] {
+		return opaqueMW[string, string]{next: next}
+	}
+	transparent := func(next app.Handler[string, string]) app.Handler[string, string] {
+		return transparentMW[string, string]{next: next}
+	}
+
+	for _, tc := range []struct {
+		name    string
+		compose func()
+		refused bool
+	}{
+		{
+			name: "opaque middleware between them, one Chain call",
+			compose: func() {
+				_ = app.Chain(handler(),
+					app.Transactional[string, string](&countingUoW{}),
+					app.Middleware[string, string](opaque),
+					app.Retrying[string, string](broker.ExponentialBackoff(3)))
+			},
+			refused: true,
+		},
+		{
+			name: "opaque middleware across a nested Chain — the stated limit",
+			compose: func() {
+				inner := app.Chain(handler(), app.Retrying[string, string](broker.ExponentialBackoff(3)))
+				_ = app.Chain(opaque(inner), app.Transactional[string, string](&countingUoW{}))
+			},
+			refused: false,
+		},
+		{
+			name: "the same, with the Unwrap the page prescribes",
+			compose: func() {
+				inner := app.Chain(handler(), app.Retrying[string, string](broker.ExponentialBackoff(3)))
+				_ = app.Chain(transparent(inner), app.Transactional[string, string](&countingUoW{}))
+			},
+			refused: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			defer func() {
+				switch r := recover(); {
+				case r == nil && tc.refused:
+					t.Error("the corrupting composition was accepted")
+				case r != nil && !tc.refused:
+					t.Errorf("this composition is the walk's STATED LIMIT and must "+
+						"compose; refusing it here means GETTING_STARTED §9's table "+
+						"is now wrong in the other direction:\n%v", r)
+				}
+			}()
+			tc.compose()
+		})
+	}
+}

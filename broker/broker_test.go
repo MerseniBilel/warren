@@ -136,7 +136,14 @@ func TestRingPosition(t *testing.T) {
 		// transport/http does: a panic's stack exists only in the frame that
 		// recovers it. The invariant here is "no driver, no OTel" — this list
 		// enumerates what the package happens to use, not a narrower rule.
-		"runtime/debug":                         true,
+		"runtime/debug": true,
+		// log/slog is stdlib, and warren/log's own FromContext RETURNS a
+		// *slog.Logger — so slog is already in this package's effective
+		// surface and importing the level constants adds nothing new. Needed
+		// since 2026-09-02, when a discarded CONFLICT started logging at WARN
+		// and a discarded NOT_FOUND stayed at INFO, which is one Log call
+		// with a variable level rather than two duplicated argument lists.
+		"log/slog":                              true,
 		"github.com/MerseniBilel/warren/app":    true,
 		"github.com/MerseniBilel/warren/errors": true,
 		"github.com/MerseniBilel/warren/inbox":  true,

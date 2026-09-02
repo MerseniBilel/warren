@@ -20,7 +20,16 @@ import (
 // warren.md §3.5 states the defaults in one line — "default success 201;
 // Delete 204; the rest 200". This is that line, executed.
 
+// verbReq is the BODYLESS shape: GET and DELETE carry no request body, so a
+// `json:` field on one of them can never be populated and transport refuses
+// the route. This fixture used to carry one for all five verbs — a body field
+// on a GET — which is finding 1's third variant and is now a boot failure.
 type verbReq struct {
+	ID string `param:"id"`
+}
+
+// verbBodyReq is the same request for the three verbs that do carry a body.
+type verbBodyReq struct {
 	ID   string `param:"id"`
 	Note string `json:"note"`
 }
@@ -32,11 +41,11 @@ type verbRes struct {
 
 type verbController struct{}
 
-func (c *verbController) put(_ context.Context, q verbReq) (verbRes, error) {
+func (c *verbController) put(_ context.Context, q verbBodyReq) (verbRes, error) {
 	return verbRes{Verb: "PUT", ID: q.ID}, nil
 }
 
-func (c *verbController) patch(_ context.Context, q verbReq) (verbRes, error) {
+func (c *verbController) patch(_ context.Context, q verbBodyReq) (verbRes, error) {
 	return verbRes{Verb: "PATCH", ID: q.ID}, nil
 }
 
@@ -50,15 +59,15 @@ func (c *verbController) get(_ context.Context, q verbReq) (verbRes, error) {
 	return verbRes{Verb: "GET", ID: q.ID}, nil
 }
 
-func (c *verbController) post(_ context.Context, q verbReq) (verbRes, error) {
+func (c *verbController) post(_ context.Context, q verbBodyReq) (verbRes, error) {
 	return verbRes{Verb: "POST", ID: q.ID}, nil
 }
 
 func (c *verbController) Register(r *transport.Registrar) {
 	r.Get("/things/{id}", app.HandlerFunc[verbReq, verbRes](c.get))
-	r.Post("/things/{id}", app.HandlerFunc[verbReq, verbRes](c.post))
-	r.Put("/things/{id}", app.HandlerFunc[verbReq, verbRes](c.put))
-	r.Patch("/things/{id}", app.HandlerFunc[verbReq, verbRes](c.patch))
+	r.Post("/things/{id}", app.HandlerFunc[verbBodyReq, verbRes](c.post))
+	r.Put("/things/{id}", app.HandlerFunc[verbBodyReq, verbRes](c.put))
+	r.Patch("/things/{id}", app.HandlerFunc[verbBodyReq, verbRes](c.patch))
 	r.Delete("/things/{id}", app.HandlerFunc[verbReq, verbRes](c.del))
 }
 

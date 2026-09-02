@@ -1,0 +1,14 @@
+✗ route registration failed
+
+  ✗ field can never be bound
+
+      field Author (string) of transport_test.ubTypo carries no `param:` or `query:` tag,
+      and GET /books has no request body — so nothing populates it.
+
+      Every request leaves it at the zero value, which is not an error at
+      any layer: the route answers 200 with the field silently ignored.
+
+    The struct tag has a key `quesry`, which binds nothing. Did you mean `query`?
+
+    Tag it `query:"author"`, or `param:` with a matching {wildcard}
+    in the pattern, or unexport the field.
