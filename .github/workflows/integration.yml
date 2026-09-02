@@ -1,0 +1,68 @@
+name: integration
+
+# The contract suites, against a real database. Split out of ci.yml on
+# 2026-09-02, and the split is the whole point.
+#
+# These need Docker and a live Postgres, which is exactly what AGENT.md's
+# unit-test rule forbids and why the Makefile keeps them out of `make ci`. A
+# job that cannot run in a pull request's environment has no business gating a
+# pull request — and this one did: it had failed on every run since PR #3
+# (`relation "users" does not exist`, a statement timeout mapped to the wrong
+# code), so the ci run was red before any change was reviewed, and PR #5
+# merged a genuinely red `test` job because a red ✗ had stopped meaning
+# anything.
+#
+# It is MOVED, not silenced. `continue-on-error` would have reported a failed
+# job as green, which is a lie told to every future reader. Moving a job to
+# the right trigger removes a false failure; continue-on-error hides a true
+# one. These suites still run — nightly, and on demand — and they still fail
+# loudly when they fail.
+#
+# The drift they exist to catch is real: the CONTENTION split (2026-08-08)
+# updated the memory driver and the CLI's repository template and left this
+# module's own contract FIXTURE returning the old code, with `make ci` green
+# the whole time.
+#
+# Postgres only. Kafka's suite needs topic setup this job would have to
+# duplicate, and `brokertest.Run` is still run by hand against a real broker —
+# say so rather than imply coverage that is not here.
+
+on:
+  workflow_dispatch:
+  schedule:
+    # 03:17 UTC daily. An odd minute, because the top of the hour is when
+    # GitHub's scheduler is most congested and most likely to drop a run.
+    - cron: "17 3 * * *"
+
+permissions:
+  contents: read
+
+jobs:
+  integration:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: warren
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+        ports:
+          - 5433:5432
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.27.x"
+      - name: persistence/postgres contract suites
+        env:
+          WARREN_TEST_POSTGRES_DSN: postgres://postgres:warren@localhost:5433/postgres?sslmode=disable
+        # `make workspace`, not a hand-copied module list: the Makefile's
+        # MODULES is the one place a new module gets registered, and a job
+        # duplicating that list is the drift ci.yml's lint job already had.
+        run: |
+          make workspace
+          cd persistence/postgres && go test -tags integration -count=1 ./...

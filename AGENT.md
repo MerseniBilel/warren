@@ -376,9 +376,40 @@ leak. When adding middleware, name which ring it is in, in the spec.
 
 ## Spec-driven development — write the spec first
 
-**No feature is implemented before its spec exists and is approved.** This is a
-hard process rule, not a suggestion, and it applies to you exactly as it applies
-to a human contributor.
+**No NEW PACKAGE and no PUBLIC API CHANGE is implemented before its spec exists
+and is approved.** This is a hard process rule, not a suggestion, and it
+applies to you exactly as it applies to a human contributor.
+
+### What needs a spec, and what does not
+
+**Amended 2026-09-02.** This rule used to read "no feature is implemented
+before its spec exists and is approved", with no exemption of any size. In the
+fortnight to 2026-09-02 the maintainer broke it three times — `transport`,
+`persistence` and `openapi` all shipped fixes to `main` under specs stamped
+"NOT APPROVED", and `openapi`'s spec was written *after* its own fix. When a
+rule is broken three times in two weeks by the person who wrote it, the rule
+is what is wrong: an unbounded spec requirement makes a one-line bug fix cost
+a review cycle, so it gets skipped, and skipping it becomes normal for the
+changes that genuinely needed it too.
+
+**A spec is required for:**
+
+- A **new package**, or a new module.
+- A change to **public API** — an exported signature, a port's shape, a module
+  boundary, the error table, or either of the two orderings.
+- A change to **shipped behaviour that stops working code from working**: a
+  new boot refusal, a new validation, a stricter driver. It is a compatibility
+  event whatever its size, and the human takes it.
+
+**A spec is NOT required for:** a bug fix inside an existing contract, tests,
+documentation, a diagnostic's wording, an internal refactor, or a new adapter
+implementing an existing port. Those go straight to a pull request. The code,
+its tests and its `warren.md` entry are the record — which is exactly what
+AGENT.md already says an implemented package's contract is.
+
+If you are unsure which side a change falls on, the question is not "how big
+is it" but **"can a user's working program stop working, or be written
+differently, because of this?"** Yes means spec.
 
 1. **Write the spec** in `SPEC.md` **inside the package directory it
    describes** — `errors/SPEC.md`, `di/SPEC.md`, `transport/http/SPEC.md`. It
@@ -453,7 +484,8 @@ open, in `cli/SPEC.md` open question 1.
 
 | If you are about to… | First… |
 |---|---|
-| Build any feature | Write or find `<package>/SPEC.md`. See above. An implemented package has no spec — its code, tests, and `warren.md` entry are the contract. |
+| Add a package, change public API, or make working code stop working | Write or find `<package>/SPEC.md`. See above. An implemented package has no spec — its code, tests, and `warren.md` entry are the contract. |
+| Fix a bug, add a test, write docs, or implement an existing port | Straight to a pull request. No spec — see the exemption above. |
 | Add a dependency | Read "Adding a dependency" below. This has a hard process. |
 | Change a port's shape, a module boundary, or a public API | Update [warren.md](warren.md) and get it agreed |
 | Touch anything structural | Read [warren.md](warren.md) |
@@ -660,8 +692,10 @@ Named specifically, because generic advice does not prevent them:
 10. **Naming a type `SomethingWithSomething`.** See Naming above.
 11. **Marking work complete with an unverified claim.** Run the command and
     paste what it printed. "Should work" is not a result.
-12. **Writing code for a feature that has no approved spec.** The spec is where
-    a feature is made small enough to finish.
+12. **Writing code for a new package or a public API change that has no
+    approved spec.** The spec is where such a change is made small enough to
+    finish. Bug fixes, tests, docs and adapters are exempt — see the
+    exemption under Spec-driven development, added 2026-09-02.
 13. **Letting the spec and the code drift apart.** If the implementation had to
     differ, the spec is corrected in the same pull request — not later.
 14. **Proposing a spike or a prototype.** Research it, put the options to the
