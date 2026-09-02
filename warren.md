@@ -2041,6 +2041,29 @@ and not over gRPC, which is the one protocol pair `Bind` exists to serve.
 `OnEvent` already exempted itself; gRPC was the odd one out. The check is now
 gated to `ProtocolHTTP`, which changes no signature and only relaxes an error.
 
+**`checkWildcards` refuses BOTH directions, since 2026-08-31.** A `param:` tag
+the pattern declares no wildcard for was always refused. The reverse — a
+`{wildcard}` no field carries a `param:` tag for — is refused too, and the
+asymmetry was arbitrary: either way that parameter binds `""` on every
+request, which is a 400 for ever where the field carries
+`validate:"required"` and an empty identifier reaching the handler where it
+does not, while the published document is invalid either way because
+`openapi` derives path parameters from `param:` tags alone and OpenAPI 3.1
+requires one per template expression.
+
+**There is a correct reading of the refused shape, and it costs one field.** A
+route may legitimately match a segment its handler ignores — a tenant guard
+reading `{tenant}` through `transport.ParamsFromContext` is the real case, and
+it works. The remedy is to declare the field anyway, which is what the
+framework's own multi-tenant test does (`transport/http/serve_test.go`'s
+`tenantReq`, on a handler that never reads it): it costs nothing at request
+time, because `bindParams` walks a precomputed index either way, and it makes
+the published document correct. **`Raw` is the opt-out for anyone who will
+not write it** — `Registrar.Raw` records directly and never enters
+`register`, so a raw route carries its own wildcards, un-described and
+un-refused. No third route was added: one exported symbol per objection is
+how a public API stops being a design.
+
 One more thing the gRPC adapter must not "fix" into the port: an all-default
 protobuf message encodes to ZERO BYTES, and the invoker skips `Codec.Decode`
 when the body is empty. On HTTP that is right — no bytes means no body. On

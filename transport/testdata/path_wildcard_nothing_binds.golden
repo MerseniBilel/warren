@@ -1,0 +1,16 @@
+✗ route registration failed
+
+  ✗ path wildcard nothing binds
+
+      pattern /books/{id} declares {id}, and no field of transport_test.wcNoParams carries `param:"id"`
+
+      Every request binds "" for it: with validate:"required" the route
+      400s for ever, without it the handler receives an empty identifier
+      and reports NOT_FOUND. The published OpenAPI path is invalid either
+      way — a templated segment with no parameter.
+
+    Add the field, even if the handler ignores it:
+
+        ID string `param:"id"`
+
+    or drop {id} from the pattern.

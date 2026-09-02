@@ -760,9 +760,11 @@ func (r *Registrar) OnEvent[Req, Res any](topic string, h app.Handler[Req, Res],
 		r.fail(errCannotValidate(topic, name, err))
 		return
 	}
-	setters, err := paramSetters(reflect.TypeFor[Req]())
-	if err != nil {
-		r.fail(err)
+	setters, setterErrs := paramSetters(reflect.TypeFor[Req]())
+	if len(setterErrs) > 0 {
+		for _, err := range setterErrs {
+			r.fail(err)
+		}
 		return
 	}
 	r.record(entry{
@@ -814,9 +816,11 @@ func (r *Registrar) register[Req, Res any](p Protocol, verb, pattern string, h a
 		r.fail(errCannotValidate(pattern, name, err))
 		return
 	}
-	setters, err := paramSetters(reflect.TypeFor[Req]())
-	if err != nil {
-		r.fail(err)
+	setters, setterErrs := paramSetters(reflect.TypeFor[Req]())
+	if len(setterErrs) > 0 {
+		for _, err := range setterErrs {
+			r.fail(err)
+		}
 		return
 	}
 	// HTTP only. A `param:` tag with no matching {wildcard} would bind "" on

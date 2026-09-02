@@ -1148,18 +1148,23 @@ func TestEveryJoinedFailureLeadsWithItsOwnHeadline(t *testing.T) {
 		}
 		indents[trimmed] = len(line) - len(trimmed)
 	}
+	// Absent and nested are different failures and the message must say
+	// which. Reading "nested in a sibling's" for a headline that was simply
+	// not in the report cost a reviewer real time on 2026-09-02: the
+	// duplicate had been swallowed upstream, not nested.
 	for _, want := range []string{"✗ nil handler", "✗ duplicate route"} {
-		if _, ok := indents[want]; !ok {
-			t.Errorf("no headline %q of its own — the failure is nested in a sibling's:\n%s", want, report)
+		if _, ok := indents[want]; ok {
+			continue
 		}
+		if strings.Contains(report, strings.TrimPrefix(want, "✗ ")) {
+			t.Errorf("%q appears in the report but not as a headline of its own — "+
+				"the failure is nested in a sibling's:\n%s", want, report)
+			continue
+		}
+		t.Errorf("%q is absent from the report entirely — the failure was "+
+			"swallowed before it could be joined:\n%s", want, report)
 	}
-	seen := map[int][]string{}
-	for headline, indent := range indents {
-		seen[indent] = append(seen[indent], headline)
-	}
-	if len(seen) > 1 {
-		t.Errorf("the joined failures sit at %d different indents, so one nests under another: %v\n%s", len(seen), seen, report)
-	}
+	assertOneIndent(t, report)
 }
 
 // concreteRegisterHandler is a CONCRETE handler struct — not an
@@ -1262,5 +1267,308 @@ func TestZeroRegistrarPanicsWithItsOwnDiagnostic(t *testing.T) {
 			var zero transport.Registrar
 			tc.call(&zero)
 		})
+	}
+}
+
+// --- the wildcard/param agreement check -----------------------------------
+//
+// transport refuses a route whose `param:` tags and whose pattern's wildcards
+// disagree, in BOTH directions. The forward half (a tag with no wildcard) is
+// covered by TestHTTPStillRefusesAParamWithNoWildcard and
+// TestGRPCAcceptsAParamTaggedHandler. What follows covers the reverse half,
+// which shipped on 2026-08-31 with no test at all — the whole mechanism of
+// that incident, since a boot check that refuses user code and is never
+// exercised is a check nobody can change safely.
+
+// wcNoParams binds no path parameter, so any pattern with a wildcard
+// disagrees with it.
+type wcNoParams struct {
+	Note string `json:"note"`
+}
+
+// wcRest binds a multi-segment wildcard. {rest...} declares the name "rest",
+// so that is the tag that satisfies it.
+type wcRest struct {
+	Rest string `param:"rest"`
+}
+
+// wcQueryOnly carries a query: tag for the same name as the wildcard. A query
+// parameter cannot satisfy a path wildcard, which is the point of the test.
+type wcQueryOnly struct {
+	ID string `query:"id"`
+}
+
+// wcOtherParam is the near miss: a `param:` field for a name the pattern does
+// not declare, beside a wildcard no field declares.
+type wcOtherParam struct {
+	BookID string `param:"bookID"`
+}
+
+func wcHandler[Req any]() app.Handler[Req, userDTO] {
+	return app.HandlerFunc[Req, userDTO](func(context.Context, Req) (userDTO, error) {
+		return userDTO{}, nil
+	})
+}
+
+// TestPathWildcardNothingBindsIsRefused pins the diagnostic itself. The
+// message is the product (AGENT.md invariant 2), so it gets a golden.
+func TestPathWildcardNothingBindsIsRefused(t *testing.T) {
+	t.Parallel()
+
+	b := transport.NewBuilder()
+	b.For("catalog").Get("/books/{id}", wcHandler[wcNoParams]())
+
+	_, err := b.Table()
+	if err == nil {
+		t.Fatal("a wildcard no field binds built a table")
+	}
+	assertGolden(t, "path_wildcard_nothing_binds", err.Error())
+}
+
+// TestTheHintNamesTheFieldTheUserMustWrite — the diagnostic's entire value is
+// that it can be pasted, so the field it prints has to be the field a Go
+// programmer would write, for THIS wildcard. The hint used to name the field
+// ID whatever the wildcard was called, so {rest...} was answered with a field
+// called ID tagged param:"rest" — a mismatch, and not code anyone would keep.
+func TestTheHintNamesTheFieldTheUserMustWrite(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		pattern string
+		want    string
+	}{
+		{"/books/{id}", "ID string `param:\"id\"`"},
+		{"/files/{rest...}", "Rest string `param:\"rest\"`"},
+		{"/tenants/{tenantId}/x", "TenantID string `param:\"tenantId\"`"},
+	} {
+		t.Run(tc.pattern, func(t *testing.T) {
+			t.Parallel()
+			b := transport.NewBuilder()
+			b.For("m").Get(tc.pattern, wcHandler[wcNoParams]())
+			_, err := b.Table()
+			if err == nil {
+				t.Fatalf("%s built a table", tc.pattern)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("the hint does not offer %q:\n%v", tc.want, err)
+			}
+		})
+	}
+}
+
+// TestBothSpellingsOfAWildcardAreChecked — {name} and {name...} declare the
+// same name, so the check treats them identically. wildcards() strips the
+// "..." for exactly this reason.
+func TestBothSpellingsOfAWildcardAreChecked(t *testing.T) {
+	t.Parallel()
+
+	t.Run("single segment, unbound", func(t *testing.T) {
+		t.Parallel()
+		b := transport.NewBuilder()
+		b.For("m").Get("/files/{id}", wcHandler[wcNoParams]())
+		if _, err := b.Table(); err == nil {
+			t.Fatal("{id} with no field built a table")
+		} else if !strings.Contains(err.Error(), `no field of transport_test.wcNoParams carries `+"`param:\"id\"`") {
+			t.Errorf("the diagnostic does not name {id} and the type:\n%v", err)
+		}
+	})
+
+	t.Run("multi segment, unbound", func(t *testing.T) {
+		t.Parallel()
+		b := transport.NewBuilder()
+		b.For("m").Get("/files/{rest...}", wcHandler[wcNoParams]())
+		if _, err := b.Table(); err == nil {
+			t.Fatal("{rest...} with no field built a table")
+		} else if !strings.Contains(err.Error(), `declares {rest}`) {
+			t.Errorf("the diagnostic must name the wildcard as {rest}, not {rest...}:\n%v", err)
+		}
+	})
+
+	t.Run("multi segment, bound by param:\"rest\"", func(t *testing.T) {
+		t.Parallel()
+		b := transport.NewBuilder()
+		b.For("m").Get("/files/{rest...}", wcHandler[wcRest]())
+		table, err := b.Table()
+		if err != nil {
+			t.Fatalf(`param:"rest" must satisfy {rest...}: %v`, err)
+		}
+		if got := len(table.HTTP()); got != 1 {
+			t.Errorf("route count = %d, want 1", got)
+		}
+	})
+}
+
+// TestAQueryTagDoesNotSatisfyAPathWildcard — a query parameter arrives in the
+// query string and never binds a path segment, so it cannot stand in for one.
+func TestAQueryTagDoesNotSatisfyAPathWildcard(t *testing.T) {
+	t.Parallel()
+
+	b := transport.NewBuilder()
+	b.For("m").Get("/books/{id}", wcHandler[wcQueryOnly]())
+	_, err := b.Table()
+	if err == nil {
+		t.Fatal(`query:"id" satisfied {id}`)
+	}
+	if !strings.Contains(err.Error(), "path wildcard nothing binds") {
+		t.Errorf("the diagnostic is not the unbound-wildcard one:\n%v", err)
+	}
+}
+
+// TestTwoUnboundWildcardsAreTwoSiblingFailures — one route, two mistakes, one
+// boot, two failures at the same indent. The spec's definition of done asks
+// for exactly this, and it is also the property that made checkWildcards
+// return a slice.
+func TestTwoUnboundWildcardsAreTwoSiblingFailures(t *testing.T) {
+	t.Parallel()
+
+	b := transport.NewBuilder()
+	b.For("m").Get("/a/{x}/b/{y}", wcHandler[wcNoParams]())
+	_, err := b.Table()
+	if err == nil {
+		t.Fatal("two unbound wildcards built a table")
+	}
+	report := err.Error()
+	for _, want := range []string{"declares {x}", "declares {y}"} {
+		if !strings.Contains(report, want) {
+			t.Errorf("the report does not carry %q:\n%s", want, report)
+		}
+	}
+	if got := countHeadlines(report, "✗ path wildcard nothing binds"); got != 2 {
+		t.Errorf("two unbound wildcards produced %d headlines, want 2:\n%s", got, report)
+	}
+	assertOneIndent(t, report)
+}
+
+// TestTheNearMissIsNamed — a `param:` field for a name the pattern does not
+// declare, beside a wildcard nothing declares a field for, is the likely
+// cause, and both halves of the check say so.
+func TestTheNearMissIsNamed(t *testing.T) {
+	t.Parallel()
+
+	b := transport.NewBuilder()
+	b.For("m").Get("/books/{id}", wcHandler[wcOtherParam]())
+	_, err := b.Table()
+	if err == nil {
+		t.Fatal("a near miss built a table")
+	}
+	report := err.Error()
+	for _, want := range []string{
+		"carries `param:` for {bookID} and nothing for {id}",
+		"has no {bookID} in the route pattern",
+	} {
+		if !strings.Contains(report, want) {
+			t.Errorf("the report does not carry %q:\n%s", want, report)
+		}
+	}
+	assertOneIndent(t, report)
+}
+
+// TestOnlyHTTPRoutesAreWildcardChecked — a gRPC full method is not a path and
+// HAS no wildcards; an event topic is not a path either; and Raw never enters
+// register, so it is the opt-out for a route that means to ignore a segment
+// it matches on. All three must register clean.
+func TestOnlyHTTPRoutesAreWildcardChecked(t *testing.T) {
+	t.Parallel()
+
+	t.Run("gRPC", func(t *testing.T) {
+		t.Parallel()
+		b := transport.NewBuilder()
+		b.For("m").Method("book.v1.BookService/Get", wcHandler[wcRest]())
+		if _, err := b.Table(); err != nil {
+			t.Errorf("a gRPC method must not be wildcard-checked: %v", err)
+		}
+	})
+
+	t.Run("OnEvent", func(t *testing.T) {
+		t.Parallel()
+		b := transport.NewBuilder()
+		b.For("m").OnEvent("book.created", wcHandler[wcRest]())
+		if _, err := b.Table(); err != nil {
+			t.Errorf("an event topic must not be wildcard-checked: %v", err)
+		}
+	})
+
+	t.Run("Raw", func(t *testing.T) {
+		t.Parallel()
+		b := transport.NewBuilder()
+		b.For("m").Raw(transport.ProtocolHTTP, "GET /raw/{tenant}/doc", &uploadHandler{})
+		table, err := b.Table()
+		if err != nil {
+			t.Fatalf("a raw route carries its own pattern and no request type: %v", err)
+		}
+		if got := len(table.Raw()); got != 1 {
+			t.Errorf("raw route count = %d, want 1", got)
+		}
+	})
+}
+
+// TestAPreJoinedFailureWouldNestUnderItsSibling — the regression test for
+// paramSetters, which returned errRegistration(errs) while the Builder joins
+// with the same function. The result was a second "✗ route registration
+// failed" standing where a headline belongs, with the real failure indented
+// beneath it. checkWildcards was fixed for this on 2026-08-31 and paramSetters
+// was not; nothing covered the difference.
+func TestAPreJoinedFailureWouldNestUnderItsSibling(t *testing.T) {
+	t.Parallel()
+
+	b := transport.NewBuilder()
+	r := b.For("m")
+	var nilHandler app.Handler[registerUser, userDTO]
+	r.Post("/users", nilHandler)
+	r.Get("/things/{id}", wcHandler[unbindableParam]())
+
+	_, err := b.Table()
+	if err == nil {
+		t.Fatal("an unbindable parameter built a table")
+	}
+	report := err.Error()
+	if got := countHeadlines(report, "✗ route registration failed"); got != 0 {
+		t.Errorf("the joined header appears %d times INSIDE the report — a "+
+			"pre-joined group is standing where a headline belongs:\n%s", got, report)
+	}
+	for _, want := range []string{"✗ nil handler", "✗ unsupported parameter type"} {
+		if !strings.Contains(report, want) {
+			t.Errorf("the report does not carry %q:\n%s", want, report)
+		}
+	}
+	assertOneIndent(t, report)
+}
+
+// unbindableParam tags a kind no string can be converted into, so
+// paramSetters refuses it.
+type unbindableParam struct {
+	ID chan int `param:"id"`
+}
+
+// countHeadlines counts the ✗ lines of a report whose trimmed text is exactly
+// headline. The report's own opening line is excluded — it is the join, not a
+// failure.
+func countHeadlines(report, headline string) int {
+	n := 0
+	for _, line := range strings.Split(report, "\n")[1:] {
+		if strings.TrimLeft(line, " ") == headline {
+			n++
+		}
+	}
+	return n
+}
+
+// assertOneIndent is the shared form of TestEveryJoinedFailureLeadsWithItsOwn
+// Headline's structural assertion: every ✗ after the header sits at the same
+// indent, because leading spaces are the only structure a terminal has.
+func assertOneIndent(t *testing.T, report string) {
+	t.Helper()
+	seen := map[int][]string{}
+	for _, line := range strings.Split(report, "\n")[1:] {
+		trimmed := strings.TrimLeft(line, " ")
+		if !strings.HasPrefix(trimmed, "✗ ") {
+			continue
+		}
+		indent := len(line) - len(trimmed)
+		seen[indent] = append(seen[indent], trimmed)
+	}
+	if len(seen) > 1 {
+		t.Errorf("the joined failures sit at %d different indents, so one nests under another: %v\n%s",
+			len(seen), seen, report)
 	}
 }

@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | **PROPOSED (2026-08-31) — NOT APPROVED.** One check, in a function that already exists, closing the reverse of a refusal the package already makes. It is a **boot-behaviour change**: applications that boot today will stop booting. |
+| **Status** | **APPROVED 2026-09-02 → IMPLEMENTED, PENDING REVIEW; retires on merge.** Shipped in `281365c` BEFORE approval and with none of the tests below — which is how it reached `main` red. Approved as it stands, with the "no correct reading" overclaim corrected (below) and the definition of done completed. It is a **boot-behaviour change**: applications that boot today stop booting. |
 | **Source** | Field test #14 (`fieldtest14/REPORT.md`, finding 7), verified against `transport/params.go:176-238` and `transport/transport.go:830-840` |
 | **Module** | core (`transport/`) — stdlib + dig |
 | **Mode** | Build |
@@ -56,21 +56,44 @@ The apparent minority is a route like `/tenants/{tenant}/books/{id}` whose
 handler binds only `{id}` while a core middleware reads the tenant out of
 `transport.ParamsFromContext`. That reading is available and would work.
 
-**It is not a legitimate minority, because it publishes an invalid document.**
-OpenAPI 3.1 requires every template expression in a path to have a
-corresponding path parameter, and `openapi`'s `parametersOf`
-(`openapi/emit.go:207`) derives parameters from `param:` tags alone. A
-wildcard no field binds is therefore a second defect wearing a disguise: the
-service serves a path segment its own published contract does not mention.
+**Corrected 2026-09-02. This section previously claimed the refusal "satisfies
+AGENT.md's requirement that a refusal have no correct reading". That was an
+overclaim, and an overclaim in a spec is the confident lie rule 4 exists to
+prevent — so here is the honest version.**
 
-The remedy is cheap and the diagnostic should say it plainly: **declare the
-field even if the handler ignores it.** One struct field with a `param:` tag
-makes the binding explicit, makes the document correct, and costs nothing at
-request time — `bindParams` walks a precomputed index either way.
+**There IS a correct reading. It costs one struct field, and `Raw` covers
+anyone who will not write it.** That is the argument for refusing, not the
+absence of a minority.
 
-This satisfies AGENT.md's requirement that a refusal have no correct reading,
-and it needs no opt-out for the same reason `checkWildcards`' forward
-direction has none.
+The minority is real: `transport.ParamsFromContext` is exported, documented
+and taught (`GETTING_STARTED.md`), and a guard reading `{tenant}` through it
+on a route whose request type binds only `{id}` is a program that works today.
+
+Three reasons the refusal still stands:
+
+1. **The document is wrong either way.** OpenAPI 3.1 requires every template
+   expression in a path to have a corresponding path parameter, and
+   `openapi`'s `parametersOf` (`openapi/emit.go:207`) derives parameters from
+   `param:` tags alone. A wildcard no field binds serves a path segment its
+   own published contract does not mention.
+2. **The remedy is one field, and it is what the framework's own suite
+   already writes.** `transport/http/serve_test.go`'s `tenantReq` declares
+   ``Tenant string `param:"tenant"` `` on a handler that never reads it. The
+   supposed aggrieved minority is already complying, voluntarily, in Warren's
+   own canonical multi-tenant test. It costs nothing at request time —
+   `bindParams` walks a precomputed index either way.
+3. **The opt-out already exists and is already exercised.** `Registrar.Raw`
+   calls `r.record` directly and never enters `register`, so a raw route's
+   wildcards are neither checked nor published;
+   `serve_test.go` registers `GET /raw/t/{tenant}/doc` with a
+   params-reading guard and no request struct at all, and it is green. A
+   second, narrower opt-out (`transport.IgnoreWildcard`) was proposed and
+   **rejected on 2026-09-02**: one exported symbol per objection is how a
+   public API stops being a design.
+
+AGENT.md's "no correct reading" test governs boot PANICS. This is a returned
+registration error joined with every other one, so that test does not bind it
+— which is just as well, because it would not pass it.
 
 ### It cannot false-positive on `Raw`
 
@@ -122,20 +145,53 @@ cause and the forward check already prints that class of hint.
 **ESCALATE — this stops applications booting that boot today.** Specifically:
 
 - Any route whose pattern declares a wildcard the request type does not bind.
-  In-repo: to be enumerated by running the check against
-  `transport/`, `transport/http/`, `openapi/`, `testing/`, the CLI's golden
-  projects and `fieldtest14/library` before implementation. The field test's
-  own repro is a deliberate one.
 - The remedy for every one of them is a one-line struct field, and the
   diagnostic quotes it.
 
+**ENUMERATED 2026-09-02, which is the step that was skipped before
+implementation.** `make ci` across all eight modules: the only failures were
+three test fixtures in `transport/transport_test.go`
+(`TestNilHandlerJoinsOtherRegistrationFailures`,
+`TestEveryJoinedFailureLeadsWithItsOwnHeadline`,
+`TestRegistrationNeedsNoTypeArguments`), all registering `/users/{id}` against
+a request type with no `param:` tag. Nothing in `transport/http/`, `openapi/`,
+`testing/`, `cli` or any adapter trips it: `warren g` writes a `param:` field
+per wildcard by construction (`cli/internal/generate/generate.go`, *"Every
+wildcard becomes a `param:` field"*), and the CLI's compile tests build and
+test generated trees against this checkout. `GETTING_STARTED.md`'s only
+wildcard route already declared its field.
+
+The one documentation defect the enumeration DID find: `GETTING_STARTED.md`'s
+tenant-guard section taught `p.Path("tenant")` without ever showing the route
+or the field it requires, so a reader following that page hit this boot
+failure from the page that taught them. Fixed in the same change.
+
 ## Definition of done
 
-- [ ] A wildcard no field binds fails registration, with the golden diagnostic.
-- [ ] Two unbound wildcards on one route produce two errors in one boot
+- [x] A wildcard no field binds fails registration, with the golden diagnostic.
+      `TestPathWildcardNothingBindsIsRefused`, golden
+      `transport/testdata/path_wildcard_nothing_binds.golden`.
+- [x] Two unbound wildcards on one route produce two errors in one boot
       failure, alongside any other registration error.
-- [ ] `{rest...}` binds the name `rest` (the existing `TrimSuffix`), so a
+      `TestTwoUnboundWildcardsAreTwoSiblingFailures`, and
+      `TestNilHandlerJoinsOtherRegistrationFailures` for the alongside half.
+- [x] `{rest...}` binds the name `rest` (the existing `TrimSuffix`), so a
       multi-segment wildcard is checked identically. Test both spellings.
-- [ ] A `query:` setter does NOT satisfy a path wildcard.
-- [ ] `Raw`, `OnEvent` and `ProtocolGRPC` routes are unaffected. Test each.
-- [ ] warren.md §4.2 records both directions of the check, not one.
+      `TestBothSpellingsOfAWildcardAreChecked`, three subtests.
+- [x] A `query:` setter does NOT satisfy a path wildcard.
+      `TestAQueryTagDoesNotSatisfyAPathWildcard`.
+- [x] `Raw`, `OnEvent` and `ProtocolGRPC` routes are unaffected. Test each.
+      `TestOnlyHTTPRoutesAreWildcardChecked`, three subtests.
+- [x] warren.md §4.2 records both directions of the check, not one.
+
+Added while completing the above, and not in the original list:
+
+- [x] The near-miss hint names the field the user must write, for THIS
+      wildcard. The hint hardcoded `ID` whatever the wildcard was called, so
+      `{rest...}` was answered with ``ID string `param:"rest"` `` — wrong code in
+      a diagnostic whose whole value is that it can be pasted.
+      `TestTheHintNamesTheFieldTheUserMustWrite`.
+- [x] The near-miss diagnostic names the tagged field beside the unbound
+      wildcard. `TestTheNearMissIsNamed`.
+- [x] `GETTING_STARTED.md` shows the route and the declared-but-ignored field,
+      and names `Raw` as the alternative.

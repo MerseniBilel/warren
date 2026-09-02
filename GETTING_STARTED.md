@@ -945,6 +945,48 @@ empty one would answer `("", false)` for every name, which reads as "no such
 parameter" and lets a policy conclude it has nothing to check. The nil forces
 the choice to be written down.
 
+**The route has to declare the field, even though the handler never reads it.**
+This is the half that catches people: the policy above reads `{tenant}` out of
+the context, so it is tempting to leave `{tenant}` out of the request type. A
+wildcard no `param:` field binds is a **boot failure** — transport refuses it,
+because that parameter would bind `""` on every request and the published
+OpenAPI path would be a templated segment with no parameter. Write it:
+
+```go
+type readDocument struct {
+	// Bound and ignored. The route matches {tenant}, the guard reads it out
+	// of the context, and this field is what makes both of those legal.
+	Tenant string `param:"tenant"`
+
+	ID string `param:"id"`
+}
+
+func (c *Controller) Register(r *transport.Registrar) {
+	r.Get("/tenants/{tenant}/documents/{id}", c.read,
+		transport.Guard(sameTenant{}))
+}
+```
+
+If you will not write the field, `r.Raw` is the opt-out: a raw route carries
+its own pattern and has no request type, so nothing is checked and nothing is
+published for it. Guards still see the parameters — that is deliberate, and
+`transport/http`'s own suite pins it.
+
+The refusal reads:
+
+```
+✗ path wildcard nothing binds
+
+    pattern /tenants/{tenant}/documents/{id} declares {tenant}, and no field
+    of application.ReadDocument carries `param:"tenant"`
+
+  Add the field, even if the handler ignores it:
+
+      Tenant string `param:"tenant"`
+
+  or drop {tenant} from the pattern.
+```
+
 **Where this file goes matters.** It imports `warren/transport`, so
 `warren lint arch` will refuse it in `application/` or `domain/` — a handler
 imports no transport package, and that holds through a helper too. Put a

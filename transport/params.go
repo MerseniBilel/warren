@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"unicode"
 
 	"github.com/MerseniBilel/warren/errors"
 )
@@ -24,7 +25,12 @@ type setter struct {
 // cannot bind. An unsupported kind is a registration error, not a silent
 // skip: a path parameter that never arrives is a bug that would surface as a
 // zero value on request 1.
-func paramSetters(t reflect.Type) ([]setter, error) {
+//
+// Like checkWildcards it returns its failures INDIVIDUALLY, for the same
+// reason: the Builder joins every registration failure with errRegistration,
+// which indents what it wraps, so a group pre-joined here arrived one indent
+// deeper than its siblings and read as nested under one of them.
+func paramSetters(t reflect.Type) ([]setter, []error) {
 	if t == nil || t.Kind() != reflect.Struct {
 		return nil, nil
 	}
@@ -62,7 +68,7 @@ func paramSetters(t reflect.Type) ([]setter, error) {
 		out = append(out, setter{name: name, query: query, index: []int{i}, set: set})
 	}
 	if len(errs) > 0 {
-		return nil, errRegistration(errs)
+		return nil, errs
 	}
 	return out, nil
 }
@@ -162,40 +168,18 @@ func bindParams(req any, p Params, setters []setter) error {
 	return nil
 }
 
-// checkWildcards refuses a `param:` tag the route pattern has no wildcard
-// for. Both facts are known here, at registration, and the alternative is a
-// field that binds "" on every request: the handler looks up the zero value
-// and returns NOT_FOUND, so the service boots, serves, and is wrong.
+// checkWildcards refuses a route whose `param:` tags and whose pattern's
+// wildcards do not describe the same path parameters. Both directions fail:
+// a tag with no wildcard, and a wildcard with no tag.
 //
-// Renaming a path segment without renaming the tag is the ordinary way to
-// reach it, and nothing in the response says the parameter never arrived.
+// Either way that parameter binds "" on every request — a 400 for ever where
+// the field carries validate:"required", an empty identifier reaching the
+// handler where it does not — and the published OpenAPI path is invalid,
+// because openapi derives parameters from `param:` tags alone. Only PATH
+// parameters are checked: a query: tag has no wildcard by definition and
+// cannot satisfy one, and Raw routes never reach here.
 //
-// BOTH directions are checked, and the second sentence of this comment used
-// to deny the second one: "a pattern with a wildcard nothing binds is
-// legitimate — a route may ignore a segment it matches on." It is not
-// legitimate, and field test #14 measured why. A {id} no field binds boots
-// green and then fails every request — 400 for ever where the field carries
-// validate:"required", and an empty identifier reaching the handler where it
-// does not — while the published OpenAPI path is invalid either way, because
-// OpenAPI 3.1 requires a path parameter for every template expression and
-// openapi derives parameters from `param:` tags alone. A route that ignores a
-// segment it matches on is therefore serving a path its own published
-// contract does not mention.
-//
-// The remedy is one struct field, and it costs nothing at request time —
-// bindParams walks a precomputed index either way — so the diagnostic names it
-// rather than offering an opt-out.
-//
-// Only PATH parameters are checked. A query: tag has no wildcard by
-// definition, and cannot satisfy one.
-// It returns the failures INDIVIDUALLY rather than pre-joined. errRegistration
-// indents what it wraps, and the Builder joins every registration failure with
-// the same function at boot — so a pre-joined group arrived one indent deeper
-// than its siblings and read as nested under one of them. Returning a slice
-// makes each failure a sibling, which is what
-// TestEveryJoinedFailureLeadsWithItsOwnHeadline asserts and what the forward
-// check had quietly been getting wrong too, for want of a second failure to
-// stand beside.
+// Failures are returned individually rather than pre-joined; see paramSetters.
 func checkWildcards(pattern, reqType string, setters []setter) []error {
 	var missing []setter
 	for _, s := range setters {
@@ -247,7 +231,8 @@ func checkWildcards(pattern, reqType string, setters []setter) []error {
 		// The near miss is the likely cause, and the forward half already
 		// prints this class of hint: a field tagged for a name the pattern
 		// does not declare, beside a wildcard nothing declares a field for.
-		hint := fmt.Sprintf("  Add the field, even if the handler ignores it:\n\n      ID string `param:%q`\n\n  or drop {%s} from the pattern.", w, w)
+		hint := fmt.Sprintf("  Add the field, even if the handler ignores it:\n\n      %s string `param:%q`\n\n  or drop {%s} from the pattern.",
+			fieldNameFor(w), w, w)
 		var tagged []string
 		for _, s := range setters {
 			if !s.query {
@@ -267,6 +252,33 @@ func checkWildcards(pattern, reqType string, setters []setter) []error {
 			pattern, w, reqType, w, hint)))
 	}
 	return errs
+}
+
+// fieldNameFor spells a wildcard as the exported Go field the diagnostic tells
+// the user to write. A diagnostic whose whole value is that it can be pasted
+// must print code that compiles and reads like Go: the hint used to hardcode
+// "ID string `param:\"rest\"`" whatever the wildcard was called.
+//
+// The rule mirrors `warren g`'s fieldName (cli/internal/generate/generate.go),
+// so the field this names is the field the generator would have written. They
+// are in different modules and cannot share a function; they must not drift.
+//
+// net/http requires a wildcard name to be a valid Go identifier, so there is
+// nothing else to sanitise.
+func fieldNameFor(param string) string {
+	if param == "" {
+		return "Field"
+	}
+	r := []rune(param)
+	r[0] = unicode.ToUpper(r[0])
+	name := string(r)
+	switch {
+	case name == "Id":
+		return "ID"
+	case strings.HasSuffix(name, "Id"):
+		return strings.TrimSuffix(name, "Id") + "ID"
+	}
+	return name
 }
 
 // hasWildcard reports whether pattern declares {name} or {name...}.
