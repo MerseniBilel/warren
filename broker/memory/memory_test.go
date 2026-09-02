@@ -267,9 +267,28 @@ func TestADroppedDispositionIsNotSilent(t *testing.T) {
 }
 
 // TestMessagesAbandonedAtShutdownAreCounted — Subscribe's doc says a
-// cancelled context is "a drain, not an abort", but the buffered queue was
-// abandoned with the goroutine: five messages published, one handled, four
-// discarded, and the shutdown log said only "stopped".
+// cancelled context is "a drain, not an abort", meaning the IN-FLIGHT message
+// finishes and the queue behind it does not. The queue used to be abandoned
+// with the goroutine and nothing said so: five messages published, one
+// handled, four discarded, and the shutdown log read only "stopped".
+//
+// This test was itself flaky — ~17% on unmodified main, burning 5s each time
+// — and the flake was a symptom, not a test defect. deliver's select had both
+// its cases ready once the context was cancelled with messages queued, and Go
+// chooses among ready cases at random, so the loop sometimes drained the
+// queue instead of abandoning it and there was nothing to report. See the
+// priority check in deliver.
+//
+// Everything below is now ordered rather than raced. Three things make it so,
+// and each replaced a source of nondeterminism:
+//
+//   - Subscribe is called on THIS goroutine. It registers before returning,
+//     so one publish cannot miss the subscription — the old version published
+//     "wedge" in a 20ms polling loop against a 5s deadline because it started
+//     Subscribe in a goroutine and could not know when registration had run.
+//   - The four messages are queued while the handler is provably wedged, so
+//     the queue depth at cancellation is exactly four.
+//   - Cancellation is observed before any queued message, by contract.
 func TestMessagesAbandonedAtShutdownAreCounted(t *testing.T) {
 	t.Parallel()
 
@@ -280,51 +299,54 @@ func TestMessagesAbandonedAtShutdownAreCounted(t *testing.T) {
 	entered := make(chan struct{})
 	release := make(chan struct{})
 	var once sync.Once
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		_ = b.Subscribe(ctx, "t", func(context.Context, broker.Message) error {
-			once.Do(func() { close(entered) })
-			<-release
-			return nil
-		})
-	}()
-
-	// Wedge the handler, then queue more behind it. Published in a loop
-	// because a topic with no LIVE subscription accepts and discards, so a
-	// single publish can land before Subscribe has registered.
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		if err := b.Publish(context.Background(), "t", broker.Message{ID: "wedge", Type: "t"}); err != nil {
-			t.Fatalf("Publish: %v", err)
-		}
-		select {
-		case <-entered:
-		case <-time.After(20 * time.Millisecond):
-			if time.Now().After(deadline) {
-				t.Fatal("the handler never started")
-			}
-			continue
-		}
-		break
+	if err := b.Subscribe(ctx, "t", func(context.Context, broker.Message) error {
+		once.Do(func() { close(entered) })
+		<-release
+		return nil
+	}); err != nil {
+		t.Fatalf("Subscribe: %v", err)
 	}
+
+	// Wedge the handler. Subscribe has returned, so the subscription is live
+	// and this one publish is delivered.
+	if err := b.Publish(context.Background(), "t", broker.Message{ID: "wedge", Type: "t"}); err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the handler never started")
+	}
+
+	// Queue four behind the wedged handler. Publish returns once the message
+	// is in the buffered queue, so all four are queued before cancel.
 	for i := range 4 {
 		if err := b.Publish(context.Background(), "t", broker.Message{ID: "q-" + strconv.Itoa(i), Type: "t"}); err != nil {
 			t.Fatalf("Publish %d: %v", i, err)
 		}
 	}
 
+	// Cancel while the handler is still inside the queue's first message,
+	// then let it finish. The loop's next decision is cancellation, by
+	// contract rather than by luck.
 	cancel()
 	close(release)
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("Subscribe did not return")
-	}
 
 	waitFor(t, &buf, "abandoned")
-	if logged := buf.String(); !strings.Contains(logged, "abandoned") {
-		t.Errorf("nothing said the queued messages were discarded:\n%s", logged)
+	logged := buf.String()
+	if !strings.Contains(logged, "abandoned") {
+		t.Fatalf("nothing said the queued messages were discarded:\n%s", logged)
+	}
+	// The COUNT is the assertion that pins the determinism. "abandoned"
+	// alone was satisfied by any non-empty queue, so a loop that drained
+	// three of four still passed — which is how a coin flip hid here.
+	if !strings.Contains(logged, `"count":4`) {
+		t.Errorf("exactly four messages were queued at cancellation; the report does not say four:\n%s", logged)
+	}
+	for i := range 4 {
+		if id := "q-" + strconv.Itoa(i); !strings.Contains(logged, id) {
+			t.Errorf("the report does not name the abandoned message %s:\n%s", id, logged)
+		}
 	}
 }
 

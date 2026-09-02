@@ -174,6 +174,34 @@ func (b *Broker) deliver(ctx context.Context, topic string, s *subscription, h b
 	}()
 
 	for {
+		// CANCELLATION HAS PRIORITY OVER A QUEUED MESSAGE, and this
+		// non-blocking check is what makes that true.
+		//
+		// The loop below is a single select over two cases that are BOTH
+		// ready once the context is cancelled with messages still queued,
+		// and the Go spec chooses among ready cases by uniform pseudo-random
+		// selection. So each iteration was a coin flip between abandoning
+		// the queue and handling one more message off it — with four queued,
+		// a one-in-sixteen chance of draining the lot and reporting nothing.
+		//
+		// Two things were wrong with that, and the second is the serious one.
+		// Subscribe's own doc comment promises delivery runs "until ctx is
+		// cancelled" and that "the in-flight message finishes first, so
+		// cancellation is a drain, not an abort" — the in-flight message,
+		// singular, not the queue behind it. And abandon exists to report
+		// what a shutdown lost: a report that appears for some shutdowns and
+		// not for others, over identical inputs, is worse than no report,
+		// because an operator reads its absence as "nothing was lost".
+		//
+		// It surfaced as a 17% flake in TestMessagesAbandonedAtShutdownAre
+		// Counted, which is how it was found. The flake was the symptom.
+		select {
+		case <-ctx.Done():
+			b.abandon(ctx, topic, s)
+			return
+		default:
+		}
+
 		select {
 		case msg := <-s.queue:
 			// The handler's error is the chain's business and the
