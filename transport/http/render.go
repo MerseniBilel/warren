@@ -351,10 +351,51 @@ func (s *server) methodNotAllowed(allow string) http.Handler {
 
 // notFound is the catch-all. It also answers a wrong method on "/" itself,
 // whose pattern is this one, which is why it carries rootAllow.
-func (s *server) notFound(rootAllow string) http.Handler {
+// probeMethods is the set the catch-all asks the mux about when deciding
+// between 404 and 405. It is the standard request methods: Registrar emits
+// five of them, and a raw route or a Handle option may name any.
+var probeMethods = [...]string{
+	http.MethodGet, http.MethodHead, http.MethodPost, http.MethodPut,
+	http.MethodPatch, http.MethodDelete, http.MethodOptions,
+	http.MethodConnect, http.MethodTrace,
+}
+
+// notFoundOrMethodNotAllowed serves everything the mux did not match: a JSON
+// 404 envelope instead of net/http's bare text, or a 405 with Allow when the
+// PATH exists and only the method is wrong.
+//
+// Allow is derived by asking the mux itself — for each standard method, would
+// this exact path have matched a real pattern? Anything that answers with a
+// pattern other than the catch-all's own "/" is a method this path serves.
+//
+// That replaces a per-path method-less registration whose only job was to
+// render this envelope, and which made a literal segment beside a sibling
+// wildcard unregisterable (see build). Three properties come out of asking
+// the mux rather than keeping a parallel table:
+//
+//   - Allow cannot drift from the routes, because it IS the routes.
+//   - HEAD is included wherever GET is, because ServeMux serves HEAD from a
+//     GET pattern. The old table had to remember to add it.
+//   - A path served only through a wildcard reports the wildcard's methods,
+//     which is what the request would actually have reached.
+//
+// It runs only on the miss path, never on a matched route, and it is at most
+// nine pure lookups.
+func (s *server) notFoundOrMethodNotAllowed() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if rootAllow != "" && r.URL.Path == "/" {
-			s.methodNotAllowed(rootAllow).ServeHTTP(w, r)
+		var allowed []string
+		for _, m := range probeMethods {
+			// A shallow copy: Handler reads Method, URL and Host and mutates
+			// nothing, so cloning the whole request would be waste on a path
+			// that is already an error.
+			probe := *r
+			probe.Method = m
+			if _, pattern := s.mux.Handler(&probe); pattern != "" && pattern != "/" {
+				allowed = append(allowed, m)
+			}
+		}
+		if len(allowed) > 0 {
+			s.methodNotAllowed(allowHeader(allowed)).ServeHTTP(w, r)
 			return
 		}
 		writeJSON(w, http.StatusNotFound, errorBody{Error: errorPayload{
