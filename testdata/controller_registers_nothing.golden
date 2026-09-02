@@ -1,6 +1,6 @@
 ✗ controller registers nothing
 
-    module "greeter" (warren/module.go:14)
+    module "greeter" (module.go:14)
       └─ warren.Controllers lists a constructor returning *warren_test.silentController,
            which has no Register(*transport.Registrar) method.
 

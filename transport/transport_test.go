@@ -1087,8 +1087,8 @@ func TestNilHandlerJoinsOtherRegistrationFailures(t *testing.T) {
 	r := b.For("user")
 	var h app.Handler[registerUser, userDTO]
 	r.Post("/users", h)
-	good := app.Handler[registerUser, userDTO](app.HandlerFunc[registerUser, userDTO](
-		func(context.Context, registerUser) (userDTO, error) { return userDTO{}, nil }))
+	good := app.Handler[getUser, userDTO](app.HandlerFunc[getUser, userDTO](
+		func(context.Context, getUser) (userDTO, error) { return userDTO{}, nil }))
 	r.Get("/users/{id}", good)
 	r.Get("/users/{id}", good)
 
@@ -1120,8 +1120,8 @@ func TestEveryJoinedFailureLeadsWithItsOwnHeadline(t *testing.T) {
 	r := b.For("user")
 	var nilHandler app.Handler[registerUser, userDTO]
 	r.Post("/users", nilHandler)
-	good := app.Handler[registerUser, userDTO](app.HandlerFunc[registerUser, userDTO](
-		func(context.Context, registerUser) (userDTO, error) { return userDTO{}, nil }))
+	good := app.Handler[getUser, userDTO](app.HandlerFunc[getUser, userDTO](
+		func(context.Context, getUser) (userDTO, error) { return userDTO{}, nil }))
 	r.Get("/users/{id}", good)
 	r.Get("/users/{id}", good)
 
@@ -1172,6 +1172,18 @@ func (concreteRegisterHandler) Handle(context.Context, registerUser) (userDTO, e
 	return userDTO{ID: "u1"}, nil
 }
 
+// concreteGetHandler is the same proof for a route that CARRIES a wildcard.
+// registerUser cannot serve one: it binds no path parameter, and a {id} no
+// field binds is a registration failure. Giving registerUser a `param:"id"`
+// is not the alternative — it is registered at POST /users in nine places,
+// and a param: tag with no matching wildcard is refused in the other
+// direction. Two request types is what the two route shapes actually need.
+type concreteGetHandler struct{}
+
+func (concreteGetHandler) Handle(_ context.Context, q getUser) (userDTO, error) {
+	return userDTO{ID: q.ID}, nil
+}
+
 // TestRegistrationNeedsNoTypeArguments pins §3.5's headline ergonomic claim:
 // every registration method infers [Req, Res] from the handler, so a call site
 // writes none. This is a COMPILE-TIME assertion — if inference regressed, this
@@ -1185,11 +1197,13 @@ func TestRegistrationNeedsNoTypeArguments(t *testing.T) {
 	r := b.For("user")
 	h := concreteRegisterHandler{}
 
+	g := concreteGetHandler{}
+
 	r.Post("/users", h)
-	r.Get("/users/{id}", h)
-	r.Put("/users/{id}", h)
-	r.Patch("/users/{id}", h)
-	r.Delete("/users/{id}", h)
+	r.Get("/users/{id}", g)
+	r.Put("/users/{id}", g)
+	r.Patch("/users/{id}", g)
+	r.Delete("/users/{id}", g)
 	r.Method("user.v1.UserService/Register", h)
 	r.OnEvent("user.registered", h)
 

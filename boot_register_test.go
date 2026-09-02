@@ -2,7 +2,6 @@ package warren_test
 
 import (
 	"context"
-	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -143,7 +142,7 @@ func TestControllerWithoutRegisterFailsTheBoot(t *testing.T) {
 	if err == nil {
 		t.Fatal("a Controllers entry that is not a controller must fail the boot")
 	}
-	got := regexp.MustCompile(`\w+_test\.go:\d+`).ReplaceAllString(err.Error(), "module.go:14")
+	got := normaliseSite(err.Error(), "module.go:14")
 	assertGolden(t, "controller_registers_nothing", got)
 }
 
@@ -891,9 +890,13 @@ func TestAComponentThatTakesTheLifecycleAndIsNeverBuiltFailsTheBoot(t *testing.T
 			t.Errorf("diagnostic does not mention %q:\n%s", want, err)
 		}
 	}
-	// The module's declaration site is a file:line in THIS file and moves
-	// whenever the test moves, so it is normalised out of the golden.
-	assertGolden(t, "component_never_built", declSite.ReplaceAllString(err.Error(), "warren_test.go:00"))
+	// The module's declaration site is a directory and a file:line that both
+	// move — the line whenever this test moves, the directory whenever the
+	// checkout is named anything but "warren" — so both are normalised out of
+	// the golden. The old normalisation matched "warren_test.go" literally and
+	// this site is in boot_register_test.go, so it matched NOTHING and the
+	// golden pinned a real line number as well as the checkout name.
+	assertGolden(t, "component_never_built", normaliseSite(err.Error(), "warren_test.go:00"))
 }
 
 // The same rule for health: a check nobody builds registers nothing, and
