@@ -4,7 +4,6 @@ import (
 	"context"
 	"os"
 	"testing"
-	"time"
 
 	"github.com/MerseniBilel/warren"
 	"github.com/MerseniBilel/warren/persistence"
@@ -13,7 +12,7 @@ import (
 	"example.com/myapp/internal/modules/billing/domain"
 )
 
-// TestPaymentRepositoryContract runs the framework's own repository
+// TestPaymentPostgresRepositoryContract runs the framework's own repository
 // contract against this implementation, on a real database.
 //
 // It is generated because passing it is not optional and failing to run it is
@@ -26,15 +25,15 @@ import (
 // Delete it and you are back to a green build over a repository that silently
 // drops events. Edit the SQL and re-run this first.
 //
-// It is an in-package test on purpose: NewPaymentRepository returns the
+// It is an in-package test on purpose: NewPaymentPostgresRepository returns the
 // domain PORT, and the contract covers the whole Repository surface —
 // including the Delete the port does not declare.
-func TestPaymentRepositoryContract(t *testing.T) {
-	persistence.RunContract(t, connectPaymentRepository(t), newPaymentForContract,
+func TestPaymentPostgresRepositoryContract(t *testing.T) {
+	persistence.RunContract(t, connectPaymentPostgresRepository(t), newPaymentForContract,
 		domain.PaymentID("contract-1"), domain.PaymentID("contract-2"))
 }
 
-// TestPaymentRepositoryVersionedContract certifies the optimistic lock
+// TestPaymentPostgresRepositoryVersionedContract certifies the optimistic lock
 // against a real server, which is the only place it can be certified: the
 // check is `WHERE version = $n` and a rows-affected count, and only a real
 // database proves the UPDATE matches nothing once the version has moved.
@@ -42,21 +41,21 @@ func TestPaymentRepositoryContract(t *testing.T) {
 // The loser gets CodeContention — never CodeConflict, which app.Retrying does
 // not retry and which a consumer ACKS, destroying the message with its work
 // not done.
-func TestPaymentRepositoryVersionedContract(t *testing.T) {
-	persistence.RunVersionedContract(t, connectPaymentRepository(t), newPaymentForContract,
+func TestPaymentPostgresRepositoryVersionedContract(t *testing.T) {
+	persistence.RunVersionedContract(t, connectPaymentPostgresRepository(t), newPaymentForContract,
 		domain.PaymentID("version-1"), domain.PaymentID("version-2"),
 		domain.PaymentID("version-3"), domain.PaymentID("version-4"),
 		domain.PaymentID("version-5"), domain.PaymentID("version-6"),
 		domain.PaymentID("version-7"), domain.PaymentID("version-8"))
 }
 
-// connectPaymentRepository boots a pool once, applies the migrations, and
+// connectPaymentPostgresRepository boots a pool once, applies the migrations, and
 // returns the per-subtest factory the suite calls.
 //
 // It SKIPS when there is no database — and the message says what stopped being
 // checked, not merely what is missing, because a skip that reads like an
 // environment problem is a skip nobody acts on.
-func connectPaymentRepository(t *testing.T) persistence.NewDriver[*domain.Payment, domain.PaymentID] {
+func connectPaymentPostgresRepository(t *testing.T) persistence.NewDriver[*domain.Payment, domain.PaymentID] {
 	t.Helper()
 
 	dsn := os.Getenv("MYAPP_DATABASE_URL")
@@ -126,7 +125,7 @@ To run it:
 		if _, err := db(ctx).Exec(ctx, `DELETE FROM payments`); err != nil {
 			t.Fatalf("emptying payments: %v", err)
 		}
-		return uow, &PaymentRepository{db: db}
+		return uow, &PaymentPostgresRepository{db: db}
 	}
 }
 
@@ -135,6 +134,34 @@ type paymentContractProbe struct{}
 // newPaymentForContract builds a payment with a pending event.
 // The pending event is the measurement: the suite asserts it is gone after a
 // commit, which is only true if the repository enlisted the aggregate.
+//
+// THIS IS THE ONE FUNCTION IN THIS FILE YOU HAVE TO WRITE, and it is one line.
+// The generator cannot write it, because your constructor is yours: `warren g
+// entity` tells you to "add the fields the invariants need", and the moment
+// you do, NewPayment's signature stops matching anything a template could
+// have guessed.
+//
+// It FAILS AT RUN TIME rather than at compile time, deliberately. A generated
+// call with the wrong arguments made this file stop compiling, and the path of
+// least resistance for a hurried engineer is to delete the file that will not
+// build — which, as the header of this one says, returns you to a repository
+// that silently drops events. A test that fails with an instruction is
+// survivable; a package that does not compile is not.
+//
+// Replace the panic with your constructor:
+//
+//	return domain.NewPayment(id, "a name", 1, time.Unix(1, 0).UTC())
+//
+// (and add "time" to the imports if your constructor takes a timestamp — this
+// file does not import it, because a generated file that does not compile is
+// exactly what this function exists to avoid).
+//
+// Whatever it takes, the aggregate it returns must carry at least one PENDING
+// EVENT — a fresh one from your constructor does, which is the whole point of
+// raising the created event there.
 func newPaymentForContract(id domain.PaymentID) *domain.Payment {
-	return domain.NewPayment(id, time.Unix(1, 0).UTC())
+	panic("fill in newPaymentForContract, in " +
+		"payment_repository_postgres_test.go — it must return a " +
+		"*domain.Payment built by your own constructor and carrying a pending " +
+		"event. The comment above it has the line to write.")
 }

@@ -1,0 +1,22 @@
+// Package migrations carries this project's schema, compiled INTO the binary.
+//
+// It is embedded rather than read from disk because cmd/migrate is a deploy
+// step: it runs from wherever the deploy job puts it — a container's
+// WORKDIR, /usr/local/bin, a CI runner's temp directory — and almost never
+// from the repository root. Reading `db/migrations` with a relative path
+// worked in development and then, in the one place it exists to run, applied
+// Warren's own tables, failed to find yours, and exited 1 with the database
+// half-migrated.
+//
+// A file added to this directory is picked up by the next build. A file
+// RENAMED after it has been applied is a new migration, because
+// warren_schema_migrations records bare filenames.
+package migrations
+
+import "embed"
+
+// FS is every .sql file beside this one, in name order — so zero-pad:
+// "00010" sorts after "00009", "10" does not.
+//
+//go:embed *.sql
+var FS embed.FS

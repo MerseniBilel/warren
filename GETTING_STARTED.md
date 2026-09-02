@@ -586,10 +586,10 @@ than the provider list, though, and this section used to say otherwise:
 
 | What changes | Written by |
 |---|---|
-| `<agg>_repository.go` (postgres) | `warren g repository --driver postgres` |
+| `<agg>_repository_postgres.go` | `warren g repository --driver postgres` — its own file and its own type, so it sits beside the memory one below rather than overwriting it |
 | every feature's `warren.Imports`, which gains `platform.Postgres()` | you |
 | `platform` itself, which loses the memory unit of work, outbox and inbox | you |
-| `<agg>_repository_memory.go`, if you want offline tests | **nobody** |
+| the memory repository, if you want offline tests | **nobody** (`warren g repository` writes one, and you keep it) |
 | a `MemoryModule` per feature | **nobody** |
 | `platform.Memory` | **nobody** (only `warren new --db postgres` writes one) |
 
@@ -599,10 +599,29 @@ its pool is `Eager`, so it dials whether or not anything injects it, and no
 substitution prevents that because nothing in Warren removes a module from a
 graph. So `warrentest.NewModuleTest(t, notes.Module())` on a Postgres project
 fails with `✗ postgres connection string is empty` unless the feature also
-declares a memory-only twin. A field test measured the cost on a two-feature
-service: **196 lines of memory repositories and two `MemoryModule`
-declarations**, all hand-maintained, and a `MemoryModule` that drifts from
-`Module` means your tests boot a graph your service does not.
+declares a memory-only twin. Two field tests have now measured the cost on a
+two-feature service, and the second measured it higher: **277 lines that exist
+only so `go test ./...` runs without Docker** — memory repositories, a
+`MemoryModule` per feature, *and an offline twin of `platform` itself*, which
+the first measurement (196) missed and which is the piece people do not see
+coming.
+
+**The twin drifts, and it drifts quietly.** The second field test's
+`platform.Memory()` omitted `newRelay` and `warren.Eager[*outbox.Relay]()`,
+which `platform.Module()` has. Nothing failed to compile. What happened
+instead:
+
+```
+--- FAIL: TestOrderPublishesOrderPlaced
+    api_test.go:40: warrentest: no "order.placed" was published. Published topics: none
+--- FAIL: TestInventoryReservesStockFromTheEvent
+    api_test.go:95: stock never reserved
+```
+
+Two tests failing for a reason that has nothing to do with the code under
+test, ten minutes after the twin was written. If you keep a twin, diff it
+against the real module whenever either changes — that is a review habit, not
+a mechanism, which is exactly why the real fix is scheduled below.
 
 **This is a known gap, not a design position.** `App.Without(...)` — dropping a
 module from the graph so a real one can be replaced wholesale, the way
@@ -820,11 +839,35 @@ ctx := context.Background()
 // migrations cannot be pointed at two different databases.
 dsn := os.Getenv("NOTES_DATABASE_URL")
 if err := postgres.Migrate(ctx, dsn, postgres.Schema); err != nil { log.Fatal(err) }
-if err := postgres.Migrate(ctx, dsn, schema.FS);       err != nil { log.Fatal(err) }
+if err := postgres.Migrate(ctx, dsn, migrations.FS);   err != nil { log.Fatal(err) }
 ```
 
-`schema.FS` is your own `embed.FS` of numbered `.sql` files. Two things to
-know:
+`migrations.FS` is an `embed.FS` of your numbered `.sql` files, and
+`warren g repository --driver postgres` writes it for you as
+`db/migrations/schema.go`:
+
+```go
+package migrations
+
+import "embed"
+
+//go:embed *.sql
+var FS embed.FS
+```
+
+**EMBEDDED, not read from disk, and that is the whole point.** `cmd/migrate` is
+a deploy step: it runs from a container's WORKDIR, from `/usr/local/bin`, from
+a CI runner's temp directory — essentially never from the repository root. A
+field test built the binary and ran it from `/tmp`:
+
+```
+applied  warren       (warren_outbox, warren_inbox)
+reading migrations: open .: no such file or directory
+exit=1
+```
+
+Warren's tables applied, the project's did not, the job exited 1, and the
+database was left half-migrated. Two things to know:
 
 - Files apply in **name order**, so zero-pad them: `00010` sorts after
   `00009`, `10` does not. `warren g repository --driver postgres` numbers its

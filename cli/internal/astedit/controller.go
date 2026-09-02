@@ -78,7 +78,16 @@ func AddConstructorParam(src []byte, fn, typeName, name, typ string) ([]byte, er
 	if len(lit.Elts) > 0 {
 		last := lit.Elts[len(lit.Elts)-1]
 		end, prefix := afterLast(src, fset.Position(last.End()).Offset)
-		out, err = splice(src, end, prefix+" "+name+": "+name+",")
+		// A NEWLINE, not a space. afterLast lands at the end of the previous
+		// element's line, so a space put the new field on that line and gofmt
+		// left it there — a composite literal's line breaks are the author's
+		// to choose, so format.Source will not split them back out. A second
+		// `warren g command` therefore produced
+		//
+		//	discontinueStockItem: discontinueStockItem, searchStockItems: searchStockItems,
+		//
+		// which is legal, gofmt-clean, and reads as a merge accident.
+		out, err = splice(src, end, prefix+"\n"+name+": "+name+",")
 	} else {
 		out, err = splice(src, closing, name+": "+name)
 	}

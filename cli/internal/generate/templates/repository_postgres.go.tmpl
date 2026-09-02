@@ -12,7 +12,7 @@ import (
 	"{{.Module}}/internal/modules/{{.Feature}}/domain"
 )
 
-// {{.Name}}Repository is plain SQL over Postgres. There is no ORM, by
+// {{.RepoType}} is plain SQL over Postgres. There is no ORM, by
 // design: this file is yours to edit, and the only framework machinery in it
 // is postgres.DB.
 //
@@ -45,12 +45,12 @@ import (
 // directly compiles, vets, serves traffic and loses every event. The generated
 // {{.Snake}}_repository_test.go is what catches that: it runs
 // persistence.RunContract, which asserts that Save and Delete enlist. Keep it.
-type {{.Name}}Repository struct{ db postgres.DB }
+type {{.RepoType}} struct{ db postgres.DB }
 
-// New{{.Name}}Repository returns the repository as its PORT, so the
+// New{{.RepoType}} returns the repository as its PORT, so the
 // container resolves it by the type the application layer asks for.
-func New{{.Name}}Repository(db postgres.DB) domain.{{.Name}}Repository {
-	return &{{.Name}}Repository{db: db}
+func New{{.RepoType}}(db postgres.DB) domain.{{.Name}}Repository {
+	return &{{.RepoType}}{db: db}
 }
 
 // FindByID returns the {{.Lower}}, or an error carrying CodeNotFound.
@@ -62,7 +62,7 @@ func New{{.Name}}Repository(db postgres.DB) domain.{{.Name}}Repository {
 // {{.Name}}Created, so loading through it would republish a creation fact on
 // the next Save — and would reconstitute at version 0, which turns every
 // update into an insert.
-func (r *{{.Name}}Repository) FindByID(ctx context.Context, id domain.{{.Name}}ID) (*domain.{{.Name}}, error) {
+func (r *{{.RepoType}}) FindByID(ctx context.Context, id domain.{{.Name}}ID) (*domain.{{.Name}}, error) {
 	var (
 		createdAt time.Time
 		version   int64
@@ -86,7 +86,7 @@ func (r *{{.Name}}Repository) FindByID(ctx context.Context, id domain.{{.Name}}I
 // The write is CONDITIONAL on the version this {{.Lower}} was loaded at. That
 // is the whole point: without it, two requests that both read version 3 both
 // write, both return 201, and the second silently erases the first.
-func (r *{{.Name}}Repository) Save(ctx context.Context, {{.Lower}} *domain.{{.Name}}) error {
+func (r *{{.RepoType}}) Save(ctx context.Context, {{.Lower}} *domain.{{.Name}}) error {
 	// RULE 1 and RULE 3 in one call. persistence.Write refuses outside a unit
 	// of work — where this would autocommit and the aggregate's events would
 	// be lost with no error anywhere — and enlists the aggregate when, and
@@ -157,7 +157,7 @@ func (r *{{.Name}}Repository) Save(ctx context.Context, {{.Lower}} *domain.{{.Na
 // Loading the {{.Lower}} in here instead would not help — that would be a
 // different object with no pending events, and enlisting it would publish
 // nothing.
-func (r *{{.Name}}Repository) Delete(ctx context.Context, {{.Lower}} *domain.{{.Name}}) error {
+func (r *{{.RepoType}}) Delete(ctx context.Context, {{.Lower}} *domain.{{.Name}}) error {
 	return persistence.Write(ctx, "delete {{.Lower}}", {{.Lower}}, func(ctx context.Context) error {
 		// Exec returns the rows affected, and a DELETE that matched nothing is
 		// a NOT_FOUND — the persistence contract suite deletes twice and

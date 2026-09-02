@@ -14,6 +14,8 @@ import (
 	"os"
 
 	"github.com/MerseniBilel/warren/persistence/postgres"
+
+	"{{.Module}}/db/migrations"
 )
 
 func main() {
@@ -43,7 +45,7 @@ func main() {
 	// table, keyed by bare filename — so a file of yours named
 	// 00001_warren_outbox.sql would be recorded as applied without ever
 	// running. Name them for your own aggregates and they cannot collide.
-	if err := postgres.Migrate(ctx, dsn, os.DirFS("db/migrations")); err != nil {
+	if err := postgres.Migrate(ctx, dsn, migrations.FS); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}

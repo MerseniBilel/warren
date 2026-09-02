@@ -227,6 +227,26 @@ func Repository(opts Options) (string, error) {
 	// The project's OWN variable, so the generated skip names something that
 	// exists in this application rather than a generic DATABASE_URL.
 	data["DSNVar"] = strconv.Quote(envPrefix(opts.Dir) + "_DATABASE_URL")
+	// The postgres implementation gets its own FILE and its own TYPE.
+	//
+	// Both used to be the memory one's: <agg>_repository.go, holding
+	// <Agg>Repository. GETTING_STARTED §8 tells you to KEEP a memory
+	// implementation for offline tests, so the documented workflow asked the
+	// generator to overwrite the file the documentation told you to keep —
+	// and --force did it silently, destroying a hand-written repository and
+	// the List method the port required. Field test #16 paid eight sed
+	// expressions renaming the file, the type and the constructor by hand.
+	//
+	// A distinct name means both coexist with no rename, no --force, and no
+	// collision in one package: <agg>_repository_postgres.go holding
+	// <Agg>PostgresRepository. Both constructors return the same domain PORT,
+	// so the module's provider list decides which one the graph uses — which
+	// is what §8 said the swap would cost, and now what it actually costs.
+	repoType, repoFile := opts.Name+"Repository", data["Snake"]+"_repository"
+	if driver == "postgres" {
+		repoType, repoFile = opts.Name+"PostgresRepository", data["Snake"]+"_repository_postgres"
+	}
+	data["RepoType"] = repoType
 	// The repository implements the port the ENTITY declares and stores the
 	// aggregate the entity defines. Without it the generated file cannot
 	// compile — and until this check existed the generator wrote it anyway,
@@ -251,12 +271,12 @@ func Repository(opts Options) (string, error) {
 	p := &plan{
 		dir: opts.Dir, dryRun: opts.DryRun, force: opts.Force,
 		files: map[string][]byte{
-			base + "/infrastructure/" + data["Snake"] + "_repository.go":      content,
-			base + "/infrastructure/" + data["Snake"] + "_repository_test.go": contract,
+			base + "/infrastructure/" + repoFile + ".go":      content,
+			base + "/infrastructure/" + repoFile + "_test.go": contract,
 		},
-		edits: []edit{provide(data, base, "infrastructure", "New"+opts.Name+"Repository")},
+		edits: []edit{provide(data, base, "infrastructure", "New"+repoType)},
 		declares: []decl{{base + "/infrastructure", []string{
-			opts.Name + "Repository", "New" + opts.Name + "Repository",
+			repoType, "New" + repoType,
 		}}},
 	}
 	if driver == "postgres" {
@@ -299,8 +319,23 @@ func Repository(opts Options) (string, error) {
 			return "", mmerr
 		}
 		p.files["cmd/migrate/main.go"] = migrateMain
-		// One migrate command per PROJECT, not per aggregate.
-		p.keepExisting = map[string]bool{"cmd/migrate/main.go": true}
+		// The embed that makes cmd/migrate runnable from anywhere. It is a
+		// deploy step — a container WORKDIR, a CI runner's temp directory —
+		// and os.DirFS("db/migrations") only ever worked from the repository
+		// root. Field test #16 ran the built binary from /tmp: Warren's own
+		// tables applied, the project's did not, exit 1, database half
+		// migrated, and the error did not even name the path it wanted.
+		embedded, eerr := render("migrations_embed.go.tmpl", data)
+		if eerr != nil {
+			return "", eerr
+		}
+		p.files["db/migrations/schema.go"] = embedded
+		// One migrate command per PROJECT, not per aggregate — and one
+		// embed, for the same reason.
+		p.keepExisting = map[string]bool{
+			"cmd/migrate/main.go":     true,
+			"db/migrations/schema.go": true,
+		}
 		// The project's OWN variable, not a generic one. A scaffolded
 		// cmd/migrate reads <APP>_DATABASE_URL, so printing DATABASE_URL
 		// sent the reader to `DUPE_DATABASE_URL is not set` — advice that

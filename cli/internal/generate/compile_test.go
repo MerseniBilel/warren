@@ -203,6 +203,7 @@ func TestGeneratedCodeCompilesAndPasses(t *testing.T) {
 		"internal/modules/billing/http_test.go":     generatedRoutesOverHTTP,
 		"internal/modules/user/http_test.go":        generatedUserRoutesOverHTTP,
 		"internal/modules/billing/consumer_test.go": generatedConsumerInTheTable,
+		"db/migrations/schema_test.go":              generatedMigrationsAreEmbedded,
 	} {
 		if err := os.WriteFile(filepath.Join(dir, path), []byte(src), 0o644); err != nil {
 			t.Fatalf("writing %s: %v", path, err)
@@ -396,5 +397,57 @@ func TestGeneratedConsumerEntersTheRouteTable(t *testing.T) {
 	t.Fatalf("the generated consumer is not in the frozen route table, so openapi "+
 		"and every tool reading Table.Events() cannot see it; the table has %d event route(s)",
 		len(table.Events()))
+}
+`
+
+// generatedMigrationsAreEmbedded is the regression for field test #16,
+// finding 4.
+//
+// cmd/migrate read its migrations with os.DirFS("db/migrations"), a path
+// relative to the working directory — and cmd/migrate is a DEPLOY STEP, run
+// from a container's WORKDIR or a CI runner's temp directory and essentially
+// never from the repository root. The field test built it and ran it from
+// /tmp:
+//
+//	applied  warren       (warren_outbox, warren_inbox)
+//	reading migrations: open .: no such file or directory
+//	exit=1
+//
+// Warren's own tables applied, the project's did not, the job exited 1 with
+// the database half-migrated, and the error did not name the path it wanted.
+// GETTING_STARTED §8 already prescribed an embed.FS; the generator ignored it.
+//
+// This test asserts the SQL is in the binary rather than on the disk beside
+// it. A build alone would not catch a regression to os.DirFS, because that
+// compiles perfectly.
+const generatedMigrationsAreEmbedded = `package migrations_test
+
+import (
+	"io/fs"
+	"strings"
+	"testing"
+
+	"example.com/myapp/db/migrations"
+)
+
+func TestMigrationsAreCompiledIntoTheBinary(t *testing.T) {
+	t.Parallel()
+
+	names, err := fs.Glob(migrations.FS, "*.sql")
+	if err != nil {
+		t.Fatalf("Glob: %v", err)
+	}
+	if len(names) == 0 {
+		t.Fatal("no migrations are embedded, so cmd/migrate applies Warren's tables and none of this project's")
+	}
+	for _, n := range names {
+		b, err := fs.ReadFile(migrations.FS, n)
+		if err != nil {
+			t.Fatalf("reading %s: %v", n, err)
+		}
+		if !strings.Contains(strings.ToUpper(string(b)), "CREATE TABLE") {
+			t.Errorf("%s does not look like a migration:\n%s", n, b)
+		}
+	}
 }
 `

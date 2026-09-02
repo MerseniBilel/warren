@@ -78,8 +78,10 @@ func TestGolden(t *testing.T) {
 		"internal/modules/billing/domain/invoice.go",
 		"internal/modules/billing/infrastructure/invoice_repository.go",
 		"internal/modules/billing/infrastructure/invoice_repository_test.go",
-		"internal/modules/billing/infrastructure/payment_repository.go",
-		"internal/modules/billing/infrastructure/payment_repository_test.go",
+		// The postgres driver writes its OWN file, so it can sit beside the
+		// memory implementation GETTING_STARTED §8 tells you to keep.
+		"internal/modules/billing/infrastructure/payment_repository_postgres.go",
+		"internal/modules/billing/infrastructure/payment_repository_postgres_test.go",
 		"internal/modules/billing/application/void_invoice.go",
 		"internal/modules/billing/application/void_invoice_test.go",
 		"internal/modules/billing/application/on_payment_received.go",

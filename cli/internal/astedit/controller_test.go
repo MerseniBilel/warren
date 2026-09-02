@@ -1,6 +1,7 @@
 package astedit_test
 
 import (
+	"go/format"
 	"strings"
 	"testing"
 
@@ -157,4 +158,44 @@ func countDecl(src, name, typ string) int {
 		}
 	}
 	return n
+}
+
+// TestASecondFieldGetsItsOwnLine — field test #16, finding 15.
+//
+// A second `warren g command` on the same controller produced
+//
+//	discontinueStockItem: discontinueStockItem, searchStockItems: searchStockItems,
+//
+// on one line. It is legal and gofmt-clean — a composite literal's line
+// breaks are the author's to choose, so format.Source will not split them —
+// and it reads as a merge accident in generated code, which is exactly where
+// a reader has least reason to trust what they are looking at.
+func TestASecondFieldGetsItsOwnLine(t *testing.T) {
+	t.Parallel()
+
+	src := []byte(controller)
+	for _, name := range []string{"first", "second", "third"} {
+		var err error
+		src, err = astedit.AddStructField(src, "Controller", name, "app.Handler[Req, Res]")
+		if err != nil {
+			t.Fatalf("AddStructField %s: %v", name, err)
+		}
+		src, err = astedit.AddConstructorParam(src, "NewController", "Controller", name, "app.Handler[Req, Res]")
+		if err != nil {
+			t.Fatalf("AddConstructorParam %s: %v", name, err)
+		}
+	}
+
+	// One assignment per line: no line may carry two "name: name," pairs.
+	for i, line := range strings.Split(string(src), "\n") {
+		if strings.Count(line, ": ") > 1 {
+			t.Errorf("line %d carries two struct-literal fields, which reads as a merge accident:\n%s", i+1, line)
+		}
+	}
+	// And the result must still be what gofmt would write.
+	if formatted, err := format.Source(src); err != nil {
+		t.Fatalf("the edited file is not valid Go: %v", err)
+	} else if string(formatted) != string(src) {
+		t.Errorf("the edited file is not gofmt-clean:\n%s", src)
+	}
 }
