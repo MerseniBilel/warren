@@ -833,8 +833,10 @@ func (r *Registrar) register[Req, Res any](p Protocol, verb, pattern string, h a
 	// one out. A gRPC adapter fills Req from the protobuf message, so the
 	// param setters are simply unused there.
 	if p == ProtocolHTTP {
-		if err := checkWildcards(pattern, setters); err != nil {
-			r.fail(err)
+		if errs := checkWildcards(pattern, reflect.TypeFor[Req]().String(), setters); len(errs) > 0 {
+			for _, err := range errs {
+				r.fail(err)
+			}
 			return
 		}
 	}
