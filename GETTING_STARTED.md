@@ -208,6 +208,66 @@ func (h *readNote) Handle(ctx context.Context, q ReadNote) (NoteView, error) {
 `NoteView` is declared once, in `write.go`, and both handlers return it — they
 are the same package.
 
+### Which fields a client can fill — and the one that must say `json:"-"`
+
+A request struct's exported fields are filled from the wire. How depends on
+the route:
+
+| Tag | Filled from | On a route with no body (GET, DELETE) |
+|---|---|---|
+| `param:"id"` | the `{id}` wildcard in the pattern | yes |
+| `query:"limit"` | the query string | yes |
+| `json:"email"` | the request body | **refused at boot** — there is no body |
+| *(no tag, exported)* | the body, matched by **Go field name** | **refused at boot** |
+| *(unexported)* | nothing | ignored |
+
+**The row worth reading twice is the untagged one.** On a route that carries a
+body, `encoding/json` matches an untagged exported field by its Go name, so a
+field you never meant to expose is settable by the caller:
+
+```go
+type CreateItem struct {
+	SKU    string `json:"sku"`
+	Tenant string // filled by a middleware — and by anyone who guesses
+}
+```
+```
+$ curl -X POST /skus -d '{"sku":"EVIL-1","Tenant":"attacker"}'
+{"sku":"EVIL-1","tenant":"attacker"}
+```
+
+Both `{"Tenant":...}` and `{"tenant":...}` land, because Go's matching is
+case-insensitive. **A field the server owns must say so:**
+
+```go
+	Tenant string `json:"-"`     // nothing on the wire fills this
+```
+
+`json:"-"` is the standard Go spelling for "not from the wire", `encoding/json`
+already honours it, and Warren treats it — and `query:"-"` and `param:"-"`,
+for a reader already in that tag family — as a deliberate declaration that a
+field is bound by nothing.
+
+**It is also the answer on a bodyless route.** A middleware may fill the
+request before the handler sees it — `app.Middleware[Req, Res]` is
+`func(Handler) Handler`, so that is an ordinary Warren shape:
+
+```go
+// internal/tenancy/middleware.go — a cross-cutting middleware, in its own package
+func Enforcing[Req Scoped, Res any]() app.Middleware[Req, Res] { … req.SetTenant(id.Subject) … }
+```
+
+```go
+type ListItems struct {
+	Tenant string `json:"-"`        // set by tenancy.Enforcing, never by the caller
+	Status string `query:"status"`
+}
+```
+
+Without the tag, boot refuses `ListItems` on a GET — correctly, because nothing
+on the wire fills `Tenant` — and the remedies it used to suggest were all
+wrong for this case: `query:"tenant"` would hand the tenant to the caller.
+
 ---
 
 ## 4. The infrastructure — `internal/modules/notes/infrastructure/memory.go`

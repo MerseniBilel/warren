@@ -12,3 +12,7 @@
 
     Tag it `query:"author"`, or `param:` with a matching {wildcard}
     in the pattern, or unexport the field.
+
+    If nothing on the wire is meant to fill it — a middleware sets it, say —
+    declare that: `json:"-"` (or `query:"-"`, or `param:"-"`).
+    That is also what stops a client setting it on a route that HAS a body.

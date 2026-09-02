@@ -1806,3 +1806,122 @@ func TestTwoFeaturesOnOneTopicGetDistinctSubscriptionNames(t *testing.T) {
 			events[0].Name, events[1].Name)
 	}
 }
+
+// --- the opt-out: field test #16, finding 3 -------------------------------
+//
+// app.Middleware[Req, Res] is func(Handler) Handler, so a middleware may fill
+// the request before the handler sees it — Warren's own type invites it — and
+// a cross-cutting tenancy middleware setting a Tenant field on the DTO is the
+// idiomatic shape. On a bodyless route that field carries no param: and no
+// query:, so the check refused it, and every remedy it suggested was wrong:
+// query:"tenant" hands the tenant to the caller (a cross-tenant read), param:
+// is the same plus a wildcard, and "unexport it" is impossible because the
+// middleware lives in another package.
+
+type optOutJSON struct {
+	Tenant string `json:"-"` // set by a middleware; never from the wire
+	Status string `query:"status"`
+}
+
+type optOutQuery struct {
+	Tenant string `query:"-"`
+}
+
+type optOutParam struct {
+	Tenant string `param:"-"`
+}
+
+// TestAFieldCanDeclareItselfUnbindable — the three accepted spellings, on the
+// route shape that refused them.
+func TestAFieldCanDeclareItselfUnbindable(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name     string
+		register func(*transport.Registrar)
+	}{
+		{`json:"-"`, func(r *transport.Registrar) { r.Get("/skus", wcHandler[optOutJSON]()) }},
+		{`query:"-"`, func(r *transport.Registrar) { r.Get("/skus", wcHandler[optOutQuery]()) }},
+		{`param:"-"`, func(r *transport.Registrar) { r.Get("/skus", wcHandler[optOutParam]()) }},
+		{`on a DELETE too`, func(r *transport.Registrar) { r.Delete("/skus", wcHandler[optOutJSON]()) }},
+		{`and on a body route, where it is the live remedy`, func(r *transport.Registrar) {
+			r.Post("/skus", wcHandler[optOutJSON]())
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			b := transport.NewBuilder()
+			tc.register(b.For("inventory"))
+			if _, err := b.Table(); err != nil {
+				t.Errorf("a field declared unbindable must register clean: %v", err)
+			}
+		})
+	}
+}
+
+// TestAnOptedOutFieldBindsNothingAtRequestTime — the opt-out must not become a
+// binding by another name. `param:"-"` used to plan a setter for a path
+// parameter literally called "-".
+func TestAnOptedOutFieldBindsNothingAtRequestTime(t *testing.T) {
+	t.Parallel()
+
+	b := transport.NewBuilder()
+	var got optOutJSON
+	b.For("inventory").Get("/skus", app.HandlerFunc[optOutJSON, userDTO](
+		func(_ context.Context, q optOutJSON) (userDTO, error) { got = q; return userDTO{}, nil }))
+	table, err := b.Table()
+	if err != nil {
+		t.Fatalf("Table: %v", err)
+	}
+	inv := table.HTTP()[0].Bind(transport.JSON())
+	if _, err := inv(transport.WithParams(context.Background(),
+		staticParams{query: map[string]string{"status": "ok", "-": "attacker", "tenant": "attacker"}}), nil); err != nil {
+		t.Fatalf("invoke: %v", err)
+	}
+	if got.Tenant != "" {
+		t.Errorf("an opted-out field was filled from the wire with %q", got.Tenant)
+	}
+	if got.Status != "ok" {
+		t.Errorf("the tagged field beside it stopped binding: %q", got.Status)
+	}
+}
+
+// staticParams is a Params whose values come from a map, so a test can drive
+// the invoker without a transport.
+type staticParams struct {
+	path  map[string]string
+	query map[string]string
+}
+
+func (p staticParams) Path(name string) (string, bool)  { v, ok := p.path[name]; return v, ok }
+func (p staticParams) Query(name string) (string, bool) { v, ok := p.query[name]; return v, ok }
+
+// TestAJSONTagOnABodylessRouteSaysSo — field test #16, finding 14. Copying a
+// DTO from a POST to a GET is the commonest way to reach this check, and the
+// generic message did not acknowledge that a json: tag was present at all.
+func TestAJSONTagOnABodylessRouteSaysSo(t *testing.T) {
+	t.Parallel()
+
+	b := transport.NewBuilder()
+	b.For("inventory").Get("/skus", wcHandler[ubJSONOnGet]())
+	_, err := b.Table()
+	if err == nil {
+		t.Fatal("a json: tag on a GET built a table")
+	}
+	report := err.Error()
+	for _, want := range []string{
+		"tagged `json:\"author\"`",
+		"a GET carries no body",
+		"copied from a POST route",
+		"`query:\"author\"` is probably what you meant",
+	} {
+		if !strings.Contains(report, want) {
+			t.Errorf("the diagnostic does not carry %q:\n%s", want, report)
+		}
+	}
+	// And it must still offer the opt-out, because "a middleware sets it" is
+	// a legitimate answer for a json:-tagged field too.
+	if !strings.Contains(report, "`json:\"-\"`") {
+		t.Errorf("the diagnostic does not offer the opt-out:\n%s", report)
+	}
+}

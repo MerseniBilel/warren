@@ -49,6 +49,12 @@ func paramSetters(t reflect.Type) ([]setter, []reflect.StructField, []error) {
 		if !sf.IsExported() {
 			continue
 		}
+		if optedOut(sf) {
+			// Declared unbindable, deliberately: nothing on the wire fills
+			// this field, and nothing should try. It is neither a setter nor
+			// a candidate for checkUnbindable.
+			continue
+		}
 		name, query := sf.Tag.Get("param"), false
 		if name == "" {
 			if q := sf.Tag.Get("query"); q != "" {
@@ -141,11 +147,27 @@ func checkUnbindable(verb, pattern, reqType string, untagged []reflect.StructFie
 	}
 	errs := make([]error, 0, len(untagged))
 	for _, sf := range untagged {
-		hint := "  Tag it `query:\"" + suggestedName(sf.Name) + "\"`, or `param:` with a matching {wildcard}\n" +
-			"  in the pattern, or unexport the field."
-		if key, ok := nearMissTagKey(sf.Tag); ok {
-			hint = fmt.Sprintf("  The struct tag has a key `%s`, which binds nothing. Did you mean `%s`?\n\n%s",
-				key.got, key.want, hint)
+		want := suggestedName(sf.Name)
+		hint := "  Tag it `query:\"" + want + "\"`, or `param:` with a matching {wildcard}\n" +
+			"  in the pattern, or unexport the field.\n\n" +
+			"  If nothing on the wire is meant to fill it — a middleware sets it, say —\n" +
+			"  declare that: `json:\"-\"` (or `query:\"-\"`, or `param:\"-\"`).\n" +
+			"  That is also what stops a client setting it on a route that HAS a body."
+		switch {
+		case sf.Tag.Get("json") != "":
+			// The commonest way to reach this check: a DTO copied from a POST
+			// to a GET. Naming the json: tag is the difference between "why is
+			// this refused" and "of course — GET has no body".
+			hint = fmt.Sprintf(
+				"  This field is tagged `json:%q`, and a %s carries no body for it to\n"+
+					"  come from. A DTO copied from a POST route is the usual cause.\n"+
+					"  `query:%q` is probably what you meant.\n\n%s",
+				sf.Tag.Get("json"), verb, want, hint)
+		default:
+			if key, ok := nearMissTagKey(sf.Tag); ok {
+				hint = fmt.Sprintf("  The struct tag has a key `%s`, which binds nothing. Did you mean `%s`?\n\n%s",
+					key.got, key.want, hint)
+			}
 		}
 		errs = append(errs, diagnostic(fmt.Sprintf(
 			"✗ field can never be bound\n\n    field %s (%s) of %s carries no `param:` or `query:` tag,\n"+
@@ -255,6 +277,39 @@ func editDistance(a, b string) int {
 		prev, curr = curr, prev
 	}
 	return prev[len(br)]
+}
+
+// optedOut reports a field the author has declared unbindable on purpose.
+//
+// Field test #16 found the case the bodyless-route check has no answer for.
+// app.Middleware[Req, Res] is func(Handler) Handler, so a middleware may fill
+// the request before the handler sees it — Warren's own type invites exactly
+// that — and a cross-cutting tenancy middleware setting a Tenant field on the
+// DTO is the idiomatic shape. On a GET that field carries no param: and no
+// query:, so the check refused it, and all three remedies it offered were
+// wrong:
+//
+//	query:"tenant"    hands the tenant to the caller in the URL — a
+//	                  cross-tenant read, recommended by the framework
+//	param:"tenant"    the same, plus a wildcard that does not belong
+//	unexport it       impossible; the middleware is in another package,
+//	                  which is the whole point of a cross-cutting middleware
+//
+// A refusal with no correct compliance path is a refusal that has to have an
+// opt-out. This is it.
+//
+// THE SPELLING IS json:"-", with query:"-" and param:"-" accepted as
+// synonyms for a reader who reaches for the tag family already in play. A
+// separate bind:"-" vocabulary was rejected deliberately: json:"-" already
+// means "not from the wire" in Go, encoding/json ALREADY honours it on body
+// routes, so one spelling covers both route shapes and adds no new word to
+// learn. On a body route it is also the live remedy for the mirror-image
+// problem — an exported field with no tag is populated from the body by Go
+// field name, so {"Tenant":"attacker"} lands unless the field says json:"-".
+func optedOut(sf reflect.StructField) bool {
+	return sf.Tag.Get("json") == "-" ||
+		sf.Tag.Get("param") == "-" ||
+		sf.Tag.Get("query") == "-"
 }
 
 // hasParamTag reports whether t or anything beneath it carries a param: or

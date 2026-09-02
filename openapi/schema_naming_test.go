@@ -326,3 +326,47 @@ func TestOmitemptyOnAnOptionalQueryParameterIsNotARefusal(t *testing.T) {
 		t.Errorf("an omitempty parameter was published as required:\n%s", raw)
 	}
 }
+
+// tenantScoped is field test #16's shape: a field a middleware fills, declared
+// unbindable so the bodyless-route check accepts it.
+type tenantScoped struct {
+	Tenant string `json:"-"`
+	Region string `query:"-"`
+	Shard  string `param:"-"`
+	Status string `query:"status"`
+}
+
+type scopedPage struct {
+	Count int `json:"count"`
+}
+
+// TestAnOptedOutFieldIsNotAPublishedParameter — the second half of the opt-out,
+// and the half that is easy to leave undone.
+//
+// transport stops binding a `json:"-"` / `query:"-"` / `param:"-"` field. If
+// openapi kept deriving a parameter from it, the document would publish one
+// named "-" — a parameter no request can carry and no client can send, which
+// is the invalid-document problem the wildcard checks exist to prevent,
+// arriving through the opt-out that fixes a different one.
+func TestAnOptedOutFieldIsNotAPublishedParameter(t *testing.T) {
+	t.Parallel()
+
+	_, raw := emit(t, func(r *transport.Registrar) {
+		r.Get("/skus", app.HandlerFunc[tenantScoped, scopedPage](
+			func(context.Context, tenantScoped) (scopedPage, error) { return scopedPage{}, nil }))
+	})
+
+	if strings.Contains(raw, `"name": "-"`) {
+		t.Errorf("the document publishes a parameter named \"-\":\n%s", raw)
+	}
+	for _, gone := range []string{"Tenant", "Region", "Shard"} {
+		if strings.Contains(raw, gone) {
+			t.Errorf("the opted-out field %s reached the document:\n%s", gone, raw)
+		}
+	}
+	// The tagged field beside it must still be described, or the exclusion is
+	// too wide.
+	if !strings.Contains(raw, `"name": "status"`) {
+		t.Errorf("the query parameter beside it was dropped too:\n%s", raw)
+	}
+}
