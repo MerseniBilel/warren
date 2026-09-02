@@ -174,6 +174,7 @@ type driverTemplate struct {
 var driverOnly = map[string]driverTemplate{
 	"cmd__migrate__main.go.tmpl":                                            {db: "postgres"},
 	"db__migrations__00001_users.sql.tmpl":                                  {db: "postgres"},
+	"db__migrations__schema.go.tmpl":                                        {db: "postgres"},
 	"internal__platform__module.go.tmpl":                                    {db: "memory"},
 	"internal__modules__user__infrastructure__user_repository.go.tmpl":      {db: "memory"},
 	"internal__modules__user__infrastructure__user_repository_test.go.tmpl": {db: "memory"},

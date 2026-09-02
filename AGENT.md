@@ -25,9 +25,12 @@ warren.md         the design — package manifest, architecture, dependency ledg
 AGENT.md          this file
 CLAUDE.md         Claude Code's pointer to this file
 README.md         the public front door and the roadmap checkboxes
+CONTRIBUTING.md   how to open a change here
 LICENSE           Apache-2.0
 NOTICE
-<pkg>/SPEC.md     one spec per UNIMPLEMENTED package; specs retire on completion
+<pkg>/SPEC.md     a spec still under review; it is deleted when its package is
+                  implemented and reviewed, its residue rehomed to warren.md,
+                  doc comments and tests first
 go.mod            the core module — stdlib only until warren/di lands
 Makefile          fmt · vet · lint · invariants · test, iterated per module
 .github/          CI: the same targets, plus golangci-lint v2
@@ -36,8 +39,17 @@ scripts/invariants.sh   the greppable invariants (1, 2, 8, naming), run in CI
 errors/ domain/ log/ di/ lifecycle/ config/ warren (root)
                   implemented kernel packages — specs retired; code, golden
                   tests, and warren.md are the contract
-docs/assets/      one usage diagram per approved spec, .puml + .png
 ```
+
+**There are no spec-only directories.** Ten were deleted on 2026-09-02 —
+`auth/`, `transport/grpc/`, `broker/nats/`, `broker/rabbitmq/`,
+`persistence/mongo/`, `persistence/mysql/`, `persistence/redis/`, and the three
+retired specs in implemented packages — because a directory containing a
+`SPEC.md` and no Go is a half-built thing to every visitor, and this file
+already forbids creating the module it implies. **Their rulings live in
+`warren.md`**: §4.2 for gRPC, §5.2 and §5.3 for the brokers, §6.2–6.4 and §9
+for the stores, §7.2 for auth. A deferral's REASON survives; the essay does
+not.
 
 The tooling was rebuilt on 2026-08-01: `make ci` is the gate, and it runs fmt,
 vet, golangci-lint, the invariants script, and `go test -race` across every
@@ -343,7 +355,7 @@ transports:
 |---|---|---|---|
 | `INVALID` | 400 | `InvalidArgument` | → DLQ (never retry) |
 | `NOT_FOUND` | 404 | `NotFound` | ack + log |
-| `CONFLICT` | 409 | `AlreadyExists` | ack (idempotent replay) |
+| `CONFLICT` | 409 | `AlreadyExists` | ack + log at WARN — a replay OR a rule refusing the work, and the code cannot say which |
 | `CONTENTION` | 409 | `Aborted` | nack + backoff retry — nothing was written, so acking destroys work never done |
 | `UNAUTHENTICATED` | 401 | `Unauthenticated` | → DLQ (never retry) |
 | `PERMISSION_DENIED` | 403 | `PermissionDenied` | → DLQ (never retry) |
@@ -352,6 +364,17 @@ transports:
 
 Each adapter owns its column. A handler that maps a code to a status itself has
 broken ring 2.
+
+**`CONFLICT` from a consumer is two events wearing one code, and this is
+deliberate.** A replay whose work is already done, and a domain rule refusing
+the work — an oversell, an illegal transition — both return `errors.Conflict`,
+because the 2026-08-08 CONTENTION ruling chose to keep the familiar name right
+for the common case rather than split it and make every existing
+`Conflict("cannot oversell")` wrong. The consequence is that the framework
+cannot tell them apart, so it acks both and **must not assert which one it
+was**: the log line says only that the handler refused the message and it has
+been acked, at WARN since 2026-09-02. Whether a terminal CONFLICT should
+dead-letter instead is open against §2.6 and belongs to the human.
 
 **`UNAUTHENTICATED` describes the caller's identity, not yours.** A service
 that fails to authenticate to something downstream — Postgres, S3, another
@@ -376,9 +399,40 @@ leak. When adding middleware, name which ring it is in, in the spec.
 
 ## Spec-driven development — write the spec first
 
-**No feature is implemented before its spec exists and is approved.** This is a
-hard process rule, not a suggestion, and it applies to you exactly as it applies
-to a human contributor.
+**No NEW PACKAGE and no PUBLIC API CHANGE is implemented before its spec exists
+and is approved.** This is a hard process rule, not a suggestion, and it
+applies to you exactly as it applies to a human contributor.
+
+### What needs a spec, and what does not
+
+**Amended 2026-09-02.** This rule used to read "no feature is implemented
+before its spec exists and is approved", with no exemption of any size. In the
+fortnight to 2026-09-02 the maintainer broke it three times — `transport`,
+`persistence` and `openapi` all shipped fixes to `main` under specs stamped
+"NOT APPROVED", and `openapi`'s spec was written *after* its own fix. When a
+rule is broken three times in two weeks by the person who wrote it, the rule
+is what is wrong: an unbounded spec requirement makes a one-line bug fix cost
+a review cycle, so it gets skipped, and skipping it becomes normal for the
+changes that genuinely needed it too.
+
+**A spec is required for:**
+
+- A **new package**, or a new module.
+- A change to **public API** — an exported signature, a port's shape, a module
+  boundary, the error table, or either of the two orderings.
+- A change to **shipped behaviour that stops working code from working**: a
+  new boot refusal, a new validation, a stricter driver. It is a compatibility
+  event whatever its size, and the human takes it.
+
+**A spec is NOT required for:** a bug fix inside an existing contract, tests,
+documentation, a diagnostic's wording, an internal refactor, or a new adapter
+implementing an existing port. Those go straight to a pull request. The code,
+its tests and its `warren.md` entry are the record — which is exactly what
+AGENT.md already says an implemented package's contract is.
+
+If you are unsure which side a change falls on, the question is not "how big
+is it" but **"can a user's working program stop working, or be written
+differently, because of this?"** Yes means spec.
 
 1. **Write the spec** in `SPEC.md` **inside the package directory it
    describes** — `errors/SPEC.md`, `di/SPEC.md`, `transport/http/SPEC.md`. It
@@ -453,7 +507,8 @@ open, in `cli/SPEC.md` open question 1.
 
 | If you are about to… | First… |
 |---|---|
-| Build any feature | Write or find `<package>/SPEC.md`. See above. An implemented package has no spec — its code, tests, and `warren.md` entry are the contract. |
+| Add a package, change public API, or make working code stop working | Write or find `<package>/SPEC.md`. See above. An implemented package has no spec — its code, tests, and `warren.md` entry are the contract. |
+| Fix a bug, add a test, write docs, or implement an existing port | Straight to a pull request. No spec — see the exemption above. |
 | Add a dependency | Read "Adding a dependency" below. This has a hard process. |
 | Change a port's shape, a module boundary, or a public API | Update [warren.md](warren.md) and get it agreed |
 | Touch anything structural | Read [warren.md](warren.md) |
@@ -634,6 +689,40 @@ is not installed, say so rather than asserting the code is clean.
 
 ---
 
+## Before you call a fix done
+
+**Enumerate the OTHER producers and consumers of the thing you just fixed, and
+say in the commit message which ones you checked.** Added 2026-09-02, because
+this repository has one characteristic defect and it has now happened three
+times:
+
+- `4a1d152` fixed one of `CONFLICT`'s two consumer meanings — the lost version
+  race — and left the other acked, at INFO, under a log line asserting it was
+  an idempotent replay. Field test #15 measured the consequence: a business
+  refusal destroying a message, silently, with two modules left divergent.
+- `281365c` fixed one of two producers of the joined-diagnostic nesting defect
+  and left `paramSetters` pre-joining, under a doc comment declaring the
+  property fixed.
+- `warren g consumer` was moved onto the shipped consumer API while the
+  *scaffold* had used it for weeks, so one generated project carried both
+  idioms — and the CLI-generated half never entered the route table at all.
+
+**Fixing one half of a two-halved thing and declaring it done is the shape.**
+The guard is mechanical, costs a grep, and would have caught all three:
+
+1. **Grep for the claim, not the code.** The false string
+   `"idempotent replay"` appeared in five files; the code fix touched one.
+2. **Ask who else decides the same question.** `openapi.hasBody` and
+   `transport.bodyless` answer "does this verb carry a body"; two lists drift,
+   so one is written as the other's complement.
+3. **Ask what else consumes the thing you changed.** A behavioural test of a
+   generated consumer passes whether or not it is in the route table; only an
+   assertion about the table catches that.
+4. **Name them in the commit.** "Checked X, Y, Z; Y was already right; Z is a
+   spec slated for deletion" is a reviewable claim. Silence is not.
+
+---
+
 ## Mistakes agents make in this repo
 
 Named specifically, because generic advice does not prevent them:
@@ -660,12 +749,17 @@ Named specifically, because generic advice does not prevent them:
 10. **Naming a type `SomethingWithSomething`.** See Naming above.
 11. **Marking work complete with an unverified claim.** Run the command and
     paste what it printed. "Should work" is not a result.
-12. **Writing code for a feature that has no approved spec.** The spec is where
-    a feature is made small enough to finish.
+12. **Writing code for a new package or a public API change that has no
+    approved spec.** The spec is where such a change is made small enough to
+    finish. Bug fixes, tests, docs and adapters are exempt — see the
+    exemption under Spec-driven development, added 2026-09-02.
 13. **Letting the spec and the code drift apart.** If the implementation had to
     differ, the spec is corrected in the same pull request — not later.
 14. **Proposing a spike or a prototype.** Research it, put the options to the
     human, and agree the decision. Then build it once.
+15. **Fixing one producer of a defect and declaring the defect fixed.** Three
+    incidents, same shape — see "Before you call a fix done" above. Enumerate
+    the others and say which you checked.
 
 ---
 

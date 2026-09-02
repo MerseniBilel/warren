@@ -83,14 +83,47 @@ func fieldPath(fe pv.FieldError) string {
 // name the API uses, not the Go field name.
 func jsonName(f reflect.StructField) string { return jsonNameOf(f) }
 
+// jsonNameOf is the name the CLIENT used for this field, which is not always
+// the `json` one.
+//
+// A body field carries `json:`. A field bound from the URL carries `param:` or
+// `query:` and CANNOT carry a useful `json:` — nothing about it is in the
+// body — so the Go field name used to leak out for those. Field test #15
+// measured both halves of one field in one API:
+//
+//	GET /books?limit=abc   → {"details":{"limit":"…invalid syntax"}}
+//	GET /books?limit=9999  → {"details":{"Limit":"must be at most 100"}}
+//
+// The binder reported the tag name and the validator reported the Go name, so
+// a client keying on `details` saw two names for one field depending on which
+// check failed. transport's bindParams uses the tag, so this follows it.
+//
+// json first, so no body field's reported name changes.
 func jsonNameOf(f reflect.StructField) string {
-	tag := f.Tag.Get("json")
+	if name := firstTagName(f, "json"); name != "" {
+		return name
+	}
+	// param before query, matching paramSetters' own precedence, so a field
+	// carrying both is named the way it is bound.
+	if name := firstTagName(f, "param"); name != "" {
+		return name
+	}
+	if name := firstTagName(f, "query"); name != "" {
+		return name
+	}
+	return f.Name
+}
+
+// firstTagName is the name part of a struct tag — everything before the first
+// comma — or "" when the tag is absent, empty, or the explicit "-".
+func firstTagName(f reflect.StructField, key string) string {
+	tag := f.Tag.Get(key)
 	if tag == "" {
-		return f.Name
+		return ""
 	}
 	name, _, _ := strings.Cut(tag, ",")
-	if name == "" || name == "-" {
-		return f.Name
+	if name == "-" {
+		return ""
 	}
 	return name
 }

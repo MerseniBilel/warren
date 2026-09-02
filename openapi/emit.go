@@ -290,9 +290,18 @@ func (e *emitter) parametersOf(t reflect.Type, route string) []Parameter {
 		if !f.IsExported() {
 			continue
 		}
+		// A field the author declared unbindable — json:"-", or param:/query:
+		// spelled "-" — is bound by nothing, so it is a parameter of nothing.
+		// Without this the document would publish a parameter literally named
+		// "-", which is the invalid-document problem the wildcard checks
+		// exist to prevent, arriving through the opt-out that fixes another
+		// one. Kept in step with transport's optedOut.
+		if f.Tag.Get("json") == "-" || f.Tag.Get("param") == "-" || f.Tag.Get("query") == "-" {
+			continue
+		}
 		for _, in := range []struct{ tag, where string }{{"param", "path"}, {"query", "query"}} {
 			name := f.Tag.Get(in.tag)
-			if name == "" {
+			if name == "" || name == "-" {
 				continue
 			}
 			s := e.schemaFor(f.Type, route)

@@ -90,6 +90,28 @@ func InModule(name string) Option {
 // diagnostic tells you to do — booted in production and failed every module
 // test in that module, because NewModuleTest calls Start itself and never
 // touches App.Validator.
+//
+// IT DOES NOT MAKE Invoke VALIDATE, and the name invites the opposite reading.
+// A validator satisfies the BOOT-TIME check that every `validate:` tag in the
+// graph is one the installed implementation understands. The tags themselves
+// run on the TRANSPORT EDGE — planRule compiles a rule per route at boot step
+// 5, and the invoker calls it before the handler — and [Invoke] calls
+// Handle directly, so nothing on that edge runs.
+//
+// The consequence, measured by field test #15: a test asserting that
+// `validate:"min=2"` rejects a one-character name passes with err == nil,
+// through this harness, with the validator installed, while the same request
+// over HTTP correctly answers 400. A green test that cannot fail is worse
+// than no test.
+//
+// To test a validation rule, go through the transport:
+//
+//	s := servertest.New(t, user.Module())
+//	res := s.Post(t, "/members", map[string]string{"name": "A"})
+//	// res.Status == 400
+//
+// Making Invoke apply the same rule is scheduled for v0.3; until it lands this
+// doc comment is the contract.
 func WithValidator(v validate.Validator) Option {
 	return Option{apply: func(c *config) {
 		c.subs = append(c.subs, warren.Bind[validate.Validator](v))
@@ -249,6 +271,17 @@ func (a *App) Warren() *warren.App { return a.app }
 // it, returning the handler's own result and error. Context is first, as
 // everywhere else in Warren. A resolution failure — the module does not
 // provide that handler — is returned as Warren's boot diagnostic.
+//
+// IT BOOTS THE GRAPH, NOT THE EDGE. Everything the transport does before the
+// handler — decoding the body, binding `param:` and `query:` fields, and
+// applying `validate:` tags — is compiled per route at boot step 5 and lives
+// on the invoker, and Invoke calls Handle directly. So a request Invoke
+// accepts may be one the same service would answer 400 to, and a test written
+// to prove a validation rule works passes whether or not it does. See
+// [WithValidator], which does NOT change this.
+//
+// Use it for the use case's own logic. Use transport/http's servertest for
+// anything the edge decides.
 func Invoke[Req, Res any](ctx context.Context, a *App, req Req) (Res, error) {
 	return InvokeIn[Req, Res](ctx, a, a.module, req)
 }

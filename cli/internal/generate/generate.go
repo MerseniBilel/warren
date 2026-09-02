@@ -227,6 +227,26 @@ func Repository(opts Options) (string, error) {
 	// The project's OWN variable, so the generated skip names something that
 	// exists in this application rather than a generic DATABASE_URL.
 	data["DSNVar"] = strconv.Quote(envPrefix(opts.Dir) + "_DATABASE_URL")
+	// The postgres implementation gets its own FILE and its own TYPE.
+	//
+	// Both used to be the memory one's: <agg>_repository.go, holding
+	// <Agg>Repository. GETTING_STARTED §8 tells you to KEEP a memory
+	// implementation for offline tests, so the documented workflow asked the
+	// generator to overwrite the file the documentation told you to keep —
+	// and --force did it silently, destroying a hand-written repository and
+	// the List method the port required. Field test #16 paid eight sed
+	// expressions renaming the file, the type and the constructor by hand.
+	//
+	// A distinct name means both coexist with no rename, no --force, and no
+	// collision in one package: <agg>_repository_postgres.go holding
+	// <Agg>PostgresRepository. Both constructors return the same domain PORT,
+	// so the module's provider list decides which one the graph uses — which
+	// is what §8 said the swap would cost, and now what it actually costs.
+	repoType, repoFile := opts.Name+"Repository", data["Snake"]+"_repository"
+	if driver == "postgres" {
+		repoType, repoFile = opts.Name+"PostgresRepository", data["Snake"]+"_repository_postgres"
+	}
+	data["RepoType"] = repoType
 	// The repository implements the port the ENTITY declares and stores the
 	// aggregate the entity defines. Without it the generated file cannot
 	// compile — and until this check existed the generator wrote it anyway,
@@ -251,12 +271,12 @@ func Repository(opts Options) (string, error) {
 	p := &plan{
 		dir: opts.Dir, dryRun: opts.DryRun, force: opts.Force,
 		files: map[string][]byte{
-			base + "/infrastructure/" + data["Snake"] + "_repository.go":      content,
-			base + "/infrastructure/" + data["Snake"] + "_repository_test.go": contract,
+			base + "/infrastructure/" + repoFile + ".go":      content,
+			base + "/infrastructure/" + repoFile + "_test.go": contract,
 		},
-		edits: []edit{provide(data, base, "infrastructure", "New"+opts.Name+"Repository")},
+		edits: []edit{provide(data, base, "infrastructure", "New"+repoType)},
 		declares: []decl{{base + "/infrastructure", []string{
-			opts.Name + "Repository", "New" + opts.Name + "Repository",
+			repoType, "New" + repoType,
 		}}},
 	}
 	if driver == "postgres" {
@@ -299,8 +319,23 @@ func Repository(opts Options) (string, error) {
 			return "", mmerr
 		}
 		p.files["cmd/migrate/main.go"] = migrateMain
-		// One migrate command per PROJECT, not per aggregate.
-		p.keepExisting = map[string]bool{"cmd/migrate/main.go": true}
+		// The embed that makes cmd/migrate runnable from anywhere. It is a
+		// deploy step — a container WORKDIR, a CI runner's temp directory —
+		// and os.DirFS("db/migrations") only ever worked from the repository
+		// root. Field test #16 ran the built binary from /tmp: Warren's own
+		// tables applied, the project's did not, exit 1, database half
+		// migrated, and the error did not even name the path it wanted.
+		embedded, eerr := render("migrations_embed.go.tmpl", data)
+		if eerr != nil {
+			return "", eerr
+		}
+		p.files["db/migrations/schema.go"] = embedded
+		// One migrate command per PROJECT, not per aggregate — and one
+		// embed, for the same reason.
+		p.keepExisting = map[string]bool{
+			"cmd/migrate/main.go":     true,
+			"db/migrations/schema.go": true,
+		}
 		// The project's OWN variable, not a generic one. A scaffolded
 		// cmd/migrate reads <APP>_DATABASE_URL, so printing DATABASE_URL
 		// sent the reader to `DUPE_DATABASE_URL is not set` — advice that
@@ -532,8 +567,8 @@ func Consumer(opts Options) (string, error) {
 	p := &plan{
 		dir: opts.Dir, dryRun: opts.DryRun, force: opts.Force,
 		files: map[string][]byte{
-			base + "/application/on_" + data["Snake"] + ".go":  handler,
-			base + "/on_" + data["Snake"] + "_subscription.go": subscription,
+			base + "/application/on_" + data["Snake"] + ".go": handler,
+			base + "/on_" + data["Snake"] + "_consumer.go":    subscription,
 		},
 		edits: []edit{
 			provide(data, base, "application", "NewOn"+opts.Name+"Handler"),
@@ -541,16 +576,26 @@ func Consumer(opts Options) (string, error) {
 				path: base + "/module.go",
 				what: "consume " + data["Topic"],
 				fn: func(src []byte) ([]byte, error) {
-					// Providers plus Eager, not Consumers: the generated
-					// subscription wires its own pipeline and lifecycle hook
-					// rather than registering through r.OnEvent, so
-					// it is not a transport.Controller. Eager is what builds
-					// a type at boot that nothing else depends on.
-					src, err := astedit.AddArgument(src, "warren.Providers", "new"+opts.Name+"Subscription")
-					if err != nil {
-						return nil, err
-					}
-					return astedit.AddArgument(src, "warren.NewModule", "warren.Eager[*"+data["Lower"]+"Subscription]()")
+					// Consumers, not Providers plus Eager. Amended 2026-09-02,
+					// and this comment used to justify the shape it replaces:
+					// "the generated subscription wires its own pipeline and
+					// lifecycle hook rather than registering through
+					// r.OnEvent, so it is not a transport.Controller."
+					//
+					// It is one now. The generated consumer registers through
+					// r.OnEvent like the scaffold's has since the adapters
+					// shipped, so `warren new` and `warren g consumer` stop
+					// producing two contradictory idioms in one project —
+					// which field test #15 called the single most
+					// confidence-destroying thing it saw.
+					//
+					// The second-order defect is the reason this is not
+					// cosmetic: a Providers+Eager consumer never enters the
+					// frozen route table, so `openapi` and every tool that
+					// reads Table.Events() was blind to every CLI-generated
+					// consumer. TestAGeneratedConsumerEntersTheRouteTable is
+					// the regression that would have caught it.
+					return astedit.AddArgument(src, "warren.Consumers", "new"+opts.Name+"Consumer")
 				},
 			},
 		},
@@ -558,13 +603,16 @@ func Consumer(opts Options) (string, error) {
 			{base + "/application", []string{
 				opts.Name, opts.Name + "Handled", "on" + opts.Name, "NewOn" + opts.Name + "Handler",
 			}},
-			{base, []string{data["Lower"] + "Subscription", "new" + opts.Name + "Subscription"}},
+			{base, []string{data["Lower"] + "Consumer", "new" + opts.Name + "Consumer"}},
 		},
 	}
-	// The generated subscription injects inbox.Store AND broker.Publisher.
-	// In a --db postgres project only the adapter module exports the first;
-	// in a --broker kafka project only the broker MODULE exports the second,
-	// because platform cannot pass on a port it merely imports.
+	// The consumer chain the broker module assembles needs inbox.Store AND
+	// broker.Publisher. In a --db postgres project only the adapter module
+	// exports the first; in a --broker kafka project only the broker MODULE
+	// exports the second, because platform cannot pass on a port it merely
+	// imports. The generated file no longer names either type — the framework
+	// resolves them — but the MODULE still has to import the adapters, so
+	// this edit is unchanged.
 	if adapters := platformAdapters(opts.Dir, "Postgres", "Broker"); len(adapters) > 0 {
 		p.edits = append(p.edits, importAdapter(data, base, adapters))
 	}
@@ -815,11 +863,12 @@ func (p *plan) apply() (string, error) {
 	}
 
 	if p.dryRun {
-		return p.describe(existing), nil
+		return p.describe(existing, nil), nil
 	}
 
 	// From here on anything written is undone on failure.
 	undo := &rollback{dir: p.dir, original: original}
+	backups := map[string]string{}
 	for _, path := range sortedKeys(p.files) {
 		full := filepath.Join(p.dir, path)
 		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
@@ -828,6 +877,12 @@ func (p *plan) apply() (string, error) {
 		if existing[path] {
 			if prev, rerr := os.ReadFile(full); rerr == nil {
 				undo.original[path] = prev
+				if backup, berr := saveOriginal(full, prev); berr != nil {
+					return "", undo.after(berr)
+				} else if backup != "" {
+					backups[path] = backup
+					undo.created = append(undo.created, backup)
+				}
 			}
 		} else {
 			undo.created = append(undo.created, path)
@@ -841,7 +896,34 @@ func (p *plan) apply() (string, error) {
 			return "", undo.after(errCannotWrite(path, err))
 		}
 	}
-	return p.describe(existing), nil
+	return p.describe(existing, backups), nil
+}
+
+// saveOriginal copies a file this run is about to overwrite to <path>.orig,
+// and returns the backup's path relative to nothing — the caller holds the
+// project-relative one.
+//
+// --force used to destroy without a copy. Field test #15: `warren g repository
+// --driver postgres --force` replaced 100 lines of hand-written repository,
+// including the List method the domain port required, with a template that
+// knows id, created_at and version — and clobbered two hand-written migration
+// files in the same run. The compiler caught the first; nothing caught the
+// second, and there was nothing to recover from either. A tool that silently
+// destroys uncommitted work is not a papercut.
+//
+// AN EXISTING .orig IS NEVER OVERWRITTEN. The second --force in a row would
+// otherwise back up the FIRST run's generated output over the hand-written
+// original, which is precisely the content worth keeping. The oldest backup is
+// the valuable one.
+func saveOriginal(full string, prev []byte) (string, error) {
+	backup := full + ".orig"
+	if _, err := os.Stat(backup); err == nil {
+		return "", nil // an earlier run's backup: older, and worth more
+	}
+	if err := os.WriteFile(backup, prev, 0o644); err != nil {
+		return "", errCannotWrite(filepath.Base(backup), err)
+	}
+	return backup, nil
 }
 
 // rollback restores what a half-finished run changed.
@@ -879,17 +961,40 @@ func (r *rollback) after(cause error) error {
 // reports afterwards. It distinguishes create from overwrite, because a
 // plan that calls an overwrite "create" is how a hand-wired file gets lost
 // without anyone noticing.
-func (p *plan) describe(existing map[string]bool) string {
+func (p *plan) describe(existing map[string]bool, backups map[string]string) string {
 	var b strings.Builder
+	var destroyed []string
 	for _, path := range sortedKeys(p.files) {
 		verb := "create   "
 		if existing[path] {
 			verb = "overwrite"
+			destroyed = append(destroyed, path)
 		}
 		fmt.Fprintf(&b, "  %s  %s\n", verb, path)
 	}
 	for _, e := range p.edits {
 		fmt.Fprintf(&b, "  edit       %s  (%s)\n", e.path, e.what)
+	}
+	// Naming the overwrite in a list is not enough when the content is gone.
+	// --force overwrote hand-written files silently until 2026-09-02; it now
+	// says what it replaced and where the previous content went.
+	if len(destroyed) > 0 {
+		b.WriteString("\n")
+		if p.dryRun {
+			fmt.Fprintf(&b, "  --force WILL REPLACE %d existing file(s), listed above.\n"+
+				"  Each one's current content is copied to <file>.orig first.\n", len(destroyed))
+		} else {
+			fmt.Fprintf(&b, "  --force replaced %d existing file(s). The previous content is in:\n\n", len(destroyed))
+			for _, path := range destroyed {
+				if _, ok := backups[path]; ok {
+					fmt.Fprintf(&b, "      %s.orig\n", path)
+				} else {
+					fmt.Fprintf(&b, "      %s.orig  (kept from an earlier run — the older backup is the valuable one)\n", path)
+				}
+			}
+			b.WriteString("\n  Diff them before deleting: a generated template knows the aggregate's\n" +
+				"  id, created_at and version, and nothing you added by hand.\n")
+		}
 	}
 	// What the generator could NOT do for you. A generator that reports only
 	// what it wrote leaves the user believing the wiring is finished, and the

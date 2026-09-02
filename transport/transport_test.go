@@ -1087,8 +1087,8 @@ func TestNilHandlerJoinsOtherRegistrationFailures(t *testing.T) {
 	r := b.For("user")
 	var h app.Handler[registerUser, userDTO]
 	r.Post("/users", h)
-	good := app.Handler[registerUser, userDTO](app.HandlerFunc[registerUser, userDTO](
-		func(context.Context, registerUser) (userDTO, error) { return userDTO{}, nil }))
+	good := app.Handler[getUser, userDTO](app.HandlerFunc[getUser, userDTO](
+		func(context.Context, getUser) (userDTO, error) { return userDTO{}, nil }))
 	r.Get("/users/{id}", good)
 	r.Get("/users/{id}", good)
 
@@ -1120,8 +1120,8 @@ func TestEveryJoinedFailureLeadsWithItsOwnHeadline(t *testing.T) {
 	r := b.For("user")
 	var nilHandler app.Handler[registerUser, userDTO]
 	r.Post("/users", nilHandler)
-	good := app.Handler[registerUser, userDTO](app.HandlerFunc[registerUser, userDTO](
-		func(context.Context, registerUser) (userDTO, error) { return userDTO{}, nil }))
+	good := app.Handler[getUser, userDTO](app.HandlerFunc[getUser, userDTO](
+		func(context.Context, getUser) (userDTO, error) { return userDTO{}, nil }))
 	r.Get("/users/{id}", good)
 	r.Get("/users/{id}", good)
 
@@ -1148,18 +1148,23 @@ func TestEveryJoinedFailureLeadsWithItsOwnHeadline(t *testing.T) {
 		}
 		indents[trimmed] = len(line) - len(trimmed)
 	}
+	// Absent and nested are different failures and the message must say
+	// which. Reading "nested in a sibling's" for a headline that was simply
+	// not in the report cost a reviewer real time on 2026-09-02: the
+	// duplicate had been swallowed upstream, not nested.
 	for _, want := range []string{"✗ nil handler", "✗ duplicate route"} {
-		if _, ok := indents[want]; !ok {
-			t.Errorf("no headline %q of its own — the failure is nested in a sibling's:\n%s", want, report)
+		if _, ok := indents[want]; ok {
+			continue
 		}
+		if strings.Contains(report, strings.TrimPrefix(want, "✗ ")) {
+			t.Errorf("%q appears in the report but not as a headline of its own — "+
+				"the failure is nested in a sibling's:\n%s", want, report)
+			continue
+		}
+		t.Errorf("%q is absent from the report entirely — the failure was "+
+			"swallowed before it could be joined:\n%s", want, report)
 	}
-	seen := map[int][]string{}
-	for headline, indent := range indents {
-		seen[indent] = append(seen[indent], headline)
-	}
-	if len(seen) > 1 {
-		t.Errorf("the joined failures sit at %d different indents, so one nests under another: %v\n%s", len(seen), seen, report)
-	}
+	assertOneIndent(t, report)
 }
 
 // concreteRegisterHandler is a CONCRETE handler struct — not an
@@ -1170,6 +1175,18 @@ type concreteRegisterHandler struct{}
 
 func (concreteRegisterHandler) Handle(context.Context, registerUser) (userDTO, error) {
 	return userDTO{ID: "u1"}, nil
+}
+
+// concreteGetHandler is the same proof for a route that CARRIES a wildcard.
+// registerUser cannot serve one: it binds no path parameter, and a {id} no
+// field binds is a registration failure. Giving registerUser a `param:"id"`
+// is not the alternative — it is registered at POST /users in nine places,
+// and a param: tag with no matching wildcard is refused in the other
+// direction. Two request types is what the two route shapes actually need.
+type concreteGetHandler struct{}
+
+func (concreteGetHandler) Handle(_ context.Context, q getUser) (userDTO, error) {
+	return userDTO{ID: q.ID}, nil
 }
 
 // TestRegistrationNeedsNoTypeArguments pins §3.5's headline ergonomic claim:
@@ -1185,11 +1202,13 @@ func TestRegistrationNeedsNoTypeArguments(t *testing.T) {
 	r := b.For("user")
 	h := concreteRegisterHandler{}
 
+	g := concreteGetHandler{}
+
 	r.Post("/users", h)
-	r.Get("/users/{id}", h)
-	r.Put("/users/{id}", h)
-	r.Patch("/users/{id}", h)
-	r.Delete("/users/{id}", h)
+	r.Get("/users/{id}", g)
+	r.Put("/users/{id}", g)
+	r.Patch("/users/{id}", g)
+	r.Delete("/users/{id}", g)
 	r.Method("user.v1.UserService/Register", h)
 	r.OnEvent("user.registered", h)
 
@@ -1248,5 +1267,661 @@ func TestZeroRegistrarPanicsWithItsOwnDiagnostic(t *testing.T) {
 			var zero transport.Registrar
 			tc.call(&zero)
 		})
+	}
+}
+
+// --- the wildcard/param agreement check -----------------------------------
+//
+// transport refuses a route whose `param:` tags and whose pattern's wildcards
+// disagree, in BOTH directions. The forward half (a tag with no wildcard) is
+// covered by TestHTTPStillRefusesAParamWithNoWildcard and
+// TestGRPCAcceptsAParamTaggedHandler. What follows covers the reverse half,
+// which shipped on 2026-08-31 with no test at all — the whole mechanism of
+// that incident, since a boot check that refuses user code and is never
+// exercised is a check nobody can change safely.
+
+// wcNoParams binds no PATH parameter, so any pattern with a wildcard
+// disagrees with it. Its one field carries a query: tag so that these routes
+// exercise the wildcard check alone — an exported field with neither tag on a
+// bodyless route is a second, independent failure (checkUnbindable), and a
+// fixture that tripped both would pin two diagnostics in one golden.
+type wcNoParams struct {
+	Note string `query:"note"`
+}
+
+// wcRest binds a multi-segment wildcard. {rest...} declares the name "rest",
+// so that is the tag that satisfies it.
+type wcRest struct {
+	Rest string `param:"rest"`
+}
+
+// wcQueryOnly carries a query: tag for the same name as the wildcard. A query
+// parameter cannot satisfy a path wildcard, which is the point of the test.
+type wcQueryOnly struct {
+	ID string `query:"id"`
+}
+
+// wcOtherParam is the near miss: a `param:` field for a name the pattern does
+// not declare, beside a wildcard no field declares.
+type wcOtherParam struct {
+	BookID string `param:"bookID"`
+}
+
+func wcHandler[Req any]() app.Handler[Req, userDTO] {
+	return app.HandlerFunc[Req, userDTO](func(context.Context, Req) (userDTO, error) {
+		return userDTO{}, nil
+	})
+}
+
+// TestPathWildcardNothingBindsIsRefused pins the diagnostic itself. The
+// message is the product (AGENT.md invariant 2), so it gets a golden.
+func TestPathWildcardNothingBindsIsRefused(t *testing.T) {
+	t.Parallel()
+
+	b := transport.NewBuilder()
+	b.For("catalog").Get("/books/{id}", wcHandler[wcNoParams]())
+
+	_, err := b.Table()
+	if err == nil {
+		t.Fatal("a wildcard no field binds built a table")
+	}
+	assertGolden(t, "path_wildcard_nothing_binds", err.Error())
+}
+
+// TestTheHintNamesTheFieldTheUserMustWrite — the diagnostic's entire value is
+// that it can be pasted, so the field it prints has to be the field a Go
+// programmer would write, for THIS wildcard. The hint used to name the field
+// ID whatever the wildcard was called, so {rest...} was answered with a field
+// called ID tagged param:"rest" — a mismatch, and not code anyone would keep.
+func TestTheHintNamesTheFieldTheUserMustWrite(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		pattern string
+		want    string
+	}{
+		{"/books/{id}", "ID string `param:\"id\"`"},
+		{"/files/{rest...}", "Rest string `param:\"rest\"`"},
+		{"/tenants/{tenantId}/x", "TenantID string `param:\"tenantId\"`"},
+	} {
+		t.Run(tc.pattern, func(t *testing.T) {
+			t.Parallel()
+			b := transport.NewBuilder()
+			b.For("m").Get(tc.pattern, wcHandler[wcNoParams]())
+			_, err := b.Table()
+			if err == nil {
+				t.Fatalf("%s built a table", tc.pattern)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("the hint does not offer %q:\n%v", tc.want, err)
+			}
+		})
+	}
+}
+
+// TestBothSpellingsOfAWildcardAreChecked — {name} and {name...} declare the
+// same name, so the check treats them identically. wildcards() strips the
+// "..." for exactly this reason.
+func TestBothSpellingsOfAWildcardAreChecked(t *testing.T) {
+	t.Parallel()
+
+	t.Run("single segment, unbound", func(t *testing.T) {
+		t.Parallel()
+		b := transport.NewBuilder()
+		b.For("m").Get("/files/{id}", wcHandler[wcNoParams]())
+		if _, err := b.Table(); err == nil {
+			t.Fatal("{id} with no field built a table")
+		} else if !strings.Contains(err.Error(), `no field of transport_test.wcNoParams carries `+"`param:\"id\"`") {
+			t.Errorf("the diagnostic does not name {id} and the type:\n%v", err)
+		}
+	})
+
+	t.Run("multi segment, unbound", func(t *testing.T) {
+		t.Parallel()
+		b := transport.NewBuilder()
+		b.For("m").Get("/files/{rest...}", wcHandler[wcNoParams]())
+		if _, err := b.Table(); err == nil {
+			t.Fatal("{rest...} with no field built a table")
+		} else if !strings.Contains(err.Error(), `declares {rest}`) {
+			t.Errorf("the diagnostic must name the wildcard as {rest}, not {rest...}:\n%v", err)
+		}
+	})
+
+	t.Run("multi segment, bound by param:\"rest\"", func(t *testing.T) {
+		t.Parallel()
+		b := transport.NewBuilder()
+		b.For("m").Get("/files/{rest...}", wcHandler[wcRest]())
+		table, err := b.Table()
+		if err != nil {
+			t.Fatalf(`param:"rest" must satisfy {rest...}: %v`, err)
+		}
+		if got := len(table.HTTP()); got != 1 {
+			t.Errorf("route count = %d, want 1", got)
+		}
+	})
+}
+
+// TestAQueryTagDoesNotSatisfyAPathWildcard — a query parameter arrives in the
+// query string and never binds a path segment, so it cannot stand in for one.
+func TestAQueryTagDoesNotSatisfyAPathWildcard(t *testing.T) {
+	t.Parallel()
+
+	b := transport.NewBuilder()
+	b.For("m").Get("/books/{id}", wcHandler[wcQueryOnly]())
+	_, err := b.Table()
+	if err == nil {
+		t.Fatal(`query:"id" satisfied {id}`)
+	}
+	if !strings.Contains(err.Error(), "path wildcard nothing binds") {
+		t.Errorf("the diagnostic is not the unbound-wildcard one:\n%v", err)
+	}
+}
+
+// TestTwoUnboundWildcardsAreTwoSiblingFailures — one route, two mistakes, one
+// boot, two failures at the same indent. The spec's definition of done asks
+// for exactly this, and it is also the property that made checkWildcards
+// return a slice.
+func TestTwoUnboundWildcardsAreTwoSiblingFailures(t *testing.T) {
+	t.Parallel()
+
+	b := transport.NewBuilder()
+	b.For("m").Get("/a/{x}/b/{y}", wcHandler[wcNoParams]())
+	_, err := b.Table()
+	if err == nil {
+		t.Fatal("two unbound wildcards built a table")
+	}
+	report := err.Error()
+	for _, want := range []string{"declares {x}", "declares {y}"} {
+		if !strings.Contains(report, want) {
+			t.Errorf("the report does not carry %q:\n%s", want, report)
+		}
+	}
+	if got := countHeadlines(report, "✗ path wildcard nothing binds"); got != 2 {
+		t.Errorf("two unbound wildcards produced %d headlines, want 2:\n%s", got, report)
+	}
+	assertOneIndent(t, report)
+}
+
+// TestTheNearMissIsNamed — a `param:` field for a name the pattern does not
+// declare, beside a wildcard nothing declares a field for, is the likely
+// cause, and both halves of the check say so.
+func TestTheNearMissIsNamed(t *testing.T) {
+	t.Parallel()
+
+	b := transport.NewBuilder()
+	b.For("m").Get("/books/{id}", wcHandler[wcOtherParam]())
+	_, err := b.Table()
+	if err == nil {
+		t.Fatal("a near miss built a table")
+	}
+	report := err.Error()
+	for _, want := range []string{
+		"carries `param:` for {bookID} and nothing for {id}",
+		"has no {bookID} in the route pattern",
+	} {
+		if !strings.Contains(report, want) {
+			t.Errorf("the report does not carry %q:\n%s", want, report)
+		}
+	}
+	assertOneIndent(t, report)
+}
+
+// TestOnlyHTTPRoutesAreWildcardChecked — a gRPC full method is not a path and
+// HAS no wildcards; an event topic is not a path either; and Raw never enters
+// register, so it is the opt-out for a route that means to ignore a segment
+// it matches on. All three must register clean.
+func TestOnlyHTTPRoutesAreWildcardChecked(t *testing.T) {
+	t.Parallel()
+
+	t.Run("gRPC", func(t *testing.T) {
+		t.Parallel()
+		b := transport.NewBuilder()
+		b.For("m").Method("book.v1.BookService/Get", wcHandler[wcRest]())
+		if _, err := b.Table(); err != nil {
+			t.Errorf("a gRPC method must not be wildcard-checked: %v", err)
+		}
+	})
+
+	t.Run("OnEvent", func(t *testing.T) {
+		t.Parallel()
+		b := transport.NewBuilder()
+		b.For("m").OnEvent("book.created", wcHandler[wcRest]())
+		if _, err := b.Table(); err != nil {
+			t.Errorf("an event topic must not be wildcard-checked: %v", err)
+		}
+	})
+
+	t.Run("Raw", func(t *testing.T) {
+		t.Parallel()
+		b := transport.NewBuilder()
+		b.For("m").Raw(transport.ProtocolHTTP, "GET /raw/{tenant}/doc", &uploadHandler{})
+		table, err := b.Table()
+		if err != nil {
+			t.Fatalf("a raw route carries its own pattern and no request type: %v", err)
+		}
+		if got := len(table.Raw()); got != 1 {
+			t.Errorf("raw route count = %d, want 1", got)
+		}
+	})
+}
+
+// TestAPreJoinedFailureWouldNestUnderItsSibling — the regression test for
+// paramSetters, which returned errRegistration(errs) while the Builder joins
+// with the same function. The result was a second "✗ route registration
+// failed" standing where a headline belongs, with the real failure indented
+// beneath it. checkWildcards was fixed for this on 2026-08-31 and paramSetters
+// was not; nothing covered the difference.
+func TestAPreJoinedFailureWouldNestUnderItsSibling(t *testing.T) {
+	t.Parallel()
+
+	b := transport.NewBuilder()
+	r := b.For("m")
+	var nilHandler app.Handler[registerUser, userDTO]
+	r.Post("/users", nilHandler)
+	r.Get("/things/{id}", wcHandler[unbindableParam]())
+
+	_, err := b.Table()
+	if err == nil {
+		t.Fatal("an unbindable parameter built a table")
+	}
+	report := err.Error()
+	if got := countHeadlines(report, "✗ route registration failed"); got != 0 {
+		t.Errorf("the joined header appears %d times INSIDE the report — a "+
+			"pre-joined group is standing where a headline belongs:\n%s", got, report)
+	}
+	for _, want := range []string{"✗ nil handler", "✗ unsupported parameter type"} {
+		if !strings.Contains(report, want) {
+			t.Errorf("the report does not carry %q:\n%s", want, report)
+		}
+	}
+	assertOneIndent(t, report)
+}
+
+// unbindableParam tags a kind no string can be converted into, so
+// paramSetters refuses it.
+type unbindableParam struct {
+	ID chan int `param:"id"`
+}
+
+// countHeadlines counts the ✗ lines of a report whose trimmed text is exactly
+// headline. The report's own opening line is excluded — it is the join, not a
+// failure.
+func countHeadlines(report, headline string) int {
+	n := 0
+	for _, line := range strings.Split(report, "\n")[1:] {
+		if strings.TrimLeft(line, " ") == headline {
+			n++
+		}
+	}
+	return n
+}
+
+// assertOneIndent is the shared form of TestEveryJoinedFailureLeadsWithItsOwn
+// Headline's structural assertion: every ✗ after the header sits at the same
+// indent, because leading spaces are the only structure a terminal has.
+func assertOneIndent(t *testing.T, report string) {
+	t.Helper()
+	seen := map[int][]string{}
+	for _, line := range strings.Split(report, "\n")[1:] {
+		trimmed := strings.TrimLeft(line, " ")
+		if !strings.HasPrefix(trimmed, "✗ ") {
+			continue
+		}
+		indent := len(line) - len(trimmed)
+		seen[indent] = append(seen[indent], trimmed)
+	}
+	if len(seen) > 1 {
+		t.Errorf("the joined failures sit at %d different indents, so one nests under another: %v\n%s",
+			len(seen), seen, report)
+	}
+}
+
+// --- the bodyless-route unbindable-field check ----------------------------
+//
+// Field test #15, finding 1: a one-character typo in a struct tag KEY —
+// `query:"author"` → `quesry:"author"` — booted clean and silently dropped the
+// filter, so GET /books?author=Alice returned Bob's books too, with HTTP 200.
+// The framework already walked every one of those fields at boot; it just had
+// nothing to say about one it could not make sense of.
+
+// ubTypo is the measured case: the key is misspelled, so the tag binds
+// nothing and reflect reports no param: and no query:.
+type ubTypo struct {
+	Author string `quesry:"author"`
+}
+
+// ubUntagged is the second variant: an exported field with no tag at all.
+type ubUntagged struct {
+	Author string
+}
+
+// ubJSONOnGet is the third, and `warren g` already refuses to write it —
+// "A Get carries no body, so a `json:` field here would be unsatisfiable."
+type ubJSONOnGet struct {
+	Author string `json:"author"`
+}
+
+// ubBodyField is the case that must NOT be refused. On a POST the same field
+// is bound by encoding/json, and the db: tag beside it is ordinary.
+type ubBodyField struct {
+	Author string `json:"author" db:"author"`
+	Note   string
+}
+
+// ubUnexported carries nothing bindable and nothing exported, so there is
+// nothing to refuse.
+type ubUnexported struct {
+	author string //nolint:unused // the point of the fixture is that it is skipped
+}
+
+// TestABodylessRouteRefusesAFieldNothingCanPopulate pins the diagnostic.
+func TestABodylessRouteRefusesAFieldNothingCanPopulate(t *testing.T) {
+	t.Parallel()
+
+	b := transport.NewBuilder()
+	b.For("catalog").Get("/books", wcHandler[ubTypo]())
+
+	_, err := b.Table()
+	if err == nil {
+		t.Fatal("a field nothing can populate built a table")
+	}
+	assertGolden(t, "field_can_never_be_bound", err.Error())
+}
+
+// TestAllThreeSpellingsOfAnUnbindableFieldAreRefused — the report measured
+// three, and one check has to catch all three or it is not worth the boot
+// failure it costs.
+func TestAllThreeSpellingsOfAnUnbindableFieldAreRefused(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name     string
+		register func(*transport.Registrar)
+	}{
+		{"misspelled tag key", func(r *transport.Registrar) { r.Get("/books", wcHandler[ubTypo]()) }},
+		{"no tag at all", func(r *transport.Registrar) { r.Get("/books", wcHandler[ubUntagged]()) }},
+		{"json tag on a GET", func(r *transport.Registrar) { r.Get("/books", wcHandler[ubJSONOnGet]()) }},
+		{"delete is bodyless too", func(r *transport.Registrar) { r.Delete("/books", wcHandler[ubUntagged]()) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			b := transport.NewBuilder()
+			tc.register(b.For("catalog"))
+			_, err := b.Table()
+			if err == nil {
+				t.Fatalf("%s built a table", tc.name)
+			}
+			for _, want := range []string{"field can never be bound", "Author", "silently ignored"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("the diagnostic does not carry %q:\n%v", want, err)
+				}
+			}
+		})
+	}
+}
+
+// TestARouteWithABodyIsNotWildcardOrTagChecked — the half that must NOT fire.
+// A POST binds an untagged exported field through encoding/json, and a db: or
+// yaml: tag beside no binding tag is ordinary and legitimate. A check that
+// refused here would be the guessing linter this package has declined three
+// times, and it would be switched off within a month.
+func TestARouteWithABodyIsNotWildcardOrTagChecked(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name     string
+		register func(*transport.Registrar)
+	}{
+		{"POST", func(r *transport.Registrar) { r.Post("/books", wcHandler[ubBodyField]()) }},
+		{"PUT", func(r *transport.Registrar) { r.Put("/books", wcHandler[ubBodyField]()) }},
+		{"PATCH", func(r *transport.Registrar) { r.Patch("/books", wcHandler[ubBodyField]()) }},
+		{"a typo on a body route is still a body field", func(r *transport.Registrar) {
+			r.Post("/books", wcHandler[ubTypo]())
+		}},
+		{"GET with nothing exported", func(r *transport.Registrar) {
+			r.Get("/books", wcHandler[ubUnexported]())
+		}},
+		{"gRPC is not an HTTP verb", func(r *transport.Registrar) {
+			r.Method("book.v1.BookService/List", wcHandler[ubUntagged]())
+		}},
+		{"OnEvent is not an HTTP verb", func(r *transport.Registrar) {
+			r.OnEvent("book.listed", wcHandler[ubUntagged]())
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			b := transport.NewBuilder()
+			tc.register(b.For("catalog"))
+			if _, err := b.Table(); err != nil {
+				t.Errorf("%s must register clean: %v", tc.name, err)
+			}
+		})
+	}
+}
+
+// TestTheTagKeyNearMissIsSuggested — the refusal is provable and the hint is a
+// guess, and they are not interchangeable. The hint fires only inside a
+// failure already proven, and only for a key a small edit away from a real
+// one: `quesry` earns a suggestion, `db` and `json` must not.
+func TestTheTagKeyNearMissIsSuggested(t *testing.T) {
+	t.Parallel()
+
+	t.Run("a near miss is named", func(t *testing.T) {
+		t.Parallel()
+		b := transport.NewBuilder()
+		b.For("catalog").Get("/books", wcHandler[ubTypo]())
+		_, err := b.Table()
+		if err == nil {
+			t.Fatal("the typo built a table")
+		}
+		if want := "The struct tag has a key `quesry`, which binds nothing. Did you mean `query`?"; !strings.Contains(err.Error(), want) {
+			t.Errorf("the hint does not offer %q:\n%v", want, err)
+		}
+	})
+
+	t.Run("a real tag key earns no suggestion", func(t *testing.T) {
+		t.Parallel()
+		b := transport.NewBuilder()
+		b.For("catalog").Get("/books", wcHandler[ubJSONOnGet]())
+		_, err := b.Table()
+		if err == nil {
+			t.Fatal("the json tag built a table")
+		}
+		if strings.Contains(err.Error(), "Did you mean") {
+			t.Errorf("json is not a near miss for param or query, so nothing should be suggested:\n%v", err)
+		}
+	})
+}
+
+// TestBothFieldChecksReportInOneBoot — a route can be wrong in both ways at
+// once, and running one check per registration attempt would make the second
+// mistake invisible until the first was fixed. That is the boot-ordering
+// promise, applied to two checks that both hold their evidence already.
+func TestBothFieldChecksReportInOneBoot(t *testing.T) {
+	t.Parallel()
+
+	type bothWrong struct {
+		Author string `quesry:"author"` // unbindable
+	}
+
+	b := transport.NewBuilder()
+	b.For("catalog").Get("/books/{id}", wcHandler[bothWrong]())
+	_, err := b.Table()
+	if err == nil {
+		t.Fatal("two independent field mistakes built a table")
+	}
+	report := err.Error()
+	for _, want := range []string{"✗ field can never be bound", "✗ path wildcard nothing binds"} {
+		if !strings.Contains(report, want) {
+			t.Errorf("the report does not carry %q:\n%s", want, report)
+		}
+	}
+	assertOneIndent(t, report)
+}
+
+// TestTwoFeaturesOnOneTopicGetDistinctSubscriptionNames answers the blocker
+// question `cli/internal/generate/SPEC.md` refused to let the consumer
+// template swap land without.
+//
+// The hand-rolled subscription that swap replaces set its own name —
+// `const name = "{feature}.{event}"` — with the comment "It scopes the
+// deduplication key, which is what lets another feature consume this same
+// topic without one of them suppressing the other." r.OnEvent derives the
+// name instead, and broker/consumer passes EventRoute.Name straight into
+// broker.Pipeline as the dedupe scope. If the derived name were per-TOPIC
+// rather than per-SUBSCRIPTION, moving the generator onto OnEvent would give
+// two features one dedupe scope and the first to handle a message would
+// silently suppress it for the second.
+//
+// It is per-subscription: handlerName prefixes the MODULE, so the same
+// handler shape in two features cannot collide.
+func TestTwoFeaturesOnOneTopicGetDistinctSubscriptionNames(t *testing.T) {
+	t.Parallel()
+
+	const topic = "loan.opened"
+
+	b := transport.NewBuilder()
+	b.For("catalog").OnEvent(topic, concreteRegisterHandler{})
+	b.For("lending").OnEvent(topic, concreteRegisterHandler{})
+
+	table, err := b.Table()
+	if err != nil {
+		t.Fatalf("two features consuming one topic must both register: %v", err)
+	}
+	events := table.Events()
+	if len(events) != 2 {
+		t.Fatalf("two subscriptions registered, table has %d", len(events))
+	}
+	if events[0].Name == events[1].Name {
+		t.Fatalf("both subscriptions are named %q, so they share one dedupe scope and "+
+			"whichever handles a message first suppresses it for the other", events[0].Name)
+	}
+	for _, e := range events {
+		if e.Topic != topic {
+			t.Errorf("topic = %q, want %q", e.Topic, topic)
+		}
+	}
+	if !strings.HasPrefix(events[0].Name, "catalog.") || !strings.HasPrefix(events[1].Name, "lending.") {
+		t.Errorf("the subscription name must carry its module, got %q and %q",
+			events[0].Name, events[1].Name)
+	}
+}
+
+// --- the opt-out: field test #16, finding 3 -------------------------------
+//
+// app.Middleware[Req, Res] is func(Handler) Handler, so a middleware may fill
+// the request before the handler sees it — Warren's own type invites it — and
+// a cross-cutting tenancy middleware setting a Tenant field on the DTO is the
+// idiomatic shape. On a bodyless route that field carries no param: and no
+// query:, so the check refused it, and every remedy it suggested was wrong:
+// query:"tenant" hands the tenant to the caller (a cross-tenant read), param:
+// is the same plus a wildcard, and "unexport it" is impossible because the
+// middleware lives in another package.
+
+type optOutJSON struct {
+	Tenant string `json:"-"` // set by a middleware; never from the wire
+	Status string `query:"status"`
+}
+
+type optOutQuery struct {
+	Tenant string `query:"-"`
+}
+
+type optOutParam struct {
+	Tenant string `param:"-"`
+}
+
+// TestAFieldCanDeclareItselfUnbindable — the three accepted spellings, on the
+// route shape that refused them.
+func TestAFieldCanDeclareItselfUnbindable(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name     string
+		register func(*transport.Registrar)
+	}{
+		{`json:"-"`, func(r *transport.Registrar) { r.Get("/skus", wcHandler[optOutJSON]()) }},
+		{`query:"-"`, func(r *transport.Registrar) { r.Get("/skus", wcHandler[optOutQuery]()) }},
+		{`param:"-"`, func(r *transport.Registrar) { r.Get("/skus", wcHandler[optOutParam]()) }},
+		{`on a DELETE too`, func(r *transport.Registrar) { r.Delete("/skus", wcHandler[optOutJSON]()) }},
+		{`and on a body route, where it is the live remedy`, func(r *transport.Registrar) {
+			r.Post("/skus", wcHandler[optOutJSON]())
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			b := transport.NewBuilder()
+			tc.register(b.For("inventory"))
+			if _, err := b.Table(); err != nil {
+				t.Errorf("a field declared unbindable must register clean: %v", err)
+			}
+		})
+	}
+}
+
+// TestAnOptedOutFieldBindsNothingAtRequestTime — the opt-out must not become a
+// binding by another name. `param:"-"` used to plan a setter for a path
+// parameter literally called "-".
+func TestAnOptedOutFieldBindsNothingAtRequestTime(t *testing.T) {
+	t.Parallel()
+
+	b := transport.NewBuilder()
+	var got optOutJSON
+	b.For("inventory").Get("/skus", app.HandlerFunc[optOutJSON, userDTO](
+		func(_ context.Context, q optOutJSON) (userDTO, error) { got = q; return userDTO{}, nil }))
+	table, err := b.Table()
+	if err != nil {
+		t.Fatalf("Table: %v", err)
+	}
+	inv := table.HTTP()[0].Bind(transport.JSON())
+	if _, err := inv(transport.WithParams(context.Background(),
+		staticParams{query: map[string]string{"status": "ok", "-": "attacker", "tenant": "attacker"}}), nil); err != nil {
+		t.Fatalf("invoke: %v", err)
+	}
+	if got.Tenant != "" {
+		t.Errorf("an opted-out field was filled from the wire with %q", got.Tenant)
+	}
+	if got.Status != "ok" {
+		t.Errorf("the tagged field beside it stopped binding: %q", got.Status)
+	}
+}
+
+// staticParams is a Params whose values come from a map, so a test can drive
+// the invoker without a transport.
+type staticParams struct {
+	path  map[string]string
+	query map[string]string
+}
+
+func (p staticParams) Path(name string) (string, bool)  { v, ok := p.path[name]; return v, ok }
+func (p staticParams) Query(name string) (string, bool) { v, ok := p.query[name]; return v, ok }
+
+// TestAJSONTagOnABodylessRouteSaysSo — field test #16, finding 14. Copying a
+// DTO from a POST to a GET is the commonest way to reach this check, and the
+// generic message did not acknowledge that a json: tag was present at all.
+func TestAJSONTagOnABodylessRouteSaysSo(t *testing.T) {
+	t.Parallel()
+
+	b := transport.NewBuilder()
+	b.For("inventory").Get("/skus", wcHandler[ubJSONOnGet]())
+	_, err := b.Table()
+	if err == nil {
+		t.Fatal("a json: tag on a GET built a table")
+	}
+	report := err.Error()
+	for _, want := range []string{
+		"tagged `json:\"author\"`",
+		"a GET carries no body",
+		"copied from a POST route",
+		"`query:\"author\"` is probably what you meant",
+	} {
+		if !strings.Contains(report, want) {
+			t.Errorf("the diagnostic does not carry %q:\n%s", want, report)
+		}
+	}
+	// And it must still offer the opt-out, because "a middleware sets it" is
+	// a legitimate answer for a json:-tagged field too.
+	if !strings.Contains(report, "`json:\"-\"`") {
+		t.Errorf("the diagnostic does not offer the opt-out:\n%s", report)
 	}
 }

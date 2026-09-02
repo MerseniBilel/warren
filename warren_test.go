@@ -21,9 +21,36 @@ import (
 
 var update = flag.Bool("update", false, "rewrite golden files")
 
-// declSite matches this file's own declaration sites in diagnostics, so a
-// golden pins the wording without pinning line numbers.
-var declSite = regexp.MustCompile(`warren_test\.go:\d+`)
+// declSite matches a module declaration site as callerSite renders one: the
+// last TWO path segments plus a line number, "<dir>/<file>.go:<line>".
+//
+// Both halves are properties of where the tree happens to sit, and a golden
+// that pins either pins the environment instead of the diagnostic. The line
+// number moves whenever anything above it in the file moves. The DIRECTORY
+// is worse: for a module declared in the repository's own root package —
+// which only Warren's own tests do — callerSite's second-to-last segment is
+// the checkout directory itself, so three goldens read "warren/warren_test.go"
+// and failed in every fork, in any clone under another name, and in any CI
+// that checks out into src/. Reproduced 2026-09-02 in a copy named
+// warren-copy: TestExportWithoutProvider, TestControllerWithoutRegisterFailsTheBoot
+// and TestAComponentThatTakesTheLifecycleAndIsNeverBuiltFailsTheBoot all failed.
+//
+// callerSite itself is correct and is NOT changed: for a real application the
+// last two segments are the module's own directory and file — "user/module.go"
+// — which is exactly what a reader needs. The degenerate case is a module
+// declared at a repository root, and only this suite does that.
+//
+// The leading segment is REQUIRED by the pattern deliberately. If callerSite
+// ever stopped emitting a directory, this would no longer match, the raw path
+// would survive into the comparison, and the golden would fail loudly rather
+// than silently stop checking anything.
+var declSite = regexp.MustCompile(`[\w.\-]+/[\w.\-]+\.go:\d+`)
+
+// normaliseSite replaces every declaration site in a diagnostic with placeholder,
+// so a golden pins the wording and not the checkout.
+func normaliseSite(diagnostic, placeholder string) string {
+	return declSite.ReplaceAllString(diagnostic, placeholder)
+}
 
 func assertGolden(t *testing.T, name, got string) {
 	t.Helper()
@@ -253,10 +280,10 @@ func TestExportWithoutProvider(t *testing.T) {
 	if err == nil {
 		t.Fatal("an export with no provider booted")
 	}
-	// The declaration site is a real line in this file, so the golden
-	// normalises it — otherwise every edit above this point rewrites the
-	// diagnostic's contract.
-	got := declSite.ReplaceAllString(err.Error(), "warren_test.go:NN")
+	// The declaration site is a real line in a real directory, so the golden
+	// normalises both — otherwise every edit above this point, and every
+	// checkout not named "warren", rewrites the diagnostic's contract.
+	got := normaliseSite(err.Error(), "warren_test.go:NN")
 	assertGolden(t, "export_without_provider", got)
 }
 

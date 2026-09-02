@@ -6,6 +6,7 @@ import (
 	"flag"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -271,4 +272,60 @@ func TestDiagnosticsAreGolden(t *testing.T) {
 	b.WriteString("\n")
 
 	assertGolden(t, "diagnostics", b.String())
+}
+
+// TestAQueryOnlyFieldIsNamedByItsTagNotItsGoName — field test #15, finding 8.
+//
+// One field, two failures, two names:
+//
+//	GET /books?limit=abc   → {"details":{"limit":"…invalid syntax"}}   (binder)
+//	GET /books?limit=9999  → {"details":{"Limit":"must be at most 100"}} (validator)
+//
+// The binder reports the tag name because that is what it bound from; the
+// validator reported the Go field name, because it only ever looked at `json`
+// and a query-only field has none. A client keying on `details` sees two names
+// for one field depending on which check failed.
+func TestAQueryOnlyFieldIsNamedByItsTagNotItsGoName(t *testing.T) {
+	t.Parallel()
+
+	type request struct {
+		Limit  int    `query:"limit" validate:"omitempty,min=1,max=100"`
+		ID     string `param:"id" validate:"required"`
+		Email  string `json:"email" validate:"required"`
+		Legacy string `validate:"required"`
+	}
+
+	v := playground.New()
+	rule, err := v.Plan(reflect.TypeFor[request]())
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+	err = rule(&request{Limit: 9999})
+	if err == nil {
+		t.Fatal("a request violating every constraint was accepted")
+	}
+
+	var werr *werrors.Error
+	if !stderrors.As(err, &werr) {
+		t.Fatalf("err is not a warren error: %v", err)
+	}
+	details := werr.Details()
+
+	// Keyed by the name the CLIENT used — the same name transport's binder
+	// reports when the SAME field fails to parse.
+	for _, want := range []string{"limit", "id", "email"} {
+		if _, ok := details[want]; !ok {
+			t.Errorf("details has no key for the tag name %q: %v", want, details)
+		}
+	}
+	// The Go names of the tagged fields must not appear. Legacy carries no
+	// binding tag at all, so its Go name is the only name it has and stays.
+	for _, unwanted := range []string{"Limit", "ID", "Email"} {
+		if _, ok := details[unwanted]; ok {
+			t.Errorf("details carries the Go field name %q: %v", unwanted, details)
+		}
+	}
+	if _, ok := details["Legacy"]; !ok {
+		t.Errorf("an untagged field has no other name and must keep its Go name: %v", details)
+	}
 }

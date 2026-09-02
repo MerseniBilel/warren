@@ -11,6 +11,7 @@ import (
 	"github.com/MerseniBilel/warren/broker"
 	werrors "github.com/MerseniBilel/warren/errors"
 	warrentest "github.com/MerseniBilel/warren/testing"
+	"github.com/MerseniBilel/warren/validate/playground"
 
 	"{{.Module}}/internal/modules/user"
 	"{{.Module}}/internal/modules/user/application"
@@ -113,6 +114,11 @@ func boot(t *testing.T) *warrentest.App {
 	return warrentest.NewModuleTest(t, user.MemoryModule(),
 		warrentest.WithMemoryBroker(),
 		warrentest.WithMemoryPersistence(),
+		// The same validator main.go installs. NewModuleTest compiles the
+		// routes itself and never touches App.Validator, so without this the
+		// first `email` or `gte=1` tag anyone adds fails HERE while the
+		// service boots perfectly.
+		warrentest.WithValidator(playground.New()),
 	)
 }
 {{- else }}
@@ -131,7 +137,11 @@ func boot(t *testing.T) *warrentest.App {
 		t.Skip("{{.EnvPrefix}}_KAFKA_BROKERS is not set; these tests need a broker")
 	}
 {{- end }}
-	return warrentest.NewModuleTest(t, user.Module(), warrentest.WithMemoryBroker())
+	return warrentest.NewModuleTest(t, user.Module(),
+		warrentest.WithMemoryBroker(),
+		// The same validator main.go installs — see the note above.
+		warrentest.WithValidator(playground.New()),
+	)
 }
 {{- end }}
 

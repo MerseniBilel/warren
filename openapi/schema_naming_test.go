@@ -1,10 +1,12 @@
 package openapi_test
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/MerseniBilel/warren/app"
 	"github.com/MerseniBilel/warren/openapi"
 	"github.com/MerseniBilel/warren/transport"
 
@@ -277,4 +279,145 @@ func tableOf(t *testing.T, fn func(r *transport.Registrar)) *transport.Table {
 		t.Fatalf("Table: %v", err)
 	}
 	return tbl
+}
+
+// listBooks is field test #15's finding 7, verbatim: the idiomatic spelling of
+// a constrained OPTIONAL query parameter.
+type listBooks struct {
+	Limit int `query:"limit" validate:"omitempty,min=1,max=100"`
+}
+
+type booksPage struct {
+	Count int `json:"count"`
+}
+
+// TestOmitemptyOnAnOptionalQueryParameterIsNotARefusal — the emitter described
+// this route perfectly and then refused it.
+//
+//	{"name":"limit","in":"query","schema":{"type":"integer","minimum":1,"maximum":100}}
+//
+// `omitempty` IS expressible: "optional" is `required: false`, which is what
+// the parameter already carried. The refusal made openapi.Strict() unusable on
+// any service with a constrained optional query parameter — you had to choose
+// between the constraint and the strict check.
+func TestOmitemptyOnAnOptionalQueryParameterIsNotARefusal(t *testing.T) {
+	t.Parallel()
+
+	doc, raw := emit(t, func(r *transport.Registrar) {
+		r.Get("/books", app.HandlerFunc[listBooks, booksPage](
+			func(context.Context, listBooks) (booksPage, error) { return booksPage{}, nil }))
+	})
+
+	for _, ref := range doc.Refusals() {
+		if strings.Contains(ref.Reason, "omitempty") {
+			t.Errorf("omitempty was refused, so Strict() fails the boot over a route "+
+				"this document describes correctly: %+v", ref)
+		}
+	}
+
+	// It is described, and described as OPTIONAL — which is what omitempty
+	// means and the only thing it adds.
+	for _, want := range []string{`"minimum": 1`, `"maximum": 100`, `"in": "query"`} {
+		if !strings.Contains(raw, want) {
+			t.Errorf("the parameter lost %s from its schema:\n%s", want, raw)
+		}
+	}
+	if strings.Contains(raw, `"required": true`) {
+		t.Errorf("an omitempty parameter was published as required:\n%s", raw)
+	}
+}
+
+// tenantScoped is field test #16's shape: a field a middleware fills, declared
+// unbindable so the bodyless-route check accepts it.
+type tenantScoped struct {
+	Tenant string `json:"-"`
+	Region string `query:"-"`
+	Shard  string `param:"-"`
+	Status string `query:"status"`
+}
+
+type scopedPage struct {
+	Count int `json:"count"`
+}
+
+// TestAnOptedOutFieldIsNotAPublishedParameter — the second half of the opt-out,
+// and the half that is easy to leave undone.
+//
+// transport stops binding a `json:"-"` / `query:"-"` / `param:"-"` field. If
+// openapi kept deriving a parameter from it, the document would publish one
+// named "-" — a parameter no request can carry and no client can send, which
+// is the invalid-document problem the wildcard checks exist to prevent,
+// arriving through the opt-out that fixes a different one.
+func TestAnOptedOutFieldIsNotAPublishedParameter(t *testing.T) {
+	t.Parallel()
+
+	_, raw := emit(t, func(r *transport.Registrar) {
+		r.Get("/skus", app.HandlerFunc[tenantScoped, scopedPage](
+			func(context.Context, tenantScoped) (scopedPage, error) { return scopedPage{}, nil }))
+	})
+
+	if strings.Contains(raw, `"name": "-"`) {
+		t.Errorf("the document publishes a parameter named \"-\":\n%s", raw)
+	}
+	for _, gone := range []string{"Tenant", "Region", "Shard"} {
+		if strings.Contains(raw, gone) {
+			t.Errorf("the opted-out field %s reached the document:\n%s", gone, raw)
+		}
+	}
+	// The tagged field beside it must still be described, or the exclusion is
+	// too wide.
+	if !strings.Contains(raw, `"name": "status"`) {
+		t.Errorf("the query parameter beside it was dropped too:\n%s", raw)
+	}
+}
+
+// receiveStock is field test #16, finding 9: the idiomatic numeric bound.
+type receiveStock struct {
+	SKU      string `json:"sku" validate:"required,min=3"`
+	OnHand   int    `json:"on_hand" validate:"gte=0,lte=1000"`
+	Delta    int    `json:"delta" validate:"gt=0,lt=100"`
+	Nickname string `json:"nickname" validate:"gt=2"`
+}
+
+type stockRes struct {
+	OK bool `json:"ok"`
+}
+
+// TestGteAndGtAreExpressibleInJSONSchema — the emitter refused `gte` with "no
+// JSON Schema keyword expresses it", three lines below the code that emits
+// minLength and enum, and stamped three of nine operations in a real service
+// x-warren-undescribed for it.
+//
+// JSON Schema has had `minimum` since draft-01 and `exclusiveMinimum` as a
+// NUMBER since 2020-12, which is what OpenAPI 3.1 is. Declaring the easy
+// constraint impossible while emitting the harder ones is the detail that
+// makes a reader doubt everything else in the document.
+func TestGteAndGtAreExpressibleInJSONSchema(t *testing.T) {
+	t.Parallel()
+
+	doc, raw := emit(t, func(r *transport.Registrar) {
+		r.Post("/skus", app.HandlerFunc[receiveStock, stockRes](
+			func(context.Context, receiveStock) (stockRes, error) { return stockRes{}, nil }))
+	})
+
+	for _, ref := range doc.Refusals() {
+		for _, tag := range []string{"gte", "gt", "lte", "lt"} {
+			if strings.Contains(ref.Reason, "`"+tag+"`") {
+				t.Errorf("%s was refused as inexpressible: %+v", tag, ref)
+			}
+		}
+	}
+	for _, want := range []string{
+		`"minimum": 0`,            // gte=0
+		`"maximum": 1000`,         // lte=1000
+		`"exclusiveMinimum": 0`,   // gt=0
+		`"exclusiveMaximum": 100`, // lt=100
+		// gt on a STRING is a length bound, and a length is an integer — so
+		// "longer than 2" is minLength 3 with nothing lost.
+		`"minLength": 3`,
+	} {
+		if !strings.Contains(raw, want) {
+			t.Errorf("the document does not carry %s:\n%s", want, raw)
+		}
+	}
 }

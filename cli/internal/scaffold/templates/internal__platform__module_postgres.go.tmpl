@@ -72,20 +72,46 @@ var Postgres = sync.OnceValue(func() warren.Module {
 	)
 })
 
-{{- if eq .Broker "kafka" }}
-
 // Broker is the messaging adapter, and it is a MODULE rather than a
 // constructor — which is why it is declared here and imported, not provided.
+//
+// A module is also the only thing that can CLAIM a protocol, and claiming
+// transport.ProtocolEvent is what makes a subscription registered with
+// r.OnEvent actually served. A service that registers one and imports no
+// broker fails its boot rather than dropping every message in silence.
+//
+// This file used to hand-roll the in-process broker as three providers —
+// newBroker, publisher, subscriber — and the scaffold it produced DID NOT
+// BOOT. Providers bind ports; they claim nothing. So `warren new x --db
+// postgres`, with no edits at all, refused to start:
+//
+//	✗ registered routes have no adapter serving them
+//	    1 event subscription(s) — add a broker module to warren.New
+//
+// over the notification consumer the same scaffold had just written. One of
+// the four --db/--broker combinations was broken, and it was the one the
+// README quickstart leads with.
 //
 // Anything that consumes events imports this module DIRECTLY, beside
 // platform: a module may export only what its own providers return, so
 // platform cannot import this and pass broker.Publisher on to its own
 // importers. Warren refuses that at boot and names this shape.
+{{- if eq .Broker "kafka" }}
 //
 // The seed list is read from the environment for the same reason the DSN is:
 // kafka.Broker builds its providers, so its options are needed while the
 // module graph is being DECLARED, before the config module's value exists.
+{{- else }}
+//
+// It is the in-process driver: channels and goroutines, no network, and every
+// unacknowledged message lost when the process stops. That is the right trade
+// for development and for a modular monolith that accepts it; a service
+// needing durability scaffolds with --broker kafka.
+{{- end }}
 var Broker = sync.OnceValue(func() warren.Module {
+{{- if ne .Broker "kafka" }}
+	return memory.Module()
+{{- else }}
 	return kafka.Broker(
 		kafka.Brokers(seeds()...),
 		// One group per SERVICE, not per instance: that is what makes
@@ -106,6 +132,27 @@ var Broker = sync.OnceValue(func() warren.Module {
 		// delete this line.
 		kafka.AutoCreateTopics(),
 	)
+{{- end }}
+})
+{{- if eq .Broker "kafka" }}
+
+// Consumers SERVES the subscriptions registered with r.OnEvent. It is
+// separate from Broker because a service that only publishes should not
+// acquire a consumer group — a group holds partition assignments and
+// rebalances, and a member that never commits an offset slows every rebalance
+// for the services that do consume.
+//
+// This template did not declare it until 2026-09-02, so `--db postgres
+// --broker kafka` had the SAME defect as the memory-broker case one line
+// above: kafka.Broker provides the ports and does not claim
+// transport.ProtocolEvent, so the scaffolded notification consumer had no
+// adapter and the app refused to boot. Found by the four-combination boot
+// test added with that fix, not by a person.
+//
+// The in-process driver needs no equivalent: memory.Module both provides the
+// ports and serves the table, because there is no group to acquire.
+var Consumers = sync.OnceValue(func() warren.Module {
+	return kafka.Consumers()
 })
 
 // seeds reads the seed broker list.
@@ -133,13 +180,8 @@ func seeds() []string {
 // them is an ambiguous binding that fails the boot.
 var Module = sync.OnceValue(func() warren.Module {
 	return warren.NewModule("platform",
-		warren.Imports(ConfigModule(), Postgres(){{if eq .Broker "kafka"}}, Broker(){{end}}),
+		warren.Imports(ConfigModule(), Postgres(), Broker(){{if eq .Broker "kafka"}}, Consumers(){{end}}),
 		warren.Providers(
-{{- if ne .Broker "kafka" }}
-			newBroker,
-			publisher,
-			subscriber,
-{{- end }}
 			appUnitOfWork,
 			clock,
 			ids,
@@ -152,10 +194,6 @@ var Module = sync.OnceValue(func() warren.Module {
 		// inbox.Store are NOT listed here even though platform imports them.
 		// A feature that needs one imports Postgres() itself, alongside this
 		// module; the user module below shows the shape.
-{{- if ne .Broker "kafka" }}
-		warren.Exports[broker.Publisher](),
-		warren.Exports[broker.Subscriber](),
-{{- end }}
 		warren.Exports[app.UnitOfWork](),
 		warren.Exports[app.Clock](),
 		warren.Exports[domain.IDs](),
@@ -186,23 +224,14 @@ var Module = sync.OnceValue(func() warren.Module {
 // passes.
 var Memory = sync.OnceValue(func() warren.Module {
 	return warren.NewModule("platform",
-		warren.Imports(ConfigModule(){{if eq .Broker "kafka"}}, Broker(){{end}}),
+		warren.Imports(ConfigModule(), Broker(){{if eq .Broker "kafka"}}, Consumers(){{end}}),
 		warren.Providers(
-{{- if ne .Broker "kafka" }}
-			newBroker,
-			publisher,
-			subscriber,
-{{- end }}
 			appUnitOfWork,
 			clock,
 			ids,
 			elector,
 			newRelay,
 		),
-{{- if ne .Broker "kafka" }}
-		warren.Exports[broker.Publisher](),
-		warren.Exports[broker.Subscriber](),
-{{- end }}
 		warren.Exports[app.UnitOfWork](),
 		warren.Exports[app.Clock](),
 		warren.Exports[domain.IDs](),
@@ -210,21 +239,6 @@ var Memory = sync.OnceValue(func() warren.Module {
 	)
 })
 
-{{- if ne .Broker "kafka" }}
-
-// broker returns one in-process broker as both ports. Two constructors would
-// build two brokers, and the publisher's messages would never reach the
-// subscriber.
-type brokerPorts struct {
-	pub broker.Publisher
-	sub broker.Subscriber
-}
-
-func newBroker() brokerPorts {
-	b := memory.New()
-	return brokerPorts{pub: b, sub: b}
-}
-{{- end }}
 
 // elector decides which replica drains the outbox. Standalone always leads,
 // which is correct for ONE instance and for the modular monolith.
@@ -318,8 +332,6 @@ func newRelay(
 // the outbox are already stamped at commit by outbox.Sink — the relay
 // publishes long after the request is gone — and Correlating leaves a header
 // that is already there alone.
-func publisher(p brokerPorts) broker.Publisher   { return broker.Correlating(p.pub) }
-func subscriber(p brokerPorts) broker.Subscriber { return p.sub }
 {{- end }}
 
 // clock is where every handler gets the time. Injecting it rather than

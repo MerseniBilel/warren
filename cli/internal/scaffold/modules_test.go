@@ -120,3 +120,44 @@ func repoRoot(t *testing.T) string {
 	t.Skip("no go.work above the working directory; not a checkout")
 	return ""
 }
+
+// TestAScaffoldCanUseTheValidateVocabularyItIsTaught — field test #15's
+// scaffold gap, and the one point it took off time-to-first-endpoint.
+//
+// GETTING_STARTED §3 introduces `validate:"required"` and §9 shows `min=`,
+// `email` and `oneof` as ordinary vocabulary. Core understands `required` and
+// refuses every other tag rather than ignoring it — correctly — so the first
+// interesting tag a user writes fails the boot, on line one of every real DTO,
+// in a project the scaffold had just told them was ready. The scaffold already
+// knew this would happen.
+func TestAScaffoldCanUseTheValidateVocabularyItIsTaught(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	if err := New(Options{
+		Dir: dir, Name: "shop", ModulePath: "example.com/shop",
+		Version: DefaultVersion,
+	}); err != nil {
+		t.Fatalf("scaffold: %v", err)
+	}
+
+	gomod, err := os.ReadFile(filepath.Join(dir, "go.mod"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(gomod), "warren/validate/playground") {
+		t.Errorf("the scaffold does not require an implementation of the vocabulary it teaches:\n%s", gomod)
+	}
+
+	main, err := os.ReadFile(filepath.Join(dir, "cmd/shop/main.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Requiring it and not binding it is worse than neither: the dependency
+	// is paid for and the boot still fails.
+	for _, want := range []string{"playground.New()", "app.Validator("} {
+		if !strings.Contains(string(main), want) {
+			t.Errorf("main.go does not bind the validator (%q):\n%s", want, main)
+		}
+	}
+}

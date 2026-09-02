@@ -2,45 +2,85 @@
 
 **A DDD-first application framework and CLI for Go backends.**
 
-> ⚠️ **Pre-release, v0.1 in progress.** Most of the framework is importable
-> and works today — use cases, errors, domain, config, DI, lifecycle, the
-> module system, boot step 5, the consumer chain, the transactional outbox,
-> the persistence and transport ports, health, validation, the CLI, and
-> **`transport/http`**, which serves a real HTTP service over
-> `net/http.ServeMux` and adds nothing to your `go.mod` but itself, and
-> **`persistence/postgres`**, whose unit of work commits aggregate state and
-> the outbox rows for that aggregate's events in one transaction. What is
-> **not** in v0.1: `auth` (the JWT/OIDC **verifier** — the identity
-> type and the policies ship in `app`), `transport/grpc`,
-> `broker/rabbitmq`, `broker/nats`, and the Mongo/Redis/MySQL drivers — each
-> deferred to v0.2 **with the reason recorded in its own spec**, not left as
-> an open question. `openapi` was on this list and was **written on
-> 2026-08-29**, exactly as predicted: a pure add-on over a route table frozen
-> in v0.1, with no migration and no third-party dependency. It is **not
-> released** — the module has no tag, so `go get .../warren/openapi` does not
-> resolve and `warren new --framework` is the only way to reach it. The short version for the rest:
-> `auth` needs two dependency audits that have not been run, and a third
-> broker driver answers nothing that `broker/memory` plus the shared contract
-> suite does not.
-> Two planned modules are not on that list at all any more. `resilience` was
-> **dropped** — retry and timeout are core-ring and ship, while a breaker
-> guards an outbound call Warren does not make. `jobs` was **dropped** too: a
-> scheduler is an ordinary `lifecycle.Hook`, which starts after its
-> dependencies and is joined before them by construction, and `outbox.Elector`
-> already gives leader-only — **by NAME.** One `Elector` is one advisory lock,
-> so a field test that wired a scheduler and the outbox relay to the same one
-> starved whichever of them lost the race, silently, for the life of the
-> process. A scheduler mints its own instead:
-> `el, err := electors.Elector("ticket/sla-sweeper")`. Different names lead at
-> the same time; the relay's own name is reserved, so asking for it fails the
-> boot rather than competing.
-> The repository is being rebuilt spec-first: every
-> package gets an approved `SPEC.md` before its first line of Go, retired once
-> the package is implemented and reviewed. [warren.md](warren.md) is the
-> design; [AGENT.md](AGENT.md) is the rules.
->
-> **New here? Start with [GETTING_STARTED.md](GETTING_STARTED.md)** — a
-> complete service, from nothing to a running HTTP API, in one page.
+Write a use case once. Serve it over HTTP and over a message queue without
+touching it — from one route table that `transport/grpc` reads too, when it
+lands. Let CI fail the build when someone imports the database from the domain
+layer. Warren is for Go teams who want a layered application and are tired of
+the layering being a naming convention.
+
+```
+go install github.com/MerseniBilel/warren/cli/cmd/warren@latest
+warren new myapp --module github.com/you/myapp
+cd myapp && go mod tidy && go run ./cmd/myapp
+```
+
+That serves `POST /users`, `/healthz` and `/readyz` on `:8080`, with a
+correlation ID on every log record. An evaluator who had never seen the project
+went from `go install` to a real `201` in **under four minutes**, and ran
+`warren lint arch` clean on the first try.
+
+Here is the use case that route calls. Read what is **absent**:
+
+```go
+type WriteNote struct {
+	ID   string `json:"id"   validate:"required"`
+	Text string `json:"text" validate:"required"`
+}
+
+type NoteView struct {
+	ID   string `json:"id"`
+	Text string `json:"text"`
+}
+
+func (h *writeNote) Handle(ctx context.Context, cmd WriteNote) (NoteView, error) {
+	if _, err := h.notes.Find(ctx, cmd.ID); err == nil {
+		return NoteView{}, errors.Conflict("note %s already exists", cmd.ID)
+	}
+	n := domain.Note{ID: cmd.ID, Text: cmd.Text}
+	if err := h.notes.Save(ctx, n); err != nil {
+		return NoteView{}, err
+	}
+	return NoteView{ID: n.ID, Text: n.Text}, nil
+}
+```
+
+No `http.ResponseWriter`. No status code, no JSON encoding, no router, no
+driver. `errors.Conflict` becomes **409** over HTTP, `AlreadyExists` over gRPC
+and an ack on a queue, because one table owns that mapping and your handler is
+not in it. Routing it is one line in a controller —
+`r.Post("/notes", c.write)` — and `validate:` runs before `Handle` is ever
+called.
+
+Then the part that is hard to get from a router:
+
+```
+$ warren lint arch
+No violations in 13 packages.
+
+  Checked: the layer rule, the handler/transport rule and the handler/driver
+  rule — each directly and through a helper package.
+```
+
+Same command, same binary, runs over Warren's own repository in Warren's own
+CI. And **most wiring errors surface at boot rather than on request 1** — a
+missing provider, an unexported dependency, a duplicate route, a path wildcard
+no field binds, a middleware order that would corrupt a transaction — each one
+refuses to start and names the file, the line and the fix. Two measured
+exceptions are named below rather than denied. That diagnostic quality is the
+deliverable the rest of this repository exists to protect.
+
+> **Pre-release: v0.1 in progress.** The kernel, the ports, the CLI,
+> `transport/http`, `persistence/postgres`, `broker/kafka`, `observability` and
+> `validate/playground` are implemented and tagged; `openapi` is implemented
+> but not yet tagged, so it resolves as a pseudo-version. `auth`'s verifier,
+> `transport/grpc`, `broker/rabbitmq`, `broker/nats` and the Mongo, Redis and
+> MySQL drivers are **deferred to v0.2**, each with its reason recorded in
+> [warren.md](warren.md) rather than left as an open question. See
+> [Status & roadmap](#status--roadmap) for what that costs you today.
+
+**New here? Start with [GETTING_STARTED.md](GETTING_STARTED.md)** — a complete
+service, from nothing to a running HTTP API, in one page. [warren.md](warren.md)
+is the design; [AGENT.md](AGENT.md) is the rules.
 
 ---
 
@@ -76,8 +116,21 @@ CONTRACTS   app.Handler · broker.Publisher · Registrar · …     ports & shar
 KERNEL      warren · di · lifecycle · config · log · errors    stdlib + dig only
 ```
 
-One handler serves three protocols. Every error the framework can detect
-surfaces at boot — never on request 1.
+One handler is written once and serves HTTP today, with gRPC and message
+consumers reading the same route table — `transport/grpc` is the deferred half,
+so "three protocols" is the design, not yet the present tense.
+
+**Wiring errors surface at boot, not on request 1.** A missing provider, an
+unexported dependency, a duplicate route, a path wildcard no field binds, a
+field on a bodyless route that nothing can populate, a corrupting middleware
+order — all of them refuse to start, with a diagnostic naming the file, the
+line, and the fix. That is the claim, and it is deliberately narrower than the
+one this line used to make. Two known gaps remain, both measured by a field
+test and both scheduled rather than denied: a handler that injects a repository
+but no unit of work is caught on request 1 (a 500, with the cause in the log),
+and `warrentest.Invoke` boots the graph without the transport edge, so
+`validate:` tags do not run under it. "Every error, never on request 1" was an
+absolute with live exceptions, which is worse than a smaller true claim.
 
 Swapping a driver is **one line of `platform`**, not of `main.go`, and how
 many other lines depends on the driver's shape: a driver whose ports
@@ -92,17 +145,11 @@ and found N+1 files, none of them `main.go`.
 
 ## Install
 
-```
-go install github.com/MerseniBilel/warren/cli/cmd/warren@latest
-warren new myapp --module github.com/you/myapp
-cd myapp && go mod tidy && go run ./cmd/myapp
-```
-
-That is the whole setup. The generated `go.mod` requires the published
-framework — core plus `transport/http`, and `persistence/postgres` or
-`broker/kafka` when you ask for them — so `go mod tidy` resolves it from the
-module proxy and there is no `replace` anywhere. It serves `POST /users`,
-`/healthz` and `/readyz` on `:8080`.
+The three commands at the top of this page are the whole setup. The generated
+`go.mod` requires the published framework — core plus `transport/http`, and
+`persistence/postgres` or `broker/kafka` when you ask for them — so
+`go mod tidy` resolves it from the module proxy and there is no `replace`
+anywhere.
 
 To use the framework without the CLI, `go get github.com/MerseniBilel/warren`
 and its adapters directly; [GETTING_STARTED.md](GETTING_STARTED.md) writes a
@@ -138,7 +185,12 @@ Progress is spec-first: ☑ means *done and verified*, not *started*.
       `Root[K]` constraint, concrete registrars on Go 1.27
 - [x] Remaining decisions folded into their specs and re-approved *(every
       spec decided 2026-08-02: 12 approved and implemented, 10 deferred to
-      v0.2 with the reason recorded in each, zero drafts left)*
+      v0.2, zero drafts left)*
+- [x] Specs retired and the deferrals' reasons rehomed *(2026-09-02: the ten
+      spec-only directories are gone and their rulings live in
+      [warren.md](warren.md) — §4.2 for gRPC, §5.2/§5.3 for the brokers,
+      §6.2–6.4 and §9 for the stores, §7.2 for auth. A directory holding a
+      spec and no Go was seven half-built things to a visitor)*
 - [x] Tooling rebuilt: Makefile, CI workflow, `golangci` config, module-rules
       check (`scripts/invariants.sh`)
 - [x] Dependency audits run (`dig` first) — no library enters a `go.mod`
@@ -215,7 +267,8 @@ contract now.
       `warren g proto`, the harder of the two artifacts. A proto codec over
       plain structs was prototyped, measured (faster than JSON) and rejected:
       no reflection descriptor, and field numbers in Go struct tags. The round
-      found **zero required changes to core `transport`**
+      found **zero required changes to core `transport`**. Every remaining
+      design question is ruled in [warren.md](warren.md) §4.2
 - [x] Fallback if 1.27 slips: generic free functions (compiles on 1.26; call
       sites change shape) *(the contingency was taken, then retired. v0.1–v0.2
       shipped `transport.Get(r, pattern, h)` as a free function on Go 1.26;
@@ -243,7 +296,11 @@ contract now.
       dedupe, not exactly-once** — §5.1 claimed otherwise and §5.5 was right.
       4 third-party modules, the smallest adapter footprint after
       `transport/http`'s zero)*
-- [ ] `broker/rabbitmq`, `broker/nats` — after their manifest entries are written
+- [ ] `broker/rabbitmq`, `broker/nats` — deferred to v0.2. Both need a
+      dependency audit that has not been run, and RabbitMQ needs one
+      port-semantics contradiction resolved first (§3.4 calls `Message.Key`
+      the routing key; §5.2 says the topic becomes it). Reasons in
+      [warren.md](warren.md) §5.2 and §5.3
 
 ### Phase 4 — persistence
 
@@ -255,8 +312,12 @@ contract now.
       unmodified against a real Postgres. **Never migrates at boot** — that
       races every replica of a rolling deploy. One third-party dependency:
       `pgx`; goose rejected)*
-- [ ] `persistence/mongo`, `persistence/redis` — after their manifest entries
-      are written *(`mysql`: deferred — exists only in a heading)*
+- [ ] `persistence/mongo`, `persistence/redis` — deferred to v0.2; the Mongo
+      design round is closed and found the port needs no change, while Redis
+      needs a structural decision first, because a cache and a lock are not
+      §3.3 persistence and no `Cache`/`Lock` port exists. *(`mysql` is not
+      deferred but undecided — it has a heading and a ledger row and nothing
+      else.)* Reasons in [warren.md](warren.md) §6.2–6.4
 
 ### Phase 5 — cross-cutting
 
@@ -280,13 +341,18 @@ contract now.
       annotations, no IDL, no checked-in spec file. Raw routes are EMITTED with
       an `x-warren-undescribed` rather than omitted, and constraints are
       published only when the application's validator actually enforces them
-      *(implemented 2026-08-29; zero third-party dependencies. **Unticked
-      again on 2026-08-31**: the module is untagged, so neither documented
-      install route reaches it, and field test #14 found the emitter merges
-      two same-named DTOs from different features into one schema and emits
-      `time.Time` as `{"type":"object"}` — both silently, with `Strict()`
-      booting clean. It ships when those are fixed and it is tagged.)*
-- [ ] `auth` (verifier)
+      *(implemented 2026-08-29; zero third-party dependencies. The three
+      defects that unticked this on 2026-08-31 are **all fixed and verified by
+      a stranger** on 2026-09-02: same-named DTOs from two features are
+      disambiguated by the shortest unique path suffix, `time.Time` emits
+      `{"type":"string","format":"date-time"}`, and
+      `go get github.com/MerseniBilel/warren/openapi` resolves. It stays
+      unticked for ONE remaining reason — the module has no released tag, so
+      it resolves only as a pseudo-version.)*
+- [ ] `auth` (verifier) — deferred to v0.2. The design is settled (`app.Identity`
+      and the policies shipped in v0.1); what is missing is the two dependency
+      audits for `golang-jwt/jwt/v5` and `coreos/go-oidc`, which have not been
+      run. Reasons in [warren.md](warren.md) §7.2
 
 ### Phase 6 — the CLI *(the discovery engine: scaffolding real apps is how
 ### weaknesses get found)*
@@ -312,6 +378,28 @@ contract now.
 - [ ] v0.2+: `doctor`, `graph`, `explain di`, `templates eject`
 - [ ] v0.3+: `extract module`, `add <adapter>`, `migrate layout`
 
+### Two planned modules that were dropped, not deferred
+
+Neither will be built, and the reasons are structural rather than schedule.
+Full versions in [warren.md](warren.md) §7.3 and §7.4.
+
+- **`resilience` — dropped 2026-08-05.** Retry and timeout are core-ring and
+  already ship as `app.Retrying`, `app.Timeout` and
+  `broker.ExponentialBackoff`. A circuit breaker and a rate limiter guard an
+  **outbound** call, and Warren ships no outbound client — so they belong in
+  your `infrastructure/` adapter, where two lines of `sony/gobreaker` do the
+  job better than a wrapper would. `scripts/invariants.sh` refuses the
+  dependency so the module cannot be re-derived by accident.
+- **`jobs` — dropped 2026-08-05.** A scheduler is an ordinary
+  `lifecycle.Hook`: it starts after its dependencies and is joined before them
+  by construction. Leader-only work is `outbox.Electors`, and the important
+  word is **by name** — one `Elector` is one advisory lock, so a field test
+  that wired a scheduler and the outbox relay to the same one starved whichever
+  lost the race, silently, for the life of the process. A scheduler mints its
+  own: `el, err := electors.Elector("ticket/sla-sweeper")`. Different names
+  lead at the same time, and the relay's own name is reserved, so asking for it
+  fails the boot rather than competing for it.
+
 ---
 
 ## Repository map
@@ -320,15 +408,18 @@ contract now.
 |---|---|
 | [warren.md](warren.md) | The package manifest — one entry per package, source of truth |
 | [AGENT.md](AGENT.md) | Invariants, conventions, and process — canonical for humans and agents |
-| `<package>/SPEC.md` | The contract of a package **not yet implemented**; approved before any code, retired once the package ships |
-| [docs/assets/](docs/assets/) | Usage-flow diagrams for the approved specs |
+| [GETTING_STARTED.md](GETTING_STARTED.md) | A complete service, from nothing to a running HTTP API, in one page |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | How to open a change here — the checks, the commit shape, what a review looks for |
+| `<package>/SPEC.md` | A change still under review. It is **deleted** when its package is implemented and reviewed, its residue rehomed to `warren.md`, doc comments and tests first. There are no spec-only directories |
 
 ## Contributing
 
-Read [AGENT.md](AGENT.md) first — the spec-first process, the dependency-audit
-rule, and the invariants apply to every change. No feature is implemented
-before its spec is approved, and no dependency is adopted without a written
-audit.
+Read [CONTRIBUTING.md](CONTRIBUTING.md), then [AGENT.md](AGENT.md) — the
+invariants and the dependency-audit rule apply to every change. A **new
+package, a public API change, or a change that stops working code from
+working** needs an approved spec first; a bug fix, a test, a doc change or a
+new adapter over an existing port goes straight to a pull request. No
+dependency is adopted without a written audit.
 
 ## License
 

@@ -208,6 +208,66 @@ func (h *readNote) Handle(ctx context.Context, q ReadNote) (NoteView, error) {
 `NoteView` is declared once, in `write.go`, and both handlers return it — they
 are the same package.
 
+### Which fields a client can fill — and the one that must say `json:"-"`
+
+A request struct's exported fields are filled from the wire. How depends on
+the route:
+
+| Tag | Filled from | On a route with no body (GET, DELETE) |
+|---|---|---|
+| `param:"id"` | the `{id}` wildcard in the pattern | yes |
+| `query:"limit"` | the query string | yes |
+| `json:"email"` | the request body | **refused at boot** — there is no body |
+| *(no tag, exported)* | the body, matched by **Go field name** | **refused at boot** |
+| *(unexported)* | nothing | ignored |
+
+**The row worth reading twice is the untagged one.** On a route that carries a
+body, `encoding/json` matches an untagged exported field by its Go name, so a
+field you never meant to expose is settable by the caller:
+
+```go
+type CreateItem struct {
+	SKU    string `json:"sku"`
+	Tenant string // filled by a middleware — and by anyone who guesses
+}
+```
+```
+$ curl -X POST /skus -d '{"sku":"EVIL-1","Tenant":"attacker"}'
+{"sku":"EVIL-1","tenant":"attacker"}
+```
+
+Both `{"Tenant":...}` and `{"tenant":...}` land, because Go's matching is
+case-insensitive. **A field the server owns must say so:**
+
+```go
+	Tenant string `json:"-"`     // nothing on the wire fills this
+```
+
+`json:"-"` is the standard Go spelling for "not from the wire", `encoding/json`
+already honours it, and Warren treats it — and `query:"-"` and `param:"-"`,
+for a reader already in that tag family — as a deliberate declaration that a
+field is bound by nothing.
+
+**It is also the answer on a bodyless route.** A middleware may fill the
+request before the handler sees it — `app.Middleware[Req, Res]` is
+`func(Handler) Handler`, so that is an ordinary Warren shape:
+
+```go
+// internal/tenancy/middleware.go — a cross-cutting middleware, in its own package
+func Enforcing[Req Scoped, Res any]() app.Middleware[Req, Res] { … req.SetTenant(id.Subject) … }
+```
+
+```go
+type ListItems struct {
+	Tenant string `json:"-"`        // set by tenancy.Enforcing, never by the caller
+	Status string `query:"status"`
+}
+```
+
+Without the tag, boot refuses `ListItems` on a GET — correctly, because nothing
+on the wire fills `Tenant` — and the remedies it used to suggest were all
+wrong for this case: `query:"tenant"` would hand the tenant to the caller.
+
 ---
 
 ## 4. The infrastructure — `internal/modules/notes/infrastructure/memory.go`
@@ -521,8 +581,55 @@ and `span_id` too — pass `observability.LogAttrs()` as a second argument to
 ## 8. Swapping the map for Postgres
 
 The in-memory repository above is a real implementation of the port, and
-replacing it changes **no use case and no controller** — only the module's
-provider list. One more require:
+replacing it changes **no use case and no controller**. It changes rather more
+than the provider list, though, and this section used to say otherwise:
+
+| What changes | Written by |
+|---|---|
+| `<agg>_repository_postgres.go` | `warren g repository --driver postgres` — its own file and its own type, so it sits beside the memory one below rather than overwriting it |
+| every feature's `warren.Imports`, which gains `platform.Postgres()` | you |
+| `platform` itself, which loses the memory unit of work, outbox and inbox | you |
+| the memory repository, if you want offline tests | **nobody** (`warren g repository` writes one, and you keep it) |
+| a `MemoryModule` per feature | **nobody** |
+| `platform.Memory` | **nobody** (only `warren new --db postgres` writes one) |
+
+**The last three are the ones that surprise people, and they are the price of
+keeping module tests offline.** A Postgres adapter module CONNECTS at boot —
+its pool is `Eager`, so it dials whether or not anything injects it, and no
+substitution prevents that because nothing in Warren removes a module from a
+graph. So `warrentest.NewModuleTest(t, notes.Module())` on a Postgres project
+fails with `✗ postgres connection string is empty` unless the feature also
+declares a memory-only twin. Two field tests have now measured the cost on a
+two-feature service, and the second measured it higher: **277 lines that exist
+only so `go test ./...` runs without Docker** — memory repositories, a
+`MemoryModule` per feature, *and an offline twin of `platform` itself*, which
+the first measurement (196) missed and which is the piece people do not see
+coming.
+
+**The twin drifts, and it drifts quietly.** The second field test's
+`platform.Memory()` omitted `newRelay` and `warren.Eager[*outbox.Relay]()`,
+which `platform.Module()` has. Nothing failed to compile. What happened
+instead:
+
+```
+--- FAIL: TestOrderPublishesOrderPlaced
+    api_test.go:40: warrentest: no "order.placed" was published. Published topics: none
+--- FAIL: TestInventoryReservesStockFromTheEvent
+    api_test.go:95: stock never reserved
+```
+
+Two tests failing for a reason that has nothing to do with the code under
+test, ten minutes after the twin was written. If you keep a twin, diff it
+against the real module whenever either changes — that is a review habit, not
+a mechanism, which is exactly why the real fix is scheduled below.
+
+**This is a known gap, not a design position.** `App.Without(...)` — dropping a
+module from the graph so a real one can be replaced wholesale, the way
+`@DataJpaTest` and NestJS's `overrideProvider` do — is scheduled for v0.3. Until
+then the choice is a memory twin per feature, or module tests that need a live
+database. Say which you are choosing deliberately rather than discovering it.
+
+One more require:
 
 ```go
 require github.com/MerseniBilel/warren/persistence/postgres v0.2.0
@@ -679,8 +786,13 @@ boot with its own diagnostic.
 // internal/platform/module.go
 var Postgres = sync.OnceValue(func() warren.Module {
 	return postgres.Module(
-		postgres.DSN(os.Getenv("DATABASE_URL")),
-		postgres.WithOutbox(),    // events land in warren_outbox, same commit
+		// PREFIXED, like everything else Warren reads: a scaffolded project
+		// reads <APPNAME>_DATABASE_URL, its cmd/migrate reads the same one,
+		// and the empty-DSN diagnostic names it. An unprefixed DATABASE_URL
+		// here means the app and its migrations can point at two databases.
+		postgres.DSN(os.Getenv("NOTES_DATABASE_URL")),
+		postgres.WithOutbox(), // events land in warren_outbox, same commit
+		postgres.WithInbox(),  // consumer dedupe survives a restart
 	)
 })
 
@@ -723,13 +835,39 @@ So it is two calls — Warren's tables and yours — from your deploy job:
 ```go
 // cmd/migrate/main.go
 ctx := context.Background()
-dsn := os.Getenv("DATABASE_URL")
+// The SAME variable internal/platform reads. Prefixed, so the app and its
+// migrations cannot be pointed at two different databases.
+dsn := os.Getenv("NOTES_DATABASE_URL")
 if err := postgres.Migrate(ctx, dsn, postgres.Schema); err != nil { log.Fatal(err) }
-if err := postgres.Migrate(ctx, dsn, schema.FS);       err != nil { log.Fatal(err) }
+if err := postgres.Migrate(ctx, dsn, migrations.FS);   err != nil { log.Fatal(err) }
 ```
 
-`schema.FS` is your own `embed.FS` of numbered `.sql` files. Two things to
-know:
+`migrations.FS` is an `embed.FS` of your numbered `.sql` files, and
+`warren g repository --driver postgres` writes it for you as
+`db/migrations/schema.go`:
+
+```go
+package migrations
+
+import "embed"
+
+//go:embed *.sql
+var FS embed.FS
+```
+
+**EMBEDDED, not read from disk, and that is the whole point.** `cmd/migrate` is
+a deploy step: it runs from a container's WORKDIR, from `/usr/local/bin`, from
+a CI runner's temp directory — essentially never from the repository root. A
+field test built the binary and ran it from `/tmp`:
+
+```
+applied  warren       (warren_outbox, warren_inbox)
+reading migrations: open .: no such file or directory
+exit=1
+```
+
+Warren's tables applied, the project's did not, the job exited 1, and the
+database was left half-migrated. Two things to know:
 
 - Files apply in **name order**, so zero-pad them: `00010` sorts after
   `00009`, `10` does not. `warren g repository --driver postgres` numbers its
@@ -774,7 +912,8 @@ correct behaviour but worth knowing.
 | File upload, download, SSE, WebSocket | `r.Raw(transport.ProtocolHTTP, "POST /uploads", h)` from your controller — note the pattern carries the method here |
 | `pprof`, static assets, a webhook receiver | `whttp.Handle("GET /debug/pprof/", h)` — for handlers needing no module dependency |
 | **Refusing a misspelled field** | `whttp.Codec(transport.StrictJSON())`. The default codec IGNORES unknown members, so a client sending `reorderPoint` for `reorder_point` gets a 201 and a record with the field it asked for left at zero. That default is deliberate — one codec decodes HTTP *and* events, and an INVALID on a consumer dead-letters without retry, so a producer adding a field would DLQ 100% of a consumer's traffic — but on an HTTP-only service strict is usually what you want |
-| A test that boots the app | `warren/testing` — `NewModuleTest`, `Replace`, `Invoke` for a handler, and `Resolve[T]` for anything else the boot built (a repository, the publisher, a sweeper). `Resolve` returns the instance the boot made, not a second construction |
+| A test that boots the app | `warren/testing` — `NewModuleTest`, `Replace`, `Invoke` for a handler, and `Resolve[T]` for anything else the boot built (a repository, the publisher, a sweeper). `Resolve` returns the instance the boot made, not a second construction. **`Invoke` boots the GRAPH, not the EDGE** — see below |
+| Testing that a `validate:` tag rejects bad input | **not `Invoke`.** `Invoke` calls the handler directly, and validation lives on the transport edge (it is compiled per route at boot step 5), so a `validate:"min=2"` violation goes straight through and the test passes with `err == nil`. `WithValidator` does not change this — it satisfies the boot-time tag check, which is a different thing. Test it over the transport: `servertest.New(t, m).Post(t, "/members", …)` and assert the 400. Making `Invoke` validate is scheduled for v0.3 |
 | A fast test suite | `whttp.DrainDelay(0)` — the 5s default is correct in production and costs 5s per test |
 | Scaffolding the next feature | `warren new` and `warren g` — see the CLI's skills, and **install the binary first**: `go install github.com/MerseniBilel/warren/cli/cmd/warren@latest` |
 
@@ -790,13 +929,29 @@ correct behaviour but worth knowing.
 > callers got a 409 for stock that existed. With the arguments the right way
 > round, the same test succeeded 8 of 8.
 >
-> **The limit, exactly as `app/app.go:74-79` states it.** The walk sees every
-> middleware Warren ships and anything whose handler implements
-> `app.Unwrapper` — including across a nested `Chain`, so
-> `Chain(Chain(h, Retrying(p)), Transactional(uow))` is caught too. It
-> **stops** at a middleware that implements neither, and there the check fails
-> OPEN: with your own opaque middleware between them, the corrupting order
-> composes without complaint. One method lifts it:
+> **The limit, and it is narrower than this page used to say — measured
+> 2026-09-02, in both directions.** Where your own opaque middleware (one whose
+> handler implements neither a Warren middleware type nor `app.Unwrapper`) sits
+> decides whether the check still sees through it:
+>
+> | Composition | Result |
+> |---|---|
+> | `Chain(h, Transactional(uow), Retrying(p))` | **refused** |
+> | `Chain(h, Transactional(uow), Auditing(), Retrying(p))` — opaque middleware between them, ONE call | **refused** |
+> | `Chain(Auditing()(Chain(h, Retrying(p))), Transactional(uow))` — opaque middleware across a NESTED call | **composes, no complaint** |
+> | the same nested form, with `Unwrap` on `auditing` | **refused** |
+>
+> Within one `Chain` call the check cannot be blinded, because it remembers
+> having applied a `Retrying` rather than re-deriving it — an opaque middleware
+> layered on top hides nothing. It is the **nested** form that fails open: there
+> the `Retrying` arrives already wrapped inside the handler, and finding it
+> means walking that handler's layers, which stops at the first one with no
+> `Unwrap`.
+>
+> So the `Unwrap` method below is **not** ceremony you can skip — it is exactly
+> what makes an opaque middleware of yours safe to place around a nested
+> `Chain`. A field test reported this hole as closed after testing only the
+> single-call form; it is not.
 >
 > ```go
 > type auditing[Req, Res any] struct{ next app.Handler[Req, Res] }
@@ -812,6 +967,10 @@ correct behaviour but worth knowing.
 > An `Unwrap` returning nil, or returning the receiver, simply ends the walk —
 > a boot that hangs would be worse than one that refuses. There is deliberately
 > no unchecked variant of `Chain`.
+>
+> **If you write middleware of your own, give it `Unwrap`.** It costs one line,
+> it is free at request time, and without it the one composition Warren refuses
+> because it corrupts data can be composed around it.
 >
 > An architect ruling settled that the composition is never legitimate. On Postgres it is
 > worse than wasteful: the version check runs inside the handler, so the
@@ -945,6 +1104,48 @@ empty one would answer `("", false)` for every name, which reads as "no such
 parameter" and lets a policy conclude it has nothing to check. The nil forces
 the choice to be written down.
 
+**The route has to declare the field, even though the handler never reads it.**
+This is the half that catches people: the policy above reads `{tenant}` out of
+the context, so it is tempting to leave `{tenant}` out of the request type. A
+wildcard no `param:` field binds is a **boot failure** — transport refuses it,
+because that parameter would bind `""` on every request and the published
+OpenAPI path would be a templated segment with no parameter. Write it:
+
+```go
+type readDocument struct {
+	// Bound and ignored. The route matches {tenant}, the guard reads it out
+	// of the context, and this field is what makes both of those legal.
+	Tenant string `param:"tenant"`
+
+	ID string `param:"id"`
+}
+
+func (c *Controller) Register(r *transport.Registrar) {
+	r.Get("/tenants/{tenant}/documents/{id}", c.read,
+		transport.Guard(sameTenant{}))
+}
+```
+
+If you will not write the field, `r.Raw` is the opt-out: a raw route carries
+its own pattern and has no request type, so nothing is checked and nothing is
+published for it. Guards still see the parameters — that is deliberate, and
+`transport/http`'s own suite pins it.
+
+The refusal reads:
+
+```
+✗ path wildcard nothing binds
+
+    pattern /tenants/{tenant}/documents/{id} declares {tenant}, and no field
+    of application.ReadDocument carries `param:"tenant"`
+
+  Add the field, even if the handler ignores it:
+
+      Tenant string `param:"tenant"`
+
+  or drop {tenant} from the pattern.
+```
+
 **Where this file goes matters.** It imports `warren/transport`, so
 `warren lint arch` will refuse it in `application/` or `domain/` — a handler
 imports no transport package, and that holds through a helper too. Put a
@@ -1005,10 +1206,42 @@ A consumer's error decides its own fate, by its `warren/errors` code —
 
 | Code | What happens |
 |---|---|
-| `NOT_FOUND`, `CONFLICT` | acked. The work is already done, or was never possible. |
+| `NOT_FOUND` | acked, logged at INFO. The message addressed something that does not exist; redelivering it cannot help. |
+| `CONFLICT` | acked, logged at **WARN** — read the note below before you rely on this row. |
 | `CONTENTION` | nacked and redelivered — or dead-lettered once the retries are spent, if the broker cannot redeliver, which `broker/memory` cannot and the scaffold defaults to. The work was **not** done — a conditional write matched no row — so acking it would destroy a message whose effect never happened. This row is why a repository must return `errors.Contention` and not `errors.Conflict` for a lost version race. |
 | `UNAVAILABLE` | retried with backoff, then nacked so the broker redelivers — **or dead-lettered, if the broker cannot redeliver**. See below. |
 | everything else | retried, then **dead-lettered**. |
+
+**`CONFLICT` from a consumer means two different things, and the framework
+cannot tell them apart.** This page used to gloss the row as *"the work is
+already done, or was never possible"*, and that is only half true. Warren
+deliberately routes both of these to `errors.Conflict`, so that the familiar
+name is the right one:
+
+- **an idempotent replay** — the message arrived twice and the work is done;
+  acking is exactly right and nothing is lost;
+- **a domain rule refusing the work** — an oversell, an illegal transition.
+  This is what the generated aggregate's own doc comment tells you to return:
+  *"Your own methods above return `errors.Conflict` when a RULE refuses."*
+
+The two are indistinguishable from the code, because your handler returns the
+same code for both. So the message is **acked and gone in both cases**, and in
+the second case the work never happened and never will. A field test measured
+it: two members borrowing the last copy of a one-copy book both got 201, the
+second `loan.opened` event was refused, acked and destroyed, and the two
+modules stayed permanently divergent.
+
+**What to do about it.** The log line is at WARN and says only what is known —
+that the handler refused the message with CONFLICT and it has been acked — so
+it is alertable. If a refusal in your consumer means work that must not be
+lost, do not let it terminate the message: return `errors.Internal` (retried,
+then dead-lettered, so the envelope survives and is replayable), or record the
+refusal yourself before returning. And prefer the synchronous check where the
+invariant is a real invariant: an event consumer is not the place to enforce
+one that two concurrent requests can both pass.
+
+Whether a terminal `CONFLICT` should dead-letter instead of acking is an open
+question against §2.6 and is not settled here.
 
 A dead letter is published to `<topic>.dlq` — override with
 `broker.WithDeadLetter("...")` — carrying four headers that say what

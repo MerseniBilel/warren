@@ -88,18 +88,22 @@ type Components struct {
 // Schema is an OpenAPI 3.1 schema. 3.1 is JSON Schema 2020-12, so `type` may
 // be a list and `nullable` does not exist.
 type Schema struct {
-	Ref         string            `json:"$ref,omitempty"`
-	Type        string            `json:"type,omitempty"`
-	Format      string            `json:"format,omitempty"`
-	Items       *Schema           `json:"items,omitempty"`
-	Properties  map[string]Schema `json:"properties,omitempty"`
-	Required    []string          `json:"required,omitempty"`
-	Enum        []string          `json:"enum,omitempty"`
-	MinLength   *int              `json:"minLength,omitempty"`
-	MaxLength   *int              `json:"maxLength,omitempty"`
-	Minimum     *float64          `json:"minimum,omitempty"`
-	Maximum     *float64          `json:"maximum,omitempty"`
-	Description string            `json:"description,omitempty"`
+	Ref        string            `json:"$ref,omitempty"`
+	Type       string            `json:"type,omitempty"`
+	Format     string            `json:"format,omitempty"`
+	Items      *Schema           `json:"items,omitempty"`
+	Properties map[string]Schema `json:"properties,omitempty"`
+	Required   []string          `json:"required,omitempty"`
+	Enum       []string          `json:"enum,omitempty"`
+	MinLength  *int              `json:"minLength,omitempty"`
+	MaxLength  *int              `json:"maxLength,omitempty"`
+	Minimum    *float64          `json:"minimum,omitempty"`
+	Maximum    *float64          `json:"maximum,omitempty"`
+	// OpenAPI 3.1 is JSON Schema 2020-12, where exclusiveMinimum and
+	// exclusiveMaximum are NUMBERS, not the booleans of draft-04.
+	ExclusiveMinimum *float64 `json:"exclusiveMinimum,omitempty"`
+	ExclusiveMaximum *float64 `json:"exclusiveMaximum,omitempty"`
+	Description      string   `json:"description,omitempty"`
 }
 
 // Refusal is one thing the emitter could not describe.

@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	warrentest "github.com/MerseniBilel/warren/testing"
+	"github.com/MerseniBilel/warren/validate/playground"
 
 	"{{.Module}}/internal/modules/{{.Name}}"
 )
@@ -30,14 +31,16 @@ func TestModuleBoots(t *testing.T) {
 	}
 {{- end }}
 
-	// The moment a request in this module carries a tag the standard-library
-	// validator cannot enforce — `email`, `min=1`, `dive` — this boots in
-	// production and fails HERE, because NewModuleTest compiles the routes
-	// itself and never touches App.Validator. Install the playground module
-	// as the boot diagnostic tells you, then add it here too:
+	// WithValidator is not optional decoration. NewModuleTest compiles the
+	// routes itself and never touches App.Validator, so the moment a request
+	// in this module carries a tag the standard-library validator cannot
+	// enforce — `email`, `min=1`, `gte=1`, `dive` — this test fails while
+	// main.go, which installs playground, boots perfectly. It is the same
+	// validator main.go binds, named here so the two cannot diverge.
 	//
-	//	warrentest.NewModuleTest(t, {{.Name}}.Module(),
-	//		warrentest.WithMemoryBroker(),
-	//		warrentest.WithValidator(playground.New()))
-	warrentest.NewModuleTest(t, {{.Name}}.Module(), warrentest.WithMemoryBroker())
+	// This line used to be a COMMENT telling you to add it. A generator that
+	// writes one artifact can write the other.
+	warrentest.NewModuleTest(t, {{.Name}}.Module(),
+		warrentest.WithMemoryBroker(),
+		warrentest.WithValidator(playground.New()))
 }

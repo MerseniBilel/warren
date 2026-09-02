@@ -10,6 +10,7 @@ import (
 	"github.com/MerseniBilel/warren"
 	"github.com/MerseniBilel/warren/log"
 	whttp "github.com/MerseniBilel/warren/transport/http"
+	"github.com/MerseniBilel/warren/validate/playground"
 
 	"{{.Module}}/internal/modules/notification"
 	"{{.Module}}/internal/modules/user"
@@ -53,7 +54,7 @@ func main() {
 	// log.FromContext(ctx).InfoContext(ctx, "saved", "id", id).
 	slog.SetDefault(slog.New(log.Handler(slog.NewJSONHandler(os.Stdout, nil))))
 
-	err := warren.New(
+	app := warren.New(
 		// platform imports the config module, so every feature reaches
 		// Config through one import.
 		platform.Module(),
@@ -64,9 +65,24 @@ func main() {
 		// with it: /healthz runs no checks, /readyz gates on the lifecycle
 		// and every critical check.
 		whttp.Server(whttp.Port(port())),
-	).Run()
+	)
 
-	if err != nil {
+	// Installed by default, because the alternative is a boot failure on the
+	// first interesting tag you write. Core understands `validate:"required"`
+	// and nothing else — it refuses a tag it cannot enforce rather than
+	// ignoring it — so `min=2`, `email` and `oneof` all fail the boot until
+	// an implementation is bound. Every page that teaches this vocabulary
+	// teaches it as ordinary, so the scaffold binds the implementation that
+	// makes it ordinary.
+	//
+	// To drop the dependency: delete this call and the require, and keep to
+	// `required`. To swap it: bind any validate.Validator here.
+	if err := app.Validator(playground.New()); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
+	if err := app.Run(); err != nil {
 		// Print, don't log: Warren's diagnostics are multi-line blocks, and a
 		// structured logger would escape every newline into \n.
 		fmt.Fprintln(os.Stderr, err)

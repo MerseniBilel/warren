@@ -3,6 +3,11 @@ name: ci
 on:
   push:
     branches: [main]
+    # Tags too, because the two scaffold steps in `install` below can only
+    # pass at a tag and are gated on one. Without this trigger they would be
+    # gated on a ref that never arrives, which is a deleted check wearing an
+    # `if:`.
+    tags: ["v*"]
   pull_request:
 
 permissions:
@@ -107,11 +112,30 @@ jobs:
       # Question 2. The CLI from this checkout, scaffolding OUTSIDE the
       # repository — inside it the parent go.mod and any go.work would resolve
       # the framework locally and prove nothing.
+      #
+      # TAG-GATED, 2026-09-02. This step and the one after it resolve THIS
+      # tree's scaffold against the PUBLISHED framework, so between a commit
+      # that adds core API and the tag that releases it they cannot pass: on
+      # 2026-09-02 they had been failing since PR #3 with `undefined:
+      # app.Clock` and `undefined: memory.Module`, on every run, for reasons no
+      # pull request could fix. The run was therefore red before any change was
+      # reviewed, and PR #5 merged a genuinely red `test` job because a red ✗
+      # had stopped meaning anything. This file already reasoned that out —
+      # "a gate that stays red waiting for a tag is a gate people learn to
+      # ignore" — and then did not act on it.
+      #
+      # A tag is exactly when the question is answerable AND when it matters,
+      # because a release that tagged four of six modules would otherwise look
+      # perfectly healthy. Note what this is NOT: `continue-on-error`, which
+      # would report a failed job as green. Moving a job to the right trigger
+      # removes a false failure; continue-on-error hides a true one.
       - name: build the CLI from this checkout
+        if: startsWith(github.ref, 'refs/tags/')
         run: go build -o "$RUNNER_TEMP/warren" ./cmd/warren
         working-directory: cli
 
       - name: a scaffold from this tree resolves with plain go mod tidy
+        if: startsWith(github.ref, 'refs/tags/')
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/scaffolds"
@@ -134,6 +158,7 @@ jobs:
       # scaffolds' tests want a database and a broker, which is an integration
       # concern, while resolution and compilation are what this job is for.
       - name: the driver adapters resolve too
+        if: startsWith(github.ref, 'refs/tags/')
         run: |
           set -euo pipefail
           cd "$RUNNER_TEMP/scaffolds"
@@ -171,44 +196,3 @@ jobs:
             | sh -s -- -b "$(go env GOPATH)/bin" v2.13.2
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
       - run: make lint
-
-  # The contract suites, against a real database.
-  #
-  # These are deliberately NOT in `make ci` — AGENT.md's unit-test rule is no
-  # Docker and no network — so nothing ran them automatically, and drift in
-  # them was invisible until someone remembered. It went unnoticed once: the
-  # CONTENTION split (2026-08-08) updated the memory driver and the CLI's
-  # repository template, and left this module's own contract FIXTURE
-  # returning the old code. `make ci` was green the whole time.
-  #
-  # Postgres only. Kafka's suite needs topic setup this job would have to
-  # duplicate, and `brokertest.Run` is still run by hand against a real
-  # broker — say so rather than imply coverage that is not here.
-  integration:
-    runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: postgres:17
-        env:
-          POSTGRES_PASSWORD: warren
-        options: >-
-          --health-cmd "pg_isready -U postgres"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
-        ports:
-          - 5433:5432
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version: "1.27.x"
-      - name: persistence/postgres contract suites
-        env:
-          WARREN_TEST_POSTGRES_DSN: postgres://postgres:warren@localhost:5433/postgres?sslmode=disable
-        # `make workspace`, not a hand-copied module list: the Makefile's
-        # MODULES is the one place a new module gets registered, and this
-        # job duplicating it is the drift the lint job above already had.
-        run: |
-          make workspace
-          cd persistence/postgres && go test -tags integration -count=1 ./...

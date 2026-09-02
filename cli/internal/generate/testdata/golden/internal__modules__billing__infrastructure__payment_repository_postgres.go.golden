@@ -12,7 +12,7 @@ import (
 	"example.com/myapp/internal/modules/billing/domain"
 )
 
-// PaymentRepository is plain SQL over Postgres. There is no ORM, by
+// PaymentPostgresRepository is plain SQL over Postgres. There is no ORM, by
 // design: this file is yours to edit, and the only framework machinery in it
 // is postgres.DB.
 //
@@ -45,12 +45,12 @@ import (
 // directly compiles, vets, serves traffic and loses every event. The generated
 // payment_repository_test.go is what catches that: it runs
 // persistence.RunContract, which asserts that Save and Delete enlist. Keep it.
-type PaymentRepository struct{ db postgres.DB }
+type PaymentPostgresRepository struct{ db postgres.DB }
 
-// NewPaymentRepository returns the repository as its PORT, so the
+// NewPaymentPostgresRepository returns the repository as its PORT, so the
 // container resolves it by the type the application layer asks for.
-func NewPaymentRepository(db postgres.DB) domain.PaymentRepository {
-	return &PaymentRepository{db: db}
+func NewPaymentPostgresRepository(db postgres.DB) domain.PaymentRepository {
+	return &PaymentPostgresRepository{db: db}
 }
 
 // FindByID returns the payment, or an error carrying CodeNotFound.
@@ -62,7 +62,7 @@ func NewPaymentRepository(db postgres.DB) domain.PaymentRepository {
 // PaymentCreated, so loading through it would republish a creation fact on
 // the next Save — and would reconstitute at version 0, which turns every
 // update into an insert.
-func (r *PaymentRepository) FindByID(ctx context.Context, id domain.PaymentID) (*domain.Payment, error) {
+func (r *PaymentPostgresRepository) FindByID(ctx context.Context, id domain.PaymentID) (*domain.Payment, error) {
 	var (
 		createdAt time.Time
 		version   int64
@@ -86,7 +86,7 @@ func (r *PaymentRepository) FindByID(ctx context.Context, id domain.PaymentID) (
 // The write is CONDITIONAL on the version this payment was loaded at. That
 // is the whole point: without it, two requests that both read version 3 both
 // write, both return 201, and the second silently erases the first.
-func (r *PaymentRepository) Save(ctx context.Context, payment *domain.Payment) error {
+func (r *PaymentPostgresRepository) Save(ctx context.Context, payment *domain.Payment) error {
 	// RULE 1 and RULE 3 in one call. persistence.Write refuses outside a unit
 	// of work — where this would autocommit and the aggregate's events would
 	// be lost with no error anywhere — and enlists the aggregate when, and
@@ -157,7 +157,7 @@ func (r *PaymentRepository) Save(ctx context.Context, payment *domain.Payment) e
 // Loading the payment in here instead would not help — that would be a
 // different object with no pending events, and enlisting it would publish
 // nothing.
-func (r *PaymentRepository) Delete(ctx context.Context, payment *domain.Payment) error {
+func (r *PaymentPostgresRepository) Delete(ctx context.Context, payment *domain.Payment) error {
 	return persistence.Write(ctx, "delete payment", payment, func(ctx context.Context) error {
 		// Exec returns the rows affected, and a DELETE that matched nothing is
 		// a NOT_FOUND — the persistence contract suite deletes twice and

@@ -244,10 +244,29 @@ func applyValidate(s *Schema, tag string) (required bool, unmapped []string) {
 			s.Format = "uri"
 		case "uuid", "uuid4":
 			s.Format = "uuid"
-		case "min":
-			applyBound(s, value, true)
-		case "max":
-			applyBound(s, value, false)
+		// min/gte and max/lte are the same constraint under two spellings:
+		// go-playground's gte is ">= n" and min is "length or value >= n",
+		// and for every type this table describes they coincide.
+		//
+		// They were not both mapped until 2026-09-02, and the asymmetry was
+		// the credibility problem rather than the coverage one: `gte` was
+		// refused with "no JSON Schema keyword expresses it" three lines
+		// below `minLength` and `enum` being emitted, so three of nine
+		// operations in a real service were stamped x-warren-undescribed for
+		// a constraint JSON Schema has had since draft-01. Declaring the easy
+		// one impossible is what makes a reader doubt the hard ones.
+		case "min", "gte":
+			applyBound(s, value, true, false)
+		case "max", "lte":
+			applyBound(s, value, false, false)
+		// gt/lt are the exclusive forms. On a number that is
+		// exclusiveMinimum/exclusiveMaximum verbatim; on a string or an array,
+		// where the constraint is on LENGTH and lengths are integers,
+		// "longer than n" is minLength n+1.
+		case "gt":
+			applyBound(s, value, true, true)
+		case "lt":
+			applyBound(s, value, false, true)
 		case "len":
 			if n, err := strconv.Atoi(value); err == nil && s.Type == "string" {
 				s.MinLength, s.MaxLength = &n, &n
@@ -256,6 +275,28 @@ func applyValidate(s *Schema, tag string) (required bool, unmapped []string) {
 			if s.Type == "string" {
 				s.Enum = strings.Fields(value)
 			}
+		case "omitempty":
+			// Expressible, and already expressed: "optional" is the absence
+			// of this field from `required`, which is what NOT setting
+			// required here produces. A parameter gets `required: false` by
+			// the same route.
+			//
+			// It was refused until 2026-09-02, and the refusal made
+			// openapi.Strict() unusable on any service with a constrained
+			// optional query parameter — `validate:"omitempty,min=1,max=100"`
+			// on a ?limit= is the idiomatic spelling, and field test #15
+			// showed the emitter describing it perfectly
+			// ({"type":"integer","minimum":1,"maximum":100}, required false)
+			// and then failing the boot over it.
+			//
+			// One corner, stated rather than glossed: go-playground's
+			// omitempty skips the remaining rules when the value is the ZERO
+			// value, not when it is absent. So an explicitly-sent `limit=0`
+			// is accepted by the server and rejected by a client generated
+			// from `minimum: 1`. That is the schema being STRICTER than the
+			// service in one case, which is the opposite of the failure the
+			// refusal list exists for, and it is not worth refusing a whole
+			// route over.
 		default:
 			unmapped = append(unmapped, key)
 		}
@@ -263,15 +304,28 @@ func applyValidate(s *Schema, tag string) (required bool, unmapped []string) {
 	return required, unmapped
 }
 
-// applyBound puts min/max on the right keyword: length for strings and arrays,
+// applyBound puts a bound on the right keyword: length for strings and arrays,
 // value for numbers. Putting minLength on an integer would be a constraint a
 // client generator enforces and a server never checks.
-func applyBound(s *Schema, value string, lower bool) {
+//
+// exclusive distinguishes gt/lt from gte/lte. A length is an integer, so an
+// exclusive length bound is an inclusive one moved by one — "longer than 3" is
+// minLength 4 — and no precision is lost. A numeric bound uses JSON Schema's
+// exclusiveMinimum/exclusiveMaximum, which in 2020-12 (and therefore in
+// OpenAPI 3.1) are numbers rather than draft-04's booleans.
+func applyBound(s *Schema, value string, lower, exclusive bool) {
 	switch s.Type {
 	case "string", "array":
 		n, err := strconv.Atoi(value)
 		if err != nil {
 			return
+		}
+		if exclusive {
+			if lower {
+				n++
+			} else {
+				n--
+			}
 		}
 		if lower {
 			s.MinLength = &n
@@ -283,9 +337,14 @@ func applyBound(s *Schema, value string, lower bool) {
 		if err != nil {
 			return
 		}
-		if lower {
+		switch {
+		case lower && exclusive:
+			s.ExclusiveMinimum = &f
+		case lower:
 			s.Minimum = &f
-		} else {
+		case exclusive:
+			s.ExclusiveMaximum = &f
+		default:
 			s.Maximum = &f
 		}
 	}

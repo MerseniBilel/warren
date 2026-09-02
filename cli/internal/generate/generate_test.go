@@ -178,7 +178,12 @@ func TestASecondPostgresRepositoryNumbersItsMigration(t *testing.T) {
 	}
 	var names []string
 	for _, e := range entries {
-		names = append(names, e.Name())
+		// schema.go lives here too — it is the //go:embed that compiles these
+		// files into cmd/migrate, so the deploy binary runs from anywhere.
+		// nextMigration already skips anything that is not .sql; so does this.
+		if strings.HasSuffix(e.Name(), ".sql") {
+			names = append(names, e.Name())
+		}
 	}
 	if len(names) != 2 {
 		t.Fatalf("migrations = %v, want one per aggregate", names)
@@ -272,28 +277,39 @@ func TestGenerateConsumer(t *testing.T) {
 		t.Error("the handler imports the broker — a consumer handler must not know its transport")
 	}
 
-	// The subscription is the plumbing, and it belongs in the module: it is
-	// the only file allowed to see both the broker and the handler.
-	sub := read(t, dir, "internal/modules/user/on_order_placed_subscription.go")
-	if !strings.Contains(sub, `const topic = "order.placed"`) {
+	// The consumer is the plumbing, and it belongs in the module: it is the
+	// only file allowed to see both the transport package and the handler.
+	sub := read(t, dir, "internal/modules/user/on_order_placed_consumer.go")
+	if !strings.Contains(sub, `r.OnEvent("order.placed", c.handle)`) {
 		t.Errorf("the topic was not derived from the event name:\n%s", sub)
 	}
 
-	// Providers plus Eager, not Consumers: the subscription wires its own
-	// pipeline and lifecycle hook rather than registering through
-	// r.OnEvent, so it is not a transport.Controller — and boot now
-	// refuses a Consumers entry that registers nothing.
+	// Consumers, not Providers plus Eager. Amended 2026-09-02: this block
+	// used to assert the opposite, because the generated subscription wired
+	// its own broker.Pipeline and lifecycle hook and so was not a
+	// transport.Controller. It is one now, and the two generators finally
+	// emit the same idiom — field test #15 found one project containing both.
 	mod := read(t, dir, "internal/modules/user/module.go")
-	if strings.Contains(mod, "warren.Consumers") {
-		t.Errorf("the subscription is not a transport.Controller and must not be listed in Consumers:\n%s", mod)
+	for _, unwanted := range []string{"warren.Eager", "Subscription"} {
+		if strings.Contains(mod, unwanted) {
+			t.Errorf("module.go still carries the superseded %q idiom:\n%s", unwanted, mod)
+		}
 	}
 	for _, want := range []string{
 		"application.NewOnOrderPlacedHandler",
-		"newOrderPlacedSubscription",
-		"warren.Eager[*orderPlacedSubscription]()",
+		"warren.Consumers(",
+		"newOrderPlacedConsumer,",
 	} {
 		if !strings.Contains(mod, want) {
 			t.Errorf("module.go is missing %q:\n%s", want, mod)
+		}
+	}
+
+	// The consumer must not hand-roll what the framework assembles. Every
+	// one of these was in the 82-line template it replaces.
+	for _, unwanted := range []string{"broker.Pipeline", "lifecycle.Hook", "json.Unmarshal", "sub.Subscribe"} {
+		if strings.Contains(sub, unwanted) {
+			t.Errorf("the generated consumer still hand-assembles %q:\n%s", unwanted, sub)
 		}
 	}
 }
@@ -378,8 +394,8 @@ func TestConsumerTopicIsOverridable(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Consumer: %v", err)
 	}
-	if !strings.Contains(read(t, dir, "internal/modules/user/on_order_placed_subscription.go"),
-		`const topic = "billing.order.placed"`) {
+	if !strings.Contains(read(t, dir, "internal/modules/user/on_order_placed_consumer.go"),
+		`r.OnEvent("billing.order.placed", c.handle)`) {
 		t.Error("--topic was ignored")
 	}
 }
@@ -1136,7 +1152,7 @@ func TestBothRepositoryDriversOfferTheSameSurface(t *testing.T) {
 		}); err != nil {
 			t.Fatalf("g repository --driver %s: %v", driver, err)
 		}
-		src := read(t, dir, "internal/modules/user/infrastructure/order_repository.go")
+		src := read(t, dir, repoFile("order", driver, ".go"))
 		var found []string
 		for _, m := range []string{"FindByID", "Save", "Delete"} {
 			if strings.Contains(src, ") "+m+"(ctx context.Context") {
@@ -1181,12 +1197,16 @@ func TestGeneratedDeleteEnlistsItsAggregate(t *testing.T) {
 			}); err != nil {
 				t.Fatalf("Repository: %v", err)
 			}
-			src := read(t, dir, "internal/modules/user/infrastructure/order_repository.go")
+			src := read(t, dir, repoFile("order", driver, ".go"))
 
 			// The root, not an id. Load-then-delete inside Delete cannot fix
 			// this: the pending events live on the CALLER's instance, so a
 			// re-loaded aggregate is a different object with zero events.
-			if !strings.Contains(src, "func (r *OrderRepository) Delete(ctx context.Context, order *domain.Order) error") {
+			repoType := "OrderRepository"
+			if driver == "postgres" {
+				repoType = "OrderPostgresRepository"
+			}
+			if !strings.Contains(src, "func (r *"+repoType+") Delete(ctx context.Context, order *domain.Order) error") {
 				t.Errorf("Delete does not take the aggregate root:\n%s", src)
 			}
 			// The memory driver delegates to persistence.MemoryRepository,
@@ -1232,7 +1252,7 @@ func TestGeneratedRepositoryHasAContractTest(t *testing.T) {
 			}); err != nil {
 				t.Fatalf("Repository: %v", err)
 			}
-			src := read(t, dir, "internal/modules/user/infrastructure/order_repository_test.go")
+			src := read(t, dir, repoFile("order", driver, "_test.go"))
 			if !strings.Contains(src, "persistence.RunContract(") {
 				t.Errorf("the generated test does not run the contract suite:\n%s", src)
 			}
@@ -1258,7 +1278,7 @@ func TestPostgresContractTestSkipNamesTheGuarantee(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Repository: %v", err)
 	}
-	src := read(t, dir, "internal/modules/user/infrastructure/order_repository_test.go")
+	src := read(t, dir, repoFile("order", "postgres", "_test.go"))
 	skip := skipMessage(src)
 	if skip == "" {
 		t.Fatalf("the generated postgres test has no t.Skip:\n%s", src)
@@ -1396,4 +1416,282 @@ func withoutComments(body string) string {
 		}
 	}
 	return strings.Join(kept, "\n")
+}
+
+// TestGeneratedMigrateReadsTheProjectsOwnDSNVariable — field test #15,
+// finding 6. `warren g repository --driver postgres` printed
+//
+//	LIBRARY_DATABASE_URL=... go run ./cmd/migrate
+//
+// and wrote a cmd/migrate reading DATABASE_URL, in the same command, under a
+// comment claiming they were "the SAME variable internal/platform reads, so
+// the application and its migrations cannot disagree about which database
+// they mean". The contract test written by the same command used the prefixed
+// form, and so does `warren new --db postgres`. Three artifacts, two names,
+// and the printed instruction failed against the file it had just written.
+func TestGeneratedMigrateReadsTheProjectsOwnDSNVariable(t *testing.T) {
+	t.Parallel()
+
+	dir := app(t)
+	if _, err := generate.Entity(generate.Options{Dir: dir, Module: "user", Name: "Book"}); err != nil {
+		t.Fatalf("Entity: %v", err)
+	}
+	out, err := generate.Repository(generate.Options{
+		Dir: dir, Module: "user", Name: "Book", Driver: "postgres",
+	})
+	if err != nil {
+		t.Fatalf("Repository: %v", err)
+	}
+
+	migrate := read(t, dir, "cmd/migrate/main.go")
+	if !strings.Contains(migrate, `os.Getenv("MYAPP_DATABASE_URL")`) {
+		t.Errorf("cmd/migrate does not read the project's own variable:\n%s", migrate)
+	}
+	if strings.Contains(migrate, `"DATABASE_URL"`) {
+		t.Errorf("cmd/migrate still reads an unprefixed DATABASE_URL:\n%s", migrate)
+	}
+
+	// Field test #16, finding 4. cmd/migrate is a DEPLOY STEP and runs from
+	// wherever the deploy job puts it, so a path relative to the working
+	// directory found nothing: Warren's own tables applied, the project's did
+	// not, exit 1, database half-migrated. The migrations must be compiled in.
+	//
+	// The companion test inside the generated project asserts the embed
+	// actually carries the .sql files; this asserts cmd/migrate USES it,
+	// which a build cannot tell you because os.DirFS compiles perfectly.
+	if strings.Contains(migrate, "os.DirFS") {
+		t.Errorf("cmd/migrate reads its migrations from the working directory, "+
+			"which is not where a deploy step runs:\n%s", migrate)
+	}
+	if !strings.Contains(migrate, "migrations.FS") {
+		t.Errorf("cmd/migrate does not use the embedded migrations:\n%s", migrate)
+	}
+	embed := read(t, dir, "db/migrations/schema.go")
+	if !strings.Contains(embed, "//go:embed *.sql") {
+		t.Errorf("db/migrations/schema.go does not embed the .sql files:\n%s", embed)
+	}
+
+	// And the printed instruction must name the same one it just wrote, which
+	// is the half that made this visible at all.
+	if !strings.Contains(out, "MYAPP_DATABASE_URL") {
+		t.Errorf("the printed instruction does not name the variable cmd/migrate reads:\n%s", out)
+	}
+	contract := read(t, dir, repoFile("book", "postgres", "_test.go"))
+	if !strings.Contains(contract, "MYAPP_DATABASE_URL") {
+		t.Errorf("the generated contract test uses a different variable again:\n%s", contract)
+	}
+}
+
+// TestForceBacksUpWhatItDestroys — field test #15, finding 11, reclassified
+// from PAPERCUT to a data-loss bug.
+//
+// `warren g repository catalog Book --driver postgres --force` replaced 100
+// lines of hand-written repository, including the List method the domain port
+// required, with a template that knows id, created_at and version. The
+// compiler caught that one. It also clobbered two hand-written migration
+// files, and nothing caught those — there was no backup and no mention.
+func TestForceBacksUpWhatItDestroys(t *testing.T) {
+	t.Parallel()
+
+	dir := app(t)
+	if _, err := generate.Entity(generate.Options{Dir: dir, Module: "user", Name: "Book"}); err != nil {
+		t.Fatalf("Entity: %v", err)
+	}
+	if _, err := generate.Repository(generate.Options{Dir: dir, Module: "user", Name: "Book"}); err != nil {
+		t.Fatalf("Repository: %v", err)
+	}
+
+	// Stand in for the hand-written work: the file exists, and its contents
+	// are the thing that must survive somewhere.
+	const handWritten = "// hand-written, and the only copy\npackage infrastructure\n"
+	repo := filepath.Join(dir, "internal/modules/user/infrastructure/book_repository.go")
+	if err := os.WriteFile(repo, []byte(handWritten), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// The SAME driver, so the generator really is asked to replace the file.
+	// A postgres regeneration writes book_repository_postgres.go and would not
+	// touch this one at all — which is finding 7's fix, asserted below.
+	out, err := generate.Repository(generate.Options{
+		Dir: dir, Module: "user", Name: "Book", Force: true,
+	})
+	if err != nil {
+		t.Fatalf("Repository --force: %v", err)
+	}
+
+	backup, err := os.ReadFile(repo + ".orig")
+	if err != nil {
+		t.Fatalf("--force destroyed a hand-written file with no backup: %v", err)
+	}
+	if string(backup) != handWritten {
+		t.Errorf("the backup is not what was destroyed:\n%s", backup)
+	}
+	if !strings.Contains(out, ".orig") {
+		t.Errorf("--force did not say where the previous content went:\n%s", out)
+	}
+
+	// A second --force must not back up the FIRST run's generated output over
+	// the hand-written original. The oldest backup is the valuable one.
+	if _, err := generate.Repository(generate.Options{
+		Dir: dir, Module: "user", Name: "Book", Force: true,
+	}); err != nil {
+		t.Fatalf("second Repository --force: %v", err)
+	}
+	again, err := os.ReadFile(repo + ".orig")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(again) != handWritten {
+		t.Errorf("a second --force overwrote the backup of the hand-written file:\n%s", again)
+	}
+}
+
+// TestDryRunWarnsBeforeForceDestroysAnything — the other half: --dry-run is
+// the one moment the content still exists, so it has to say what will go.
+func TestDryRunWarnsBeforeForceDestroysAnything(t *testing.T) {
+	t.Parallel()
+
+	dir := app(t)
+	if _, err := generate.Entity(generate.Options{Dir: dir, Module: "user", Name: "Book"}); err != nil {
+		t.Fatalf("Entity: %v", err)
+	}
+	if _, err := generate.Repository(generate.Options{Dir: dir, Module: "user", Name: "Book"}); err != nil {
+		t.Fatalf("Repository: %v", err)
+	}
+
+	out, err := generate.Repository(generate.Options{
+		Dir: dir, Module: "user", Name: "Book", Force: true, DryRun: true,
+	})
+	if err != nil {
+		t.Fatalf("Repository --force --dry-run: %v", err)
+	}
+	for _, want := range []string{"WILL REPLACE", "overwrite", ".orig"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("--dry-run does not warn that --force will destroy files (%q):\n%s", want, out)
+		}
+	}
+}
+
+// repoFile is where a driver's repository lands. postgres gets its own file
+// so it can sit beside the memory implementation GETTING_STARTED §8 tells you
+// to keep — before 2026-09-02 both drivers wrote <agg>_repository.go and
+// --force destroyed the one the documentation asked for.
+func repoFile(snake, driver, suffix string) string {
+	if driver == "postgres" {
+		return "internal/modules/user/infrastructure/" + snake + "_repository_postgres" + suffix
+	}
+	return "internal/modules/user/infrastructure/" + snake + "_repository" + suffix
+}
+
+// TestBothDriversCoexistForOneAggregate — field test #16, finding 7.
+//
+// GETTING_STARTED §8 tells you to KEEP a memory implementation so module
+// tests run without Docker, and then `g repository --driver postgres` wrote to
+// the same filename and declared the same type. The refusal was exemplary —
+// nothing half-written — but the only ways past it were renaming the file, the
+// type and the constructor by hand (the field test paid eight sed expressions)
+// or `--force`, which silently destroyed the file the documentation had just
+// told you to keep, including a hand-written List the port required.
+func TestBothDriversCoexistForOneAggregate(t *testing.T) {
+	t.Parallel()
+
+	dir := app(t)
+	if _, err := generate.Entity(generate.Options{Dir: dir, Module: "user", Name: "Book"}); err != nil {
+		t.Fatalf("Entity: %v", err)
+	}
+	if _, err := generate.Repository(generate.Options{Dir: dir, Module: "user", Name: "Book"}); err != nil {
+		t.Fatalf("memory Repository: %v", err)
+	}
+	memory := read(t, dir, repoFile("book", "memory", ".go"))
+
+	// No --force, no rename, no refusal.
+	if _, err := generate.Repository(generate.Options{
+		Dir: dir, Module: "user", Name: "Book", Driver: "postgres",
+	}); err != nil {
+		t.Fatalf("postgres Repository beside the memory one: %v", err)
+	}
+
+	if got := read(t, dir, repoFile("book", "memory", ".go")); got != memory {
+		t.Error("generating the postgres driver modified the memory implementation")
+	}
+	pg := read(t, dir, repoFile("book", "postgres", ".go"))
+
+	// Distinct types, so one package holds both and the compiler is happy.
+	if !strings.Contains(pg, "type BookPostgresRepository struct") {
+		t.Errorf("the postgres repository does not have its own type:\n%s", pg)
+	}
+	if !strings.Contains(memory, "type BookRepository struct") {
+		t.Errorf("the memory repository's type changed:\n%s", memory)
+	}
+	// And both return the same PORT, which is what makes the swap a
+	// provider-list edit rather than a rewrite.
+	for _, src := range []string{memory, pg} {
+		if !strings.Contains(src, "domain.BookRepository {") {
+			t.Errorf("a driver stopped returning the domain port:\n%s", src)
+		}
+	}
+	// The module wires the one just generated.
+	if mod := read(t, dir, "internal/modules/user/module.go"); !strings.Contains(mod, "NewBookPostgresRepository") {
+		t.Errorf("module.go does not provide the postgres constructor:\n%s", mod)
+	}
+}
+
+// TestTheContractTestSurvivesAChangedConstructor — field test #16, finding 6.
+//
+// `warren g entity` tells you to "add the fields the invariants need", and the
+// moment you do, New<Agg>'s signature changes. The generated contract test
+// called it with two guessed arguments, so following the entity generator's
+// own advice made the package stop compiling:
+//
+//	vet: stock_item_repository_test.go:139:54: not enough arguments in call to
+//	     domain.NewStockItem
+//
+// That matters more than an ordinary generator mismatch, because this file's
+// own header says deleting it returns you to a repository that silently drops
+// events — so the fastest way out of a broken build was to remove the thing
+// protecting you. It now fails at RUN time with an instruction instead.
+func TestTheContractTestSurvivesAChangedConstructor(t *testing.T) {
+	t.Parallel()
+
+	dir := app(t)
+	if _, err := generate.Entity(generate.Options{Dir: dir, Module: "user", Name: "Book"}); err != nil {
+		t.Fatalf("Entity: %v", err)
+	}
+	if _, err := generate.Repository(generate.Options{
+		Dir: dir, Module: "user", Name: "Book", Driver: "postgres",
+	}); err != nil {
+		t.Fatalf("Repository: %v", err)
+	}
+	src := read(t, dir, repoFile("book", "postgres", "_test.go"))
+
+	// It must not CALL the constructor, whose signature it cannot know. The
+	// doc comment SHOWS the call, which is the point of it, so only
+	// non-comment lines count.
+	for i, line := range strings.Split(src, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "//") {
+			continue
+		}
+		if strings.Contains(trimmed, "domain.NewBook(") {
+			t.Errorf("line %d calls the aggregate's constructor, so adding a field to "+
+				"the aggregate stops this package compiling:\n\t%s", i+1, trimmed)
+		}
+	}
+	// It must fail loudly, and the message must say what to write and where.
+	for _, want := range []string{
+		"panic(",
+		"fill in newBookForContract",
+		"carrying a pending",
+		"book_repository_postgres_test.go",
+		// And a FRESH CLONE must be green: the suites are gated on the one
+		// function the user has to write, so `go test ./...` on an untouched
+		// repository skips with an explanation instead of panicking for
+		// anyone who happens to have a database.
+		"const contractFactoryFilled = false",
+		"did NOT run",
+	} {
+		if !strings.Contains(src, want) {
+			t.Errorf("the placeholder does not carry %q:\n%s", want, src)
+		}
+	}
 }

@@ -24,11 +24,12 @@ var Module = sync.OnceValue(func() warren.Module {
 		warren.Controllers(NewController),
 		warren.Providers(
 			infrastructure.NewInvoiceRepository,
-			infrastructure.NewPaymentRepository,
+			infrastructure.NewPaymentPostgresRepository,
 			application.NewVoidInvoiceHandler,
 			application.NewOnPaymentReceivedHandler,
-			newPaymentReceivedSubscription,
 		),
-		warren.Eager[*paymentReceivedSubscription](),
+		warren.Consumers(
+			newPaymentReceivedConsumer,
+		),
 	)
 })

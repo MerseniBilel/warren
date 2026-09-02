@@ -93,13 +93,20 @@
   every replica and applies DDL the still-serving old ones were not
   written against. Apply the schema as a DEPLOY STEP instead.
 
-  Either run Warren's own applier from a small main, or a deploy job:
+  A scaffolded project already HAS the binary for this, written by
+  `warren new --db postgres` or `warren g repository --driver postgres`:
 
-      postgres.Migrate(ctx, os.Getenv("DATABASE_URL"), postgres.Schema)
+      <APPNAME>_DATABASE_URL=... go run ./cmd/migrate
 
-  or point the migration tool you already use at postgres.Schema — the
-  files are plain SQL in goose's format, so goose, atlas and dbmate all
-  read them unchanged.
+  <APPNAME> upper-cased, the same variable internal/platform reads —
+  never a bare DATABASE_URL, which is not what anything in a Warren
+  project is configured with.
+
+  Without that binary, run the applier yourself, or point the migration
+  tool you already use at postgres.Schema — the files are plain SQL in
+  goose's format, so goose, atlas and dbmate all read them unchanged:
+
+      postgres.Migrate(ctx, dsn, postgres.Schema)
 
 ── no migrations
 ✗ no migrations found

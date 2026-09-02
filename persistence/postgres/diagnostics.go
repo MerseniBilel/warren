@@ -162,10 +162,15 @@ func errTableMissing(table string) error {
 			"  Warren never migrates at boot — under a rolling deploy that races\n"+
 			"  every replica and applies DDL the still-serving old ones were not\n"+
 			"  written against. Apply the schema as a DEPLOY STEP instead.\n\n"+
-			"  Either run Warren's own applier from a small main, or a deploy job:\n\n"+
-			"      postgres.Migrate(ctx, os.Getenv(\"DATABASE_URL\"), postgres.Schema)\n\n"+
-			"  or point the migration tool you already use at postgres.Schema — the\n"+
-			"  files are plain SQL in goose's format, so goose, atlas and dbmate all\n"+
-			"  read them unchanged.",
+			"  A scaffolded project already HAS the binary for this, written by\n"+
+			"  `warren new --db postgres` or `warren g repository --driver postgres`:\n\n"+
+			"      <APPNAME>_DATABASE_URL=... go run ./cmd/migrate\n\n"+
+			"  <APPNAME> upper-cased, the same variable internal/platform reads —\n"+
+			"  never a bare DATABASE_URL, which is not what anything in a Warren\n"+
+			"  project is configured with.\n\n"+
+			"  Without that binary, run the applier yourself, or point the migration\n"+
+			"  tool you already use at postgres.Schema — the files are plain SQL in\n"+
+			"  goose's format, so goose, atlas and dbmate all read them unchanged:\n\n"+
+			"      postgres.Migrate(ctx, dsn, postgres.Schema)",
 		table, ModuleName))
 }

@@ -93,10 +93,23 @@ func (s *server) build(tbl *transport.Table, reg health.Registry) (err error) {
 
 	// Typed routes: decode, bind, validate, handler, encode — all of it
 	// composed at boot into one closure per route.
-	verbs := map[string][]string{}
+	//
+	// ONE registration per route, "METHOD /pattern", and nothing else.
+	// Until 2026-09-02 this loop also registered a METHOD-LESS pattern per
+	// path, further down, to render the JSON envelope for a 405 — and that
+	// shim made three ordinary route shapes unbootable:
+	//
+	//	GET /skus/{sku}  +  GET /skus/search        stdlib accepts; Warren refused
+	//	GET /skus/{sku}  +  DELETE /skus/{id}       stdlib accepts; Warren refused
+	//
+	// A method-less literal against a method-specific wildcard is one of the
+	// few combinations ServeMux does reject, and Warren was adding the
+	// method-less half itself — then reporting the refusal as though stdlib
+	// had made it. /users/me, /orders/pending and /skus/search were all
+	// unserveable, and `warren g command --method get --route /skus/search`
+	// generates exactly that shape.
 	for _, rt := range tbl.HTTP() {
 		s.mux.Handle(rt.Verb+" "+rt.Pattern, s.wrap(s.typed(rt)))
-		verbs[rt.Pattern] = append(verbs[rt.Pattern], rt.Verb)
 		if s.cfg.logRoutes {
 			slog.Info("route", "method", rt.Verb, "pattern", rt.Pattern,
 				"handler", rt.Name, "module", ModuleName)
@@ -121,43 +134,28 @@ func (s *server) build(tbl *transport.Table, reg health.Registry) (err error) {
 				"raw", true, "module", ModuleName)
 		}
 		s.mux.Handle(rr.Pattern, s.wrap(s.raw(rr, h)))
-		// A raw pattern carries its own method — "POST /uploads" — so it
-		// contributes to Allow exactly like a typed route. Without this a
-		// wrong verb on a raw route reports 404, as though the path did not
-		// exist at all.
-		if verb, path, ok := strings.Cut(rr.Pattern, " "); ok {
-			verbs[path] = append(verbs[path], strings.ToUpper(verb))
-		}
 	}
 
 	// Handle(...) options: the main-side door, for handlers with no
 	// module-scoped dependency.
 	for _, e := range s.cfg.extra {
 		s.mux.Handle(e.pattern, s.wrap(e.handler))
-		if verb, path, ok := strings.Cut(e.pattern, " "); ok {
-			verbs[path] = append(verbs[path], strings.ToUpper(verb))
-		}
 	}
 
-	// 405 with a computed Allow. ServeMux already returns 405 with a correct
-	// Allow for free — but registering this method-less shim to render the
-	// JSON envelope DESTROYS that, so the shim computes Allow itself,
-	// including the implicit HEAD that every GET pattern provides.
-	rootAllow := ""
-	for pattern, vs := range verbs {
-		allow := allowHeader(vs)
-		if pattern == "/" {
-			// "/" is also the catch-all; one handler must serve both.
-			rootAllow = allow
-			continue
-		}
-		s.mux.Handle(pattern, s.wrap(s.methodNotAllowed(allow)))
-	}
-
-	// The catch-all: a JSON 404 envelope instead of net/http's bare text. It
-	// also answers a wrong method on "/" itself, which has no shim of its own
-	// because its pattern is this one.
-	s.mux.Handle("/", s.wrap(s.notFound(rootAllow)))
+	// The catch-all, which now renders BOTH 404 and 405.
+	//
+	// Everything that does not match a registered pattern arrives here —
+	// a wrong method included, because no method-less pattern is registered
+	// any more to catch it first. So this one handler decides which it is,
+	// and it decides by ASKING THE MUX: for each standard method, would this
+	// path have matched something? The set that answers yes IS the Allow
+	// header, derived from the routes that actually exist rather than from a
+	// parallel table that can drift from them.
+	//
+	// HEAD comes out of that for free, because ServeMux serves HEAD from a
+	// GET pattern — which is the property the old hand-built Allow had to
+	// remember to add.
+	s.mux.Handle("/", s.wrap(s.notFoundOrMethodNotAllowed()))
 
 	// Probes bypass the edge ring — except recover, because a panicking check
 	// must not kill the process that is answering the probe. No auth, no rate
@@ -326,13 +324,34 @@ func (d diagnostic) Error() string { return string(d) }
 // Register method, which is the one place they can fix it.
 var muxSite = regexp.MustCompile(` \(registered at [^)]*\)`)
 
+// errPatternConflict presents a ServeMux registration panic as a boot
+// diagnostic.
+//
+// The sentence below is TRUE as of 2026-09-02 and was not before. Warren used
+// to register a method-less pattern per path alongside each "METHOD /pattern",
+// and that shim conflicted with ordinary route pairs stdlib accepts —
+// "GET /skus/{sku}" beside "GET /skus/search", or beside
+// "DELETE /skus/{id}". So this text blamed net/http for a refusal net/http
+// does not make, over a pattern Warren itself had added; a field test proved
+// it in fifteen minutes with a four-line stdlib program. The tell was the
+// asymmetric quoting — one pattern with its method and one without, because
+// one of them was the shim — and a diagnostic's own inconsistency should
+// never be the clue to its own wrongness.
+//
+// Both patterns now carry their methods, because both are patterns the user's
+// Register method produced.
 func errPatternConflict(r any) error {
 	return diagnostic(fmt.Sprintf(
 		"✗ conflicting HTTP route patterns\n\n    %s\n\n"+
 			"  net/http.ServeMux refuses two patterns that can match the same request,\n"+
 			"  because which one wins would be arbitrary. Two routes with\n"+
 			"  differently-named wildcards on the same path — \"/users/{id}\" and\n"+
-			"  \"/users/{uid}\" — are the usual cause: pick one name.\n\n"+
+			"  \"/users/{uid}\" — are the cause: pick one name.\n\n"+
+			"  A literal segment beside a wildcard is NOT a conflict —\n"+
+			"  \"GET /skus/search\" and \"GET /skus/{sku}\" both register, and the\n"+
+			"  literal wins for the request they share. Nor is the same path under\n"+
+			"  two methods. Warren registers exactly one pattern per route, so both\n"+
+			"  patterns above are yours.\n\n"+
 			"  Both patterns come from a controller's Register method; grep for them.",
 		muxSite.ReplaceAllString(fmt.Sprint(r), "")))
 }

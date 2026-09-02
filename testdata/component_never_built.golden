@@ -1,6 +1,6 @@
 ✗ component declared but never built
 
-    module "notification" (warren/boot_register_test.go:877)
+    module "notification" (warren_test.go:00)
       └─ warren.Providers lists warren_test.newDeadSubscription, which takes the lifecycle —
            and nothing in the module depends on *warren_test.deadSubscription.
 
