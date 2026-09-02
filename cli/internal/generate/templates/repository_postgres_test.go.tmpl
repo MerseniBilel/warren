@@ -58,6 +58,15 @@ func Test{{.RepoType}}VersionedContract(t *testing.T) {
 func connect{{.RepoType}}(t *testing.T) persistence.NewDriver[*domain.{{.Name}}, domain.{{.Name}}ID] {
 	t.Helper()
 
+	if !contractFactoryFilled {
+		t.Skip(`new{{.Name}}ForContract has not been written, so the repository contract
+suite did NOT run.
+
+Nothing has verified that Save and Delete ENLIST the aggregate with the unit
+of work. Fill in new{{.Name}}ForContract at the bottom of this file — it is one
+line — and set contractFactoryFilled to true.`)
+	}
+
 	dsn := os.Getenv({{.DSNVar}})
 	if dsn == "" {
 		t.Skip({{.DSNVar}} + ` is not set, so the repository contract suite did NOT run.
@@ -165,3 +174,19 @@ func new{{.Name}}ForContract(id domain.{{.Name}}ID) *domain.{{.Name}} {
 		"*domain.{{.Name}} built by your own constructor and carrying a pending " +
 		"event. The comment above it has the line to write.")
 }
+
+// contractFactoryFilled gates the two suites above on the one function you
+// have to write.
+//
+// It exists so a FRESH CLONE is green. The alternative was reached first and
+// was worse in both directions: a generated call to a constructor whose
+// signature the template cannot know stopped the PACKAGE compiling the moment
+// you followed `warren g entity`'s advice to add fields, and the fastest way
+// out of a broken build is deleting the file — this one, the one whose header
+// explains that deleting it returns you to a repository that silently drops
+// events. Panicking instead kept the build but turned `go test ./...` red for
+// anyone with a database, on a repository nobody had touched.
+//
+// So it skips, and the skip says what stopped being checked rather than what
+// is missing. Set this to true when you fill the function in.
+const contractFactoryFilled = false

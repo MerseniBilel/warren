@@ -1,6 +1,7 @@
 package scaffold_test
 
 import (
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -44,14 +45,38 @@ func TestScaffoldCompilesAndPasses(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	for _, db := range []string{"memory", "postgres"} {
-		t.Run(db, func(t *testing.T) {
+	// ALL FOUR COMBINATIONS, since 2026-09-02.
+	//
+	// This loop covered the two --db values and neither --broker one, and it
+	// never BOOTED anything — so `warren new x --db postgres` shipped a
+	// scaffold that compiled, vetted, passed its own tests, and then refused
+	// to start:
+	//
+	//	✗ registered routes have no adapter serving them
+	//	    1 event subscription(s) — add a broker module to warren.New
+	//
+	// Exactly one of the four combinations was broken, and it was the one the
+	// README quickstart and GETTING_STARTED §8 both lead with. A compile-only
+	// gate could never have caught it: the broken project builds perfectly.
+	for _, combo := range []struct{ db, broker string }{
+		{"memory", ""},
+		{"memory", "kafka"},
+		{"postgres", ""},
+		{"postgres", "kafka"},
+	} {
+		db, brokerFlag := combo.db, combo.broker
+		name := db + "+" + brokerFlag
+		if brokerFlag == "" {
+			name = db + "+memory"
+		}
+		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			dir := t.TempDir()
 			if err := scaffold.New(scaffold.Options{
 				Dir: dir, Name: "myapp", ModulePath: "example.com/myapp",
 				Version: scaffold.DefaultVersion,
 				DB:      db,
+				Broker:  brokerFlag,
 				// The SAME flag a Warren contributor passes, not a
 				// hand-patched go.mod: the scaffold produced a tree that did
 				// not build for anyone but this test, precisely because this
@@ -63,7 +88,17 @@ func TestScaffoldCompilesAndPasses(t *testing.T) {
 				// indirect dependency once contaminated the core module.
 				FrameworkPath: framework,
 			}); err != nil {
-				t.Fatalf("New --db %s: %v", db, err)
+				t.Fatalf("New --db %s --broker %q: %v", db, brokerFlag, err)
+			}
+
+			// The boot assertion, injected into the tree `go test ./...`
+			// below runs. It is here rather than in this package because it
+			// has to boot the GENERATED graph — platform, both features and
+			// the HTTP server — which only exists inside the scaffold.
+			if err := os.WriteFile(
+				filepath.Join(dir, "internal", "platform", "boot_test.go"),
+				[]byte(scaffoldBootTest), 0o644); err != nil {
+				t.Fatalf("writing the boot test: %v", err)
 			}
 
 			for _, step := range [][]string{
@@ -83,9 +118,76 @@ func TestScaffoldCompilesAndPasses(t *testing.T) {
 				cmd.Dir = dir
 				out, err := cmd.CombinedOutput()
 				if err != nil {
-					t.Fatalf("the generated --db %s app failed `%s`:\n%s", db, strings.Join(step, " "), out)
+					t.Fatalf("the generated --db %s --broker %q app failed `%s`:\n%s",
+						db, brokerFlag, strings.Join(step, " "), out)
 				}
 			}
 		})
 	}
 }
+
+// scaffoldBootTest is dropped into every scaffolded tree and run by its own
+// `go test ./...`. It is the half that would have caught field test #16's
+// blocker, and the half a compile gate cannot be.
+//
+// It BOOTS the generated module graph — platform, both feature modules, the
+// HTTP server — with a DSN and a broker seed that are syntactically valid and
+// point at a closed port. That combination is deliberate: an EMPTY DSN fails
+// in the postgres constructor at boot step 4, before the route table exists,
+// so the assertion below would pass vacuously. An unreachable one parses,
+// the pool is built, registration runs, Table.Unserved() runs — and only then
+// does OnStart fail to dial. Measured: the fixed scaffold reaches
+//
+//	lifecycle: hook "warren/persistence/postgres" failed during OnStart:
+//	✗ cannot connect to postgres
+//
+// while the broken one never gets there and reports the unserved-route
+// diagnostic instead.
+//
+// So the assertion is not "boot succeeds" — it cannot be, in a test with no
+// database and no broker — it is "boot never fails for THIS reason". A
+// scaffold whose own generated subscription has no adapter is a scaffold that
+// does not work, and that is a property this test can see without Docker.
+const scaffoldBootTest = `package platform_test
+
+import (
+	"context"
+	"strings"
+	"testing"
+
+	"github.com/MerseniBilel/warren"
+	whttp "github.com/MerseniBilel/warren/transport/http"
+
+	"example.com/myapp/internal/modules/notification"
+	"example.com/myapp/internal/modules/user"
+	"example.com/myapp/internal/platform"
+)
+
+func TestEveryGeneratedRouteHasAnAdapterServingIt(t *testing.T) {
+	// Valid and unreachable, for the reason in scaffoldBootTest's comment.
+	t.Setenv("MYAPP_DATABASE_URL",
+		"postgres://nobody:nobody@127.0.0.1:1/none?sslmode=disable&connect_timeout=1")
+	t.Setenv("MYAPP_KAFKA_BROKERS", "127.0.0.1:1")
+
+	app := warren.New(
+		platform.Module(),
+		user.Module(),
+		notification.Module(),
+		whttp.Server(whttp.Port(0)),
+	)
+	err := app.Start(context.Background())
+	if err == nil {
+		// Everything this scaffold needs is in process. Stop it again.
+		_ = app.Stop(context.Background())
+		return
+	}
+	if strings.Contains(err.Error(), "no adapter serving them") {
+		t.Fatalf("this scaffold registers a subscription nothing serves, so it "+
+			"cannot boot as generated:\n%v", err)
+	}
+	// Any other failure is this test's environment — no database, no broker —
+	// and is the expected outcome. The boot reached step 6, which is past the
+	// check above.
+	t.Logf("boot stopped after the route-table check, which is the pass: %v", err)
+}
+`

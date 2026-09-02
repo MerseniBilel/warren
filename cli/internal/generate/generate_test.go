@@ -1683,6 +1683,12 @@ func TestTheContractTestSurvivesAChangedConstructor(t *testing.T) {
 		"fill in newBookForContract",
 		"carrying a pending",
 		"book_repository_postgres_test.go",
+		// And a FRESH CLONE must be green: the suites are gated on the one
+		// function the user has to write, so `go test ./...` on an untouched
+		// repository skips with an explanation instead of panicking for
+		// anyone who happens to have a database.
+		"const contractFactoryFilled = false",
+		"did NOT run",
 	} {
 		if !strings.Contains(src, want) {
 			t.Errorf("the placeholder does not carry %q:\n%s", want, src)
