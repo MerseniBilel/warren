@@ -230,17 +230,27 @@ warren/validate/playground/             MODULE  go-playground/validator
 warren/testing/                         (core)  stdlib only — no testify
 warren/cli/                             MODULE  cobra                   (build-time only)
 
-DEFERRED to v0.2 — each spec records why
-warren/openapi/                         MODULE  —                       rank 1 for v0.2; spec APPROVED, architecture ruled
-warren/auth/                            MODULE  golang-jwt + go-oidc    verification only; app.Identity ships in v0.1
-warren/transport/grpc/                  MODULE  google.golang.org/grpc  needs `warren g proto`
-warren/persistence/mongo/               MODULE  mongo-driver            design round CLOSED: port needs no change
-warren/persistence/redis/               MODULE  redis/go-redis          cache + lock; the jobs entanglement is gone
-warren/broker/rabbitmq/                 MODULE  rabbitmq/amqp091-go     memory already proves the swap
-warren/broker/nats/                     MODULE  nats-io/nats.go         §5.3 is seven words
-warren/persistence/mysql/               —                               not in this table by design
-warren/config/yaml/                     MODULE  yaml parser             audit first
+IMPLEMENTED, NOT YET TAGGED
+warren/openapi/                         MODULE  —                       zero third party; the release decision is the human's
+
+DEFERRED to v0.2 — this document records why; none of these directories exists
+warren/auth/                            MODULE  golang-jwt + go-oidc    §7.2 · verification only; app.Identity ships in v0.1
+warren/transport/grpc/                  MODULE  google.golang.org/grpc  §4.2 · needs `warren g proto`
+warren/persistence/mongo/               MODULE  mongo-driver            §6.2 · design round CLOSED: port needs no change
+warren/persistence/redis/               MODULE  redis/go-redis          §6.4 · cache + lock, NOT the §3.3 ports; path undecided
+warren/broker/rabbitmq/                 MODULE  rabbitmq/amqp091-go     §5.2 · memory + kafka already prove the swap
+warren/broker/nats/                     MODULE  nats-io/nats.go         §5.3 · third driver; §5.3 was seven words
+warren/config/yaml/                     MODULE  yaml parser             §2.4 · audit first
+
+UNDECIDED — named nowhere else but a heading and a §9 row
+warren/persistence/mysql/               —                               no driver, no mode, no budget line
 ```
+
+**Nothing in the two lists above is a directory.** The ten spec-only
+directories were deleted on 2026-09-02 and their rulings rehomed to the
+sections named beside them: a `SPEC.md` with no Go beside it is a half-built
+package to every visitor, and AGENT.md already forbids creating the module it
+implies.
 
 **Rule:** adapters never import each other. `broker/kafka` and `persistence/postgres` are mutually invisible. Both depend only on the core module's contract packages.
 
@@ -2013,9 +2023,10 @@ There is no `http.Raw(func(mux *http.ServeMux))`: a `ServeMux`'s entire API is `
 
 - **Wraps** `google.golang.org/grpc` · **Mode** Wrap
 
-**DEFERRED TO v0.2 (decided 2026-08-02).** Every design question is ruled — see
-`transport/grpc/SPEC.md` — and the adapter is blocked not on a decision but on
-`warren g proto`, which does not exist and is the harder of the two artifacts.
+**DEFERRED TO v0.2 (decided 2026-08-02).** Every design question is ruled —
+this section is now the whole record, the spec having retired on 2026-09-02 —
+and the adapter is blocked not on a decision but on `warren g proto`, which
+does not exist and is the harder of the two artifacts.
 
 The reason, in one paragraph: a handler's `Req` must stay a plain Go struct, or
 the HTTP adapter would `encoding/json`-encode a generated proto type for the
@@ -2061,8 +2072,20 @@ time, because `bindParams` walks a precomputed index either way, and it makes
 the published document correct. **`Raw` is the opt-out for anyone who will
 not write it** — `Registrar.Raw` records directly and never enters
 `register`, so a raw route carries its own wildcards, un-described and
-un-refused. No third route was added: one exported symbol per objection is
-how a public API stops being a design.
+un-refused. No third route was added — `transport.IgnoreWildcard` was proposed
+and rejected on 2026-09-02: one exported symbol per objection is how a public
+API stops being a design. **The `Raw` case leaves the document imperfect and
+that is accepted**: `openapi`'s `addRaw` already refuses the route, so the
+published document admits the path is undescribed rather than claiming a
+templated segment with no parameter. Deriving parameters from the pattern
+alone is expressible (`transport.wildcards`) and was left undone.
+
+**And the refusal is a returned registration error, not a panic**, so
+AGENT.md's admission test — which governs boot PANICS — does not bind it.
+That is just as well: criterion 2 is "no correct reading", and the paragraph
+above concedes there is one. What justifies the refusal is that the remedy
+costs one struct field and `Raw` covers anyone who will not write it, not the
+absence of a legitimate minority.
 
 One more thing the gRPC adapter must not "fix" into the port: an all-default
 protobuf message encodes to ZERO BYTES, and the invoker skips `Codec.Decode`
@@ -2100,10 +2123,94 @@ wgrpc.Raw(func(s *grpc.Server) { pb.RegisterLegacyServer(s, impl) })
 ```
 
 Streaming is out of both v0.1 and v0.2's typed surface; `r.Raw` with
-`ProtocolGRPC` already carries it, exactly as it carries HTTP upgrades.
+`ProtocolGRPC` already carries it, exactly as it carries HTTP upgrades. The
+adapter asserts `grpc.StreamHandler` on such a route and fails the boot naming
+the route and the type, exactly as the HTTP adapter asserts `http.Handler`.
 
 `warren g proto` is specced WITH the adapter, in the CLI spec, and §8's command
 surface gains it in the same change — not before.
+
+#### The rest of the v0.2 position, carried from `transport/grpc/SPEC.md` on its retirement (2026-09-02)
+
+The spec's argument was 452 lines; these are the decisions it reached, which
+are the part that must survive it.
+
+**Why option (c) is rejected permanently, in one sentence:** a proto codec over
+plain Go structs ships something that speaks gRPC *framing* and **is not a
+service any other language can consume — a worse lie than shipping no gRPC.**
+Its numbers are recorded here so nobody re-derives them and mistakes them for a
+case: measured on an M3 Pro over a three-field message, it marshals in
+108 ns / 32 B / 2 allocs against `encoding/json`'s 122 / 48 / 1, and unmarshals
+in 158 / 117 / 5 against 603 / 336 / 9. It is faster, and that is not the
+question. **This deferral would be reversed only for a named design partner
+with a hard gRPC requirement**, and the minimum honest shape then is (d) with a
+hand-written `grpc.Bind[Req, Res](fullMethod, from, to)` per method over a
+hand-authored `.proto` — real descriptors, real reflection, no generator, and
+`warren g proto` later emits exactly that call. Option (c) is not on the table
+under any circumstances.
+
+**`Interceptors` takes a Warren-owned type**, which is what keeps invariant 3
+whole with no carve-out:
+
+```go
+type Call struct{ FullMethod, Peer string }
+type Handler func(ctx context.Context, c Call, req any) (any, error)
+type Interceptor func(next Handler) Handler
+```
+
+The driver carve-out is the **`Raw*` prefix**, and it needs two members:
+`Raw(func(*grpc.Server))` runs after `NewServer` and so cannot install
+`ChainUnaryInterceptor` or a keepalive policy, which is what
+`RawServerOptions(...grpc.ServerOption)` is for. `scripts/invariants.sh` scopes
+the carve-out to the prefix when the module lands.
+
+**The non-removable recover is a REQUEST-path recover**, which is outside the
+boot-time containment `warren/internal/panics` provides — it is contained by
+the adapter, where the correlation ID and the status mapping live, exactly as
+`transport/http/edge.go` does it. Two obligations follow, and they were rehomed
+into that spec once already when `internal/panics`' own spec retired:
+
+1. **The C0 frame contract applies verbatim.** Whatever renders a contained
+   panic drops the same frames — no `go.uber.org/dig`, no `runtime.`, no
+   `panic(`, no `created by `, no `reflect.`, and none of the containment
+   plumbing's own — because a diagnostic ending in nine dig frames has leaked
+   the boundary invariant 2 exists to hold. **Use `internal/panics`, not a
+   third copy of the filter:** that package exists because three copies drift
+   within a month and then hold in one place out of three.
+2. **A panic must not reach the client.** The stack goes to the log; the client
+   gets `Internal` and the correlation ID — §4.1's shape for HTTP.
+   `internal/panics.Do`'s `passthrough` parameter exists for
+   `http.ErrAbortHandler`; gRPC has no documented equivalent, and this is the
+   seam if one is found.
+
+**Options, all decided:** `WithoutReflection()` and `WithoutHealthService()`,
+both on by default — reflection publishes the whole API surface and operations
+teams will want it off, health stays on because Kubernetes `grpc` probes
+require it. `TLS(*tls.Config)` and `TLSFiles(certFile, keyFile)`, matching
+`transport/http` exactly; `*tls.Config` is standard library, not a driver type,
+and the path-pair form alone cannot reach mTLS, client CAs, or in-memory
+certificates. `Addr(string)` and `Listener(net.Listener)` for parity with HTTP
+— the second is what in-process (`bufconn`-style) testing needs, and the
+testing rule is the usual one: no Docker, no network, no sleeps, with a real
+port behind `//go:build integration`.
+
+**The health service does NOT use grpc-go's `health.Server`**, which keeps its
+own status map and would need polling into sync — two sources of truth.
+`grpc_health_v1.HealthServer` is implemented directly over the injected
+`health.Registry`: `Check` with an empty service maps `Ready(ctx)` to
+`SERVING`/`NOT_SERVING`, an unknown service name is `codes.NotFound` per the
+health spec, and `Watch` polls and emits on change because Envoy uses it. Both
+bypass the edge ring except recover, mirroring `/healthz` and `/readyz`.
+
+**Telemetry comes off `tbl.Telemetry()`, never injected** — injecting
+`app.Telemetry` would make it a required dependency and every uninstrumented
+service would fail to resolve it. Handler instrumentation is already composed
+in core by `buildInvoker`, so this adapter owns only the SERVER span and trace
+continuation from incoming metadata.
+
+**What the adapter must prove, beyond its own tests:** the same handler driven
+through both adapters returns the same `Code` for the same input. That is
+§1.4's claim, and it should be a test rather than a promise.
 
 ---
 
@@ -2217,6 +2324,13 @@ became one schema and both routes referenced whichever was walked first.
 smaller API than reality, and that is the one error a generated client acts
 on: it cannot call an endpoint that exists, and nothing says why. Event and
 gRPC routes are out of scope — OpenAPI describes HTTP.
+
+**`/healthz` and `/readyz` are absent from the document, deliberately.** They
+are adapter routes, not module routes, and this emitter reads
+`transport.Table`. Emitting them means the health adapter registering into the
+table, which is a **transport** decision and not an openapi one. Recorded here
+on `openapi/SPEC.md`'s retirement (2026-09-02) so the next reader does not
+re-derive it.
 
 ---
 
@@ -2393,7 +2507,7 @@ Kafka-specific concerns (partition assignment, offset commit strategy) are `kafk
 
 ### 5.2 `warren/broker/rabbitmq`
 
-- **Wraps** `rabbitmq/amqp091-go` · **Mode** Wrap
+- **Wraps** `rabbitmq/amqp091-go` · **Mode** Wrap · **DEFERRED to v0.2**
 
 Same `Publisher`/`Subscriber` implementation. Topic → exchange + routing key. Quorum queues by default, DLQ via dead-letter exchange, publisher confirms on.
 
@@ -2405,7 +2519,71 @@ rabbitmq.Broker(
 )
 ```
 
+**Why a second driver waits, carried from `broker/rabbitmq/SPEC.md` on its
+retirement (2026-09-02).** The port's swappability is now demonstrated rather
+than asserted — and the evidence is the argument FOR the contract suite, not
+against a third driver.
+
+Until 2026-08-05, `brokertest.Run` had exactly ONE caller: `broker/memory`. So
+the claim rested on one implementation and an interface, over the easiest
+possible subject — an in-process broker has no group to leave, its batches are
+one message long, and its subscriptions are map entries.
+`broker/kafka/integration_test.go` now runs the same suite behind the
+`integration` tag against a real cluster, and it went green on 2026-08-05: all
+nine subtests against `apache/kafka:3.9.0`, reproducible with
+`make integration` and `WARREN_TEST_KAFKA_BROKERS` set. **The first real run
+failed on four counts, three of them driver defects no unit test could have
+caught** — a 30-second shutdown (`BlockRebalanceOnPoll` never released on a
+cancelled poll), a cancelled subscription that kept receiving for the rest of
+a fetched batch, and a deregistration that matched handlers by code pointer and
+so removed the wrong sibling under fan-out. **A third driver that ships without
+running this suite ships those bugs, whichever three they turn out to be.**
+Against that, a third driver buys a bullet point and costs a module, an audit,
+and a maintained integration suite.
+
+**One port-semantics contradiction must be resolved before the driver, not
+during it.** §3.4 calls `Message.Key` the "partition / routing key"; the
+paragraph above says the TOPIC becomes the routing key. Both cannot be true on
+AMQP, and how `Publish(ctx, topic, msgs...)` and `Message.Key` both land is the
+first question, not the last. Behind it: `rabbitmq.Topic`'s type and the other
+exchange kinds (Warren-owned, never `amqp091-go`'s — invariant 3), whether
+quorum queues have an opt-out, what an unconfirmed publish does and with what
+deadline, whether exchanges and queues are declared at boot or lazily (§1.3
+argues at boot), the escape hatch's name — warren.md names one for every other
+wrapped driver and none for this one — and a `Rabbit` section in §2.4's config
+example, which §5.2's own usage block reads from and which does not exist.
+
+**Audit outstanding.** §9 records "official successor to streadway/amqp", which
+is provenance, not a health check: `streadway/amqp` is itself the cautionary
+example of a widely-recommended package going quiet. `amqp091-go` has zero
+transitive dependencies — the one measured fact — and needs the rest before it
+enters a `go.mod`. No alternative was compared, unlike §5.1's Kafka table;
+either the comparison is made or the human confirms "official client" is
+sufficient grounds on its own.
+
 ### 5.3 `warren/broker/nats` — JetStream. Same ports.
+
+- **Wraps** `nats-io/nats.go` · **Mode** Wrap · **DEFERRED to v0.2**
+
+**Carried from `broker/nats/SPEC.md` on its retirement (2026-09-02), which was
+one line of source material and a page of questions.** This is the THIRD broker
+driver, so §5.2's argument applies with more force: what it buys is already
+delivered by `broker/memory` plus the shared `brokertest` suite, now certified
+against a real cluster by `broker/kafka`.
+
+It is also the least specified. `nats-io/nats.go` carries the same outstanding
+audit as `amqp091-go`, and **the JetStream API has shipped under more than one
+package path** — which one Warren targets decides the audit, the pinned
+version, and the code. Beyond that: how a port `topic` maps to JetStream
+(subject, or stream plus subject) and who creates the stream and when;
+how `broker.WithDeadLetter(...)` is realised, since JetStream has no
+dead-letter exchange; how `broker.WithRetry` and `broker.WithConcurrency`
+compose with JetStream's OWN redelivery and flow control, which is two retry
+mechanisms stacked and a real risk; what the escape hatch is; and what the
+outbox relay's guarantees become here, given §5.1's exactly-once discussion is
+Kafka-shaped. Core NATS is out — §5.3 says JetStream, and "same ports" over
+core NATS would silently weaken the delivery guarantees the inbox depends on
+(§5.6).
 
 ### 5.4 `warren/broker/memory`
 
@@ -2773,8 +2951,14 @@ round does not re-derive them:
 
 ### 6.2–6.4 `mysql` / `mongo` / `redis`
 
-Same `Repository` and `UnitOfWork` ports. Redis provides cache + distributed
-lock rather than repositories. All three are deferred to v0.2.
+MySQL and Mongo implement the same `Repository` and `UnitOfWork` ports.
+**Redis implements neither** — it provides cache and a distributed lock, which
+is not persistence in the §3.3 sense at all. All three are deferred to v0.2.
+
+*(That second sentence used to open "Same `Repository` and `UnitOfWork` ports"
+over all three and then exempt Redis in the next clause. Both cannot be true;
+the exemption is the intended half, and this is the correction
+`persistence/redis/SPEC.md` asked for before it retired on 2026-09-02.)*
 
 **The Mongo DESIGN ROUND is CLOSED (2026-08-05), and its finding is the one
 that mattered: the `persistence` port needs no change, and a Mongo driver is
@@ -2816,6 +3000,52 @@ party writes the adapter and is held to the same standard Warren holds itself
 to. **Whether Warren SHIPS a first-party Mongo module is a product decision
 for the human, not a consequence of this round** — the port question is
 settled either way.
+
+**What the three deferrals still owe, carried from `persistence/mysql`,
+`persistence/mongo` and `persistence/redis`'s specs on their retirement
+(2026-09-02).** The specs argued three cases and reached the same three
+unanswered questions, which is why they are recorded once, here.
+
+**MySQL is not a deferral — it is a heading.** Until 2026-09-02 it appeared in
+exactly one place in this document: the §6.2–6.4 title. §1.6 lists it under
+UNDECIDED with no module and no driver, §1.7 has no budget line for it, and no
+driver has been chosen — `go-sql-driver/mysql` over `database/sql` is the obvious
+candidate and nothing has audited it. Postgres has all three rows. So the first
+question is whether MySQL is in scope at all, and nothing may be built until
+the manifest answers it. Nothing else about it can be derived: the Postgres
+surface — `postgres.DB`, `MaxConns`, `Migrations`, the outbox writer, the
+advisory-lock elector — is specified for Postgres, and extending it by analogy
+would be inventing public API.
+
+**Redis's path is a structural question, not an implementation one.** A cache
+and a distributed lock are not §3.3 persistence, so `persistence/redis` may be
+the wrong path for them; §1.1's adapters ring puts `observability` beside
+`persistence/postgres`, so a top-level `warren/cache` or `warren/redis` is
+available as a shape. Mode Wrap (§9) means a port in front, and **no `Cache` or
+`Lock` port exists in the contracts ring** — §3 is `domain`, `app`,
+`persistence`, `broker`, `transport` and nothing else. Where that port goes is
+the decision; the cache API, key namespacing, serialisation, lock expiry and
+renewal, and the behaviour when a holder dies all follow from it and none are
+stated. `redis/go-redis/v9` carries the same outstanding audit as the other
+deferred drivers, and §1.7 has no Redis budget line.
+
+**Three questions are common to all three, and to `broker/nats` and
+`broker/rabbitmq` as well:**
+
+1. **Leader election off Postgres is already answered by a core port, not by
+   each driver.** `outbox.Elector` and `outbox.Electors` are core (§5.5);
+   `postgres.WithAdvisoryLock()` provides and exports ONE implementation. A
+   Redis or Mongo elector is another implementation of the same core port, so
+   invariant 4 is not in the way — no adapter imports another. What is open is
+   whether Warren ships one.
+2. **The outbox story off Postgres is not.** §5.5's low-latency mode is
+   Postgres logical replication; Mongo change streams and MySQL binlog are the
+   obvious analogues and neither is decided, and who creates the outbox
+   collection or table is unstated for both.
+3. **Health-check self-registration.** §2.8 says adapters self-register and
+   names only postgres and kafka. Every deferred adapter asks the same
+   question, and answering it once — as a rule about adapters rather than a
+   line per driver — is the cheaper fix.
 
 ---
 
@@ -2898,6 +3128,27 @@ no propagating decorator yet, so `app.Authorized` composed into a consumer
 chain denies every message and dead-letters it without retry. That is
 fail-closed and correct; it is also not what you wanted. Guard your consumers
 in v0.2.
+
+**What actually gates this module, carried from `auth/SPEC.md` on its
+retirement (2026-09-02).** Not the design — the identity ruling settled that in
+v0.1. **The two dependency audits AGENT.md requires have not been run.** §9
+records `golang-jwt/jwt/v5` and `coreos/go-oidc` with no observation date, no
+archived check, no last-release date, no licence check and no transitive
+footprint for either, and "a package with no written audit does not go into a
+`go.mod`". Approving this module today would approve a dependency decision on
+the strength of nothing. Three questions come with the audits and are for the
+human:
+
+1. **How is verification configured?** Issuer, audience, key source, allowed
+   algorithms, clock skew, JWKS refresh — none of it exists as a surface, and
+   `auth.Module(...)` has never been shaped.
+2. **What is `coreos/go-oidc` actually for?** Discovery and JWKS for JWT
+   validation, or full OIDC login/callback flows? The second is a much larger
+   surface and needs its own manifest entry before it is bought.
+3. **Who registers the guard for gRPC and for consumers?** §10 shows auth in
+   the HTTP edge chain; the gRPC edge is `Interceptors(...)` (§4.2) and a
+   consumer's edge is the broker chain. Three registrations or one seam is a
+   port-shape question, not an implementation detail.
 
 ### 7.3 `warren/resilience` — DROPPED (2026-08-05)
 
@@ -3291,15 +3542,16 @@ All generators support `--dry-run` and `--force`.
 | gRPC | `google.golang.org/grpc` | Wrap | shared middleware chain |
 | Proto | `buf` | Vendor | tooling only |
 | Kafka | `twmb/franz-go` | Wrap | pure Go, Kafka 0.8.0–4.2+, targets every client KIP. **Audited 2026-08-02**: v1.21.5, BSD-3-Clause, 2 971 stars, pushed 2026-07-31, not archived. **4 third-party modules compiled in** — `klauspost/compress`, `pierrec/lz4`, `twmb/franz-go`, `golang.org/x/crypto` (SCRAM's) — measured with `go list -deps`, the second-smallest adapter footprint here after `transport/http`'s zero. `franz-go/pkg/kfake` is a SEPARATE module and enters the go.mod **test-only**; the 4 are the non-test build and must stay so. **This row said "transactions" until 2026-08-09 and that was the retracted claim** (§5.1): no Kafka transaction spans Postgres and Kafka, there is no `Transactional` option, and the guarantee is at-least-once plus inbox dedupe. Alternatives audited the same date and rejected: `IBM/sarama` v1.60.1 (MIT, 12 499) low-level surface and heavy allocation; `segmentio/kafka-go` v0.4.51 (MIT, 8 597, last push 2026-04 — the only one going quiet) tested only to Kafka 2.7.1; `confluent-kafka-go` v2.15.0 (Apache-2.0, 5 153) is cgo over librdkafka, costing a C toolchain in every build image |
-| RabbitMQ | `rabbitmq/amqp091-go` | Wrap | official successor to streadway/amqp |
-| NATS | `nats-io/nats.go` | Wrap | JetStream |
+| RabbitMQ | `rabbitmq/amqp091-go` | Wrap | **v0.2, audit OUTSTANDING.** "Official successor to streadway/amqp" is provenance, not a health check — and `streadway/amqp` is the cautionary example of a widely-recommended package going quiet. One measured fact: **zero transitive dependencies**. No archived check, release date, licence check or observation date; no alternative compared (§5.2) |
+| NATS | `nats-io/nats.go` | Wrap | **v0.2, audit OUTSTANDING.** The recorded justification is the word "JetStream"; no alternative was considered and none rejected. Note before auditing: the JetStream API has shipped under more than one package path, and which Warren targets decides the pinned version (§5.3) |
 | Postgres | `jackc/pgx/v5` | Wrap | no ORM, by design. **Audited 2026-08-02**: v5.10.0, MIT, 14 087 stars, pushed 2026-08-01, not archived. Six modules compiled in — `pgpassfile`, `pgservicefile`, `pgx`, `puddle`, `x/sync`, `x/text` — measured with `go list -deps`, not read off a README. One pgx type in one exported signature: `postgres.Raw` |
 | Migrations | **none — Build** | Build | **`pressly/goose` REJECTED 2026-08-02.** Healthy (MIT, v3.27.3 2026-07-22, 11.3k stars) and only 5 modules as a library import — but once migrating at boot is banned it buys nothing an ordered applier and a version table do not, and against goal 2 a contributor debugging a migration reads 100 lines of ours instead of goose's dialect/locker/provider layering. `postgres.Schema` ships in goose's FILE format, so a project already running goose, atlas or dbmate applies it with one line |
-| Redis | `redis/go-redis/v9` | Wrap | cache + lock |
+| MySQL | **none chosen** | — (no mode recorded) | **Not deferred — undecided.** Until this row was added on 2026-09-02, MySQL appeared in exactly one place in this document: the §6.2–6.4 heading. There is still no module, no §1.7 budget line, and no driver. `go-sql-driver/mysql` over `database/sql` is the obvious candidate and nothing has audited it. Whether MySQL is in scope at all is the question, and it precedes every other one |
+| Redis | `redis/go-redis/v9` | Wrap | **v0.2, audit OUTSTANDING.** Cache + lock, and NOT the §3.3 ports. Wrap implies a port in front and **no `Cache` or `Lock` port exists in the contracts ring** — where it goes is a structural decision, along with whether this belongs under `persistence/` at all. §1.7 has no Redis budget line (§6.2–6.4) |
 | Telemetry | OpenTelemetry Go | Wrap | **Audited 2026-08-02**: v1.44.0 (2026-05-27), Apache-2.0, 6 500 stars, pushed 2026-08-02, not archived. **24 third-party modules in the build graph**, including grpc, protobuf and genproto — an order of magnitude above anything else here (core 1, transport/http 0, postgres 6), which is why it is opt-in in its own module and `scripts/invariants.sh` refuses `go.opentelemetry.io` in any other go.mod. OTLP over gRPC only: the HTTP exporter reaches grpc through its own config package and is not lighter. Wiring only — no OTel type in any Warren signature |
 | Auth | `golang-jwt/jwt/v5`, `coreos/go-oidc` | Wrap | **v0.2, audits outstanding.** The identity type is NOT here: `app.Identity` ships in v0.1 core, stdlib only, zero third-party (§3.2) |
 | Resilience | **none — module DROPPED 2026-08-05** | Build | Retry and timeout are core-ring and ship in `app`/`broker`, stdlib only. The breaker and limiter guard OUTBOUND calls and live in the user's `infrastructure/` adapter. **Audited 2026-08-05, none adopted:** `sony/gobreaker/v2` v2.4.0 (2026-01-01), MIT, not archived, 3674★, zero runtime deps, generic, **two lines to use** — fewer than any wrapper. `golang.org/x/time/rate` v0.15.0 (2026-02-11), BSD-3, **no require block at all** — `http.Middleware`'s stdlib shape takes it unmodified. **`cenkalti/backoff/v4` REJECTED**: three majors stale (default branch is v7; v4.3.0 dates to 2024-01-02) *and* redundant — `broker.ExponentialBackoff` is 20 lines of core with full jitter and an overflow guard. **`failsafe-go` REJECTED** (v0.9.6, 2026-02-09): richest policy set and the only both-directions API, but one module requiring `google.golang.org/grpc` + `protobuf`, so those enter the graph whether or not you import them — disqualifying against §1.7. **`go-kratos/aegis` REJECTED** (v0.2.0, **2023-05-08**, 7 direct requires): kratos v3 dropped it too |
-| Mongo | **none adopted** | — | The design round CLOSED 2026-08-05: the port needs no change and a driver is additive, certified by the exported `RunContract`/`RunVersionedContract`. **Audited 2026-08-05:** `go.mongodb.org/mongo-driver/v2` v2.8.0 (2026-07-10), **Apache-2.0** — the SSPL question is about the SERVER, not the driver — not archived, 8535★, pushed 2026-08-05, 19 open issues. Healthy, and not the reason to wait: v2's session rides on `context.Context`, so no driver type reaches a signature |
+| Mongo | **none adopted** | — (no mode recorded) | The design round CLOSED 2026-08-05: the port needs no change and a driver is additive, certified by the exported `RunContract`/`RunVersionedContract`. **Audited 2026-08-05:** `go.mongodb.org/mongo-driver/v2` v2.8.0 (2026-07-10), **Apache-2.0** — the SSPL question is about the SERVER, not the driver — not archived, 8535★, pushed 2026-08-05, 19 open issues. Healthy, and not the reason to wait: v2's session rides on `context.Context`, so no driver type reaches a signature |
 | Cron / jobs | **none — module DROPPED 2026-08-05** | Build | A scheduler is an ordinary `lifecycle.Hook`; `outbox.Electors` + `postgres.WithAdvisoryLock()` give leader-only BY NAME, provided and exported. (Until 2026-08-08 this row said `outbox.Elector` singular, and that was the defect: one elector is one lock, so a scheduler injecting it starved either itself or the relay.) **`robfig/cron/v3` REJECTED**: MIT, 14165★, **not archived** — and that is the trap. Its last release `v3.0.1` is tagged at a commit dated **2020-01-04**, its last commit on master is **2021-01-06**, `/releases/latest` returns **404** (no release object exists at all), and its `go.mod` declares **`go 1.12`**. `pushed_at: 2024-07-08` is repo metadata, not code. That is §9's httprouter rejection, three years worse, under a framework targeting Go 1.27. **`go-co-op/gocron/v2` REJECTED** (v2.22.0, 2026-07-09, 7126★, MIT, genuinely healthy): it **requires `robfig/cron/v3 v3.0.1`** transitively, and ships its own scheduler lifecycle, `Elector` and `Locker` — a second lifecycle beside `warren/lifecycle`, which is the one line this ledger rejected `fx` on. **`river` (MPL-2.0) / `asynq` (MIT) not adopted**: queues, not schedulers, and outbound — the user's `infrastructure/` |
 | Testing | none — stdlib + core | Build | `testify` and `testcontainers-go` were both budgeted and neither adopted: assertions are `if got != want`, and Docker fixtures wait for `warren/testing/containers`, its own module. |
 

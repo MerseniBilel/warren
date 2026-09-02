@@ -25,9 +25,12 @@ warren.md         the design — package manifest, architecture, dependency ledg
 AGENT.md          this file
 CLAUDE.md         Claude Code's pointer to this file
 README.md         the public front door and the roadmap checkboxes
+CONTRIBUTING.md   how to open a change here
 LICENSE           Apache-2.0
 NOTICE
-<pkg>/SPEC.md     one spec per UNIMPLEMENTED package; specs retire on completion
+<pkg>/SPEC.md     a spec still under review; it is deleted when its package is
+                  implemented and reviewed, its residue rehomed to warren.md,
+                  doc comments and tests first
 go.mod            the core module — stdlib only until warren/di lands
 Makefile          fmt · vet · lint · invariants · test, iterated per module
 .github/          CI: the same targets, plus golangci-lint v2
@@ -36,8 +39,17 @@ scripts/invariants.sh   the greppable invariants (1, 2, 8, naming), run in CI
 errors/ domain/ log/ di/ lifecycle/ config/ warren (root)
                   implemented kernel packages — specs retired; code, golden
                   tests, and warren.md are the contract
-docs/assets/      one usage diagram per approved spec, .puml + .png
 ```
+
+**There are no spec-only directories.** Ten were deleted on 2026-09-02 —
+`auth/`, `transport/grpc/`, `broker/nats/`, `broker/rabbitmq/`,
+`persistence/mongo/`, `persistence/mysql/`, `persistence/redis/`, and the three
+retired specs in implemented packages — because a directory containing a
+`SPEC.md` and no Go is a half-built thing to every visitor, and this file
+already forbids creating the module it implies. **Their rulings live in
+`warren.md`**: §4.2 for gRPC, §5.2 and §5.3 for the brokers, §6.2–6.4 and §9
+for the stores, §7.2 for auth. A deferral's REASON survives; the essay does
+not.
 
 The tooling was rebuilt on 2026-08-01: `make ci` is the gate, and it runs fmt,
 vet, golangci-lint, the invariants script, and `go test -race` across every

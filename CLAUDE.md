@@ -52,15 +52,22 @@ The invariants that fail CI, in short — full versions in AGENT.md:
 
 ## Working here
 
-**Write the spec before the feature — and retire it after.** Every feature
-gets a `SPEC.md` **in the package directory it describes**, written and
-approved *before* any code, corrected in the same pull request whenever the
-implementation diverges — and **deleted once the package is implemented and
-reviewed**, with its load-bearing leftovers rehomed first (open questions to
-the spec that will answer them, audits to the §9 ledger). An implemented
-package's contract is its code, tests, golden files, and `warren.md` entry.
-If you are asked to build something that has no spec, write the spec first and
-say so. See [AGENT.md § Spec-driven development](AGENT.md).
+**Write the spec before the feature — and retire it after.** The rule was
+**narrowed on 2026-09-02** and AGENT.md carries the authoritative version: a
+spec is required for a **new package**, a **public API change**, or a change
+that **stops working code from working**; it is NOT required for a bug fix
+inside an existing contract, a test, a document, a diagnostic's wording, an
+internal refactor, or a new adapter over an existing port. When one is
+required it lives in `SPEC.md` **in the package directory it describes**, is
+approved *before* any code, is corrected in the same pull request whenever the
+implementation diverges — and is **deleted once the package is implemented and
+reviewed**, with its load-bearing leftovers rehomed first (rulings to a doc
+comment on the thing itself or to `warren.md`, audits to the §9 ledger, open
+questions to the spec that will answer them). **A deletion that loses an
+argument is worse than leaving the file.** An implemented package's contract is
+its code, tests, golden files, and `warren.md` entry. If you are asked to build
+something that needs a spec and has none, write the spec first and say so. See
+[AGENT.md § Spec-driven development](AGENT.md).
 
 **`warren.md` already fixes the public API for most packages.** Start a spec
 from that surface rather than inventing one. If the spec needs to contradict the
@@ -90,21 +97,20 @@ work" is not a result, and neither is a tool you did not actually invoke.
 The architecture diagrams live as ASCII inside [warren.md](warren.md) — the four
 rings (§1.1), scoped containers (§1.2), the boot sequence (§1.3), the transport
 spine (§1.4), and the messaging runtime (§1.5). Edit them there; warren.md stays
-the source of truth for the architecture.
+the source of truth for the architecture, and a diagram that is not in it does
+not exist.
 
-Each **approved** spec also has a usage-flow diagram in `docs/assets/<pkg>-usage.puml`,
-rendered to a PNG of the same name; `docs/assets/approved-usage.puml` combines
-them into one overview. A spec's diagram is created when the spec is approved,
-not before — and it **outlives the spec's retirement**: after a package is
-implemented its diagram cites the package's `warren.md` section instead.
-Regenerate after any change to a source, and commit the images:
-
-```bash
-java -jar ~/.local/bin/plantuml.jar -tpng -o . docs/assets/*.puml
-```
-
-The `plantuml` wrapper on this machine fails with an unbound-variable error when
-given no extra arguments; call the jar directly, as above.
+**The per-spec PlantUML rule was struck on 2026-09-02, and `docs/assets/` was
+deleted with it.** The rule required a `docs/assets/<pkg>-usage.puml` and a
+rendered PNG for every approved spec. It had stopped being followed and had
+started lying: no diagram was ever drawn for transport, persistence, openapi,
+cli or testing; all eleven committed pairs dated from 2026-08-09 and described
+specs since retired; `approved-usage.png` claimed to combine "the approved
+specs" at a moment when none were approved; and the regenerator this file
+documented does not run on the maintainer's machine. **The right response to a
+dead rule is to strike it, not to satisfy it.** If a package needs a picture,
+it goes in `warren.md` as ASCII, beside the prose it explains, where the same
+diff that changes the design changes the drawing.
 
 ---
 
@@ -118,9 +124,12 @@ issue count in one call; `gh api repos/<owner>/<repo>/releases/latest` gives the
 real release date. The initial audit found two widely-recommended packages
 archived — `google/wire` and `git-chglog` — and neither README said so.
 
-Record what you found in the spec that adopts the package, assign it a mode
-(Build / Wrap / Vendor), and add it to the ledger in
-[warren.md §9](warren.md).
+**The ledger in [warren.md §9](warren.md) is the home for what you found** —
+observation date, archived check, last release, licence, transitive footprint
+— plus a mode (Build / Wrap / Vendor). Put it there even when a spec exists,
+because the spec retires and the ledger does not. Four rows currently say
+*audit outstanding* (`amqp091-go`, `nats.go`, `go-redis`, and auth's two): that
+is the gate on those modules, not the design.
 
 ---
 
@@ -137,6 +146,8 @@ Record what you found in the spec that adopts the package, assign it a mode
 - **Do not name a type `XWithY`** — see AGENT.md § Naming.
 - **Do not disable a linter to make a change pass.** `//nolint` needs a specific
   linter and a stated reason.
-- **Do not create empty modules** ahead of the code that will fill them.
+- **Do not create empty modules** ahead of the code that will fill them, and
+  **do not leave a directory holding only a `SPEC.md`**. Seven of those were
+  deleted on 2026-09-02: a visitor reads them as seven half-built packages.
 - **Do not add a package `warren.md` does not describe** without agreeing the
   manifest entry first.
