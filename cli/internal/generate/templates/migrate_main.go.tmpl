@@ -17,9 +17,16 @@ import (
 )
 
 func main() {
-	dsn := os.Getenv("DATABASE_URL")
+	// The SAME variable internal/platform reads, so the application and its
+	// migrations cannot disagree about which database they mean. That comment
+	// was here before the code was: this file hardcoded an unprefixed
+	// DATABASE_URL while `warren g repository`'s own printed instruction, the
+	// contract test it wrote in the same command, and `warren new --db
+	// postgres` all used the prefixed form, so the instruction failed against
+	// the file it had just written.
+	dsn := os.Getenv({{.DSNVar}})
 	if dsn == "" {
-		fmt.Fprintln(os.Stderr, "DATABASE_URL is not set")
+		fmt.Fprintln(os.Stderr, {{.DSNVar}}+" is not set")
 		os.Exit(1)
 	}
 	ctx := context.Background()

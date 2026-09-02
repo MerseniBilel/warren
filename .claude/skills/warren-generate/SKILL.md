@@ -178,10 +178,15 @@ generator prints those steps; it cannot perform them.
 project's:
 
 ```
-DATABASE_URL=... go run ./cmd/migrate
+<APP>_DATABASE_URL=... go run ./cmd/migrate
 applied  warren       (warren_outbox, warren_inbox)
 applied  db/migrations
 ```
+
+The variable is **prefixed with the application's name**, and it is the same
+one `internal/platform` reads — the app and its migrations cannot be pointed
+at two different databases. An unprefixed `DATABASE_URL` is wrong everywhere
+in a Warren project.
 
 **Warren never migrates at boot and offers no option to.** Under a rolling
 deploy that races every replica: all but one block past their readiness

@@ -1408,3 +1408,134 @@ func withoutComments(body string) string {
 	}
 	return strings.Join(kept, "\n")
 }
+
+// TestGeneratedMigrateReadsTheProjectsOwnDSNVariable — field test #15,
+// finding 6. `warren g repository --driver postgres` printed
+//
+//	LIBRARY_DATABASE_URL=... go run ./cmd/migrate
+//
+// and wrote a cmd/migrate reading DATABASE_URL, in the same command, under a
+// comment claiming they were "the SAME variable internal/platform reads, so
+// the application and its migrations cannot disagree about which database
+// they mean". The contract test written by the same command used the prefixed
+// form, and so does `warren new --db postgres`. Three artifacts, two names,
+// and the printed instruction failed against the file it had just written.
+func TestGeneratedMigrateReadsTheProjectsOwnDSNVariable(t *testing.T) {
+	t.Parallel()
+
+	dir := app(t)
+	if _, err := generate.Entity(generate.Options{Dir: dir, Module: "user", Name: "Book"}); err != nil {
+		t.Fatalf("Entity: %v", err)
+	}
+	out, err := generate.Repository(generate.Options{
+		Dir: dir, Module: "user", Name: "Book", Driver: "postgres",
+	})
+	if err != nil {
+		t.Fatalf("Repository: %v", err)
+	}
+
+	migrate := read(t, dir, "cmd/migrate/main.go")
+	if !strings.Contains(migrate, `os.Getenv("MYAPP_DATABASE_URL")`) {
+		t.Errorf("cmd/migrate does not read the project's own variable:\n%s", migrate)
+	}
+	if strings.Contains(migrate, `"DATABASE_URL"`) {
+		t.Errorf("cmd/migrate still reads an unprefixed DATABASE_URL:\n%s", migrate)
+	}
+
+	// And the printed instruction must name the same one it just wrote, which
+	// is the half that made this visible at all.
+	if !strings.Contains(out, "MYAPP_DATABASE_URL") {
+		t.Errorf("the printed instruction does not name the variable cmd/migrate reads:\n%s", out)
+	}
+	contract := read(t, dir, "internal/modules/user/infrastructure/book_repository_test.go")
+	if !strings.Contains(contract, "MYAPP_DATABASE_URL") {
+		t.Errorf("the generated contract test uses a different variable again:\n%s", contract)
+	}
+}
+
+// TestForceBacksUpWhatItDestroys — field test #15, finding 11, reclassified
+// from PAPERCUT to a data-loss bug.
+//
+// `warren g repository catalog Book --driver postgres --force` replaced 100
+// lines of hand-written repository, including the List method the domain port
+// required, with a template that knows id, created_at and version. The
+// compiler caught that one. It also clobbered two hand-written migration
+// files, and nothing caught those — there was no backup and no mention.
+func TestForceBacksUpWhatItDestroys(t *testing.T) {
+	t.Parallel()
+
+	dir := app(t)
+	if _, err := generate.Entity(generate.Options{Dir: dir, Module: "user", Name: "Book"}); err != nil {
+		t.Fatalf("Entity: %v", err)
+	}
+	if _, err := generate.Repository(generate.Options{Dir: dir, Module: "user", Name: "Book"}); err != nil {
+		t.Fatalf("Repository: %v", err)
+	}
+
+	// Stand in for the hand-written work: the file exists, and its contents
+	// are the thing that must survive somewhere.
+	const handWritten = "// hand-written, and the only copy\npackage infrastructure\n"
+	repo := filepath.Join(dir, "internal/modules/user/infrastructure/book_repository.go")
+	if err := os.WriteFile(repo, []byte(handWritten), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := generate.Repository(generate.Options{
+		Dir: dir, Module: "user", Name: "Book", Driver: "postgres", Force: true,
+	})
+	if err != nil {
+		t.Fatalf("Repository --force: %v", err)
+	}
+
+	backup, err := os.ReadFile(repo + ".orig")
+	if err != nil {
+		t.Fatalf("--force destroyed a hand-written file with no backup: %v", err)
+	}
+	if string(backup) != handWritten {
+		t.Errorf("the backup is not what was destroyed:\n%s", backup)
+	}
+	if !strings.Contains(out, ".orig") {
+		t.Errorf("--force did not say where the previous content went:\n%s", out)
+	}
+
+	// A second --force must not back up the FIRST run's generated output over
+	// the hand-written original. The oldest backup is the valuable one.
+	if _, err := generate.Repository(generate.Options{
+		Dir: dir, Module: "user", Name: "Book", Driver: "postgres", Force: true,
+	}); err != nil {
+		t.Fatalf("second Repository --force: %v", err)
+	}
+	again, err := os.ReadFile(repo + ".orig")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(again) != handWritten {
+		t.Errorf("a second --force overwrote the backup of the hand-written file:\n%s", again)
+	}
+}
+
+// TestDryRunWarnsBeforeForceDestroysAnything — the other half: --dry-run is
+// the one moment the content still exists, so it has to say what will go.
+func TestDryRunWarnsBeforeForceDestroysAnything(t *testing.T) {
+	t.Parallel()
+
+	dir := app(t)
+	if _, err := generate.Entity(generate.Options{Dir: dir, Module: "user", Name: "Book"}); err != nil {
+		t.Fatalf("Entity: %v", err)
+	}
+	if _, err := generate.Repository(generate.Options{Dir: dir, Module: "user", Name: "Book"}); err != nil {
+		t.Fatalf("Repository: %v", err)
+	}
+
+	out, err := generate.Repository(generate.Options{
+		Dir: dir, Module: "user", Name: "Book", Driver: "postgres", Force: true, DryRun: true,
+	})
+	if err != nil {
+		t.Fatalf("Repository --force --dry-run: %v", err)
+	}
+	for _, want := range []string{"WILL REPLACE", "overwrite", ".orig"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("--dry-run does not warn that --force will destroy files (%q):\n%s", want, out)
+		}
+	}
+}

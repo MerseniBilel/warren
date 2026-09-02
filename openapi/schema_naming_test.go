@@ -1,10 +1,12 @@
 package openapi_test
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/MerseniBilel/warren/app"
 	"github.com/MerseniBilel/warren/openapi"
 	"github.com/MerseniBilel/warren/transport"
 
@@ -277,4 +279,50 @@ func tableOf(t *testing.T, fn func(r *transport.Registrar)) *transport.Table {
 		t.Fatalf("Table: %v", err)
 	}
 	return tbl
+}
+
+// listBooks is field test #15's finding 7, verbatim: the idiomatic spelling of
+// a constrained OPTIONAL query parameter.
+type listBooks struct {
+	Limit int `query:"limit" validate:"omitempty,min=1,max=100"`
+}
+
+type booksPage struct {
+	Count int `json:"count"`
+}
+
+// TestOmitemptyOnAnOptionalQueryParameterIsNotARefusal — the emitter described
+// this route perfectly and then refused it.
+//
+//	{"name":"limit","in":"query","schema":{"type":"integer","minimum":1,"maximum":100}}
+//
+// `omitempty` IS expressible: "optional" is `required: false`, which is what
+// the parameter already carried. The refusal made openapi.Strict() unusable on
+// any service with a constrained optional query parameter — you had to choose
+// between the constraint and the strict check.
+func TestOmitemptyOnAnOptionalQueryParameterIsNotARefusal(t *testing.T) {
+	t.Parallel()
+
+	doc, raw := emit(t, func(r *transport.Registrar) {
+		r.Get("/books", app.HandlerFunc[listBooks, booksPage](
+			func(context.Context, listBooks) (booksPage, error) { return booksPage{}, nil }))
+	})
+
+	for _, ref := range doc.Refusals() {
+		if strings.Contains(ref.Reason, "omitempty") {
+			t.Errorf("omitempty was refused, so Strict() fails the boot over a route "+
+				"this document describes correctly: %+v", ref)
+		}
+	}
+
+	// It is described, and described as OPTIONAL — which is what omitempty
+	// means and the only thing it adds.
+	for _, want := range []string{`"minimum": 1`, `"maximum": 100`, `"in": "query"`} {
+		if !strings.Contains(raw, want) {
+			t.Errorf("the parameter lost %s from its schema:\n%s", want, raw)
+		}
+	}
+	if strings.Contains(raw, `"required": true`) {
+		t.Errorf("an omitempty parameter was published as required:\n%s", raw)
+	}
 }

@@ -756,7 +756,9 @@ So it is two calls — Warren's tables and yours — from your deploy job:
 ```go
 // cmd/migrate/main.go
 ctx := context.Background()
-dsn := os.Getenv("DATABASE_URL")
+// The SAME variable internal/platform reads. Prefixed, so the app and its
+// migrations cannot be pointed at two different databases.
+dsn := os.Getenv("NOTES_DATABASE_URL")
 if err := postgres.Migrate(ctx, dsn, postgres.Schema); err != nil { log.Fatal(err) }
 if err := postgres.Migrate(ctx, dsn, schema.FS);       err != nil { log.Fatal(err) }
 ```

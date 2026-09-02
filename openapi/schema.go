@@ -256,6 +256,28 @@ func applyValidate(s *Schema, tag string) (required bool, unmapped []string) {
 			if s.Type == "string" {
 				s.Enum = strings.Fields(value)
 			}
+		case "omitempty":
+			// Expressible, and already expressed: "optional" is the absence
+			// of this field from `required`, which is what NOT setting
+			// required here produces. A parameter gets `required: false` by
+			// the same route.
+			//
+			// It was refused until 2026-09-02, and the refusal made
+			// openapi.Strict() unusable on any service with a constrained
+			// optional query parameter — `validate:"omitempty,min=1,max=100"`
+			// on a ?limit= is the idiomatic spelling, and field test #15
+			// showed the emitter describing it perfectly
+			// ({"type":"integer","minimum":1,"maximum":100}, required false)
+			// and then failing the boot over it.
+			//
+			// One corner, stated rather than glossed: go-playground's
+			// omitempty skips the remaining rules when the value is the ZERO
+			// value, not when it is absent. So an explicitly-sent `limit=0`
+			// is accepted by the server and rejected by a client generated
+			// from `minimum: 1`. That is the schema being STRICTER than the
+			// service in one case, which is the opposite of the failure the
+			// refusal list exists for, and it is not worth refusing a whole
+			// route over.
 		default:
 			unmapped = append(unmapped, key)
 		}

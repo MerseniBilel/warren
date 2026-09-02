@@ -677,6 +677,40 @@ is not installed, say so rather than asserting the code is clean.
 
 ---
 
+## Before you call a fix done
+
+**Enumerate the OTHER producers and consumers of the thing you just fixed, and
+say in the commit message which ones you checked.** Added 2026-09-02, because
+this repository has one characteristic defect and it has now happened three
+times:
+
+- `4a1d152` fixed one of `CONFLICT`'s two consumer meanings — the lost version
+  race — and left the other acked, at INFO, under a log line asserting it was
+  an idempotent replay. Field test #15 measured the consequence: a business
+  refusal destroying a message, silently, with two modules left divergent.
+- `281365c` fixed one of two producers of the joined-diagnostic nesting defect
+  and left `paramSetters` pre-joining, under a doc comment declaring the
+  property fixed.
+- `warren g consumer` was moved onto the shipped consumer API while the
+  *scaffold* had used it for weeks, so one generated project carried both
+  idioms — and the CLI-generated half never entered the route table at all.
+
+**Fixing one half of a two-halved thing and declaring it done is the shape.**
+The guard is mechanical, costs a grep, and would have caught all three:
+
+1. **Grep for the claim, not the code.** The false string
+   `"idempotent replay"` appeared in five files; the code fix touched one.
+2. **Ask who else decides the same question.** `openapi.hasBody` and
+   `transport.bodyless` answer "does this verb carry a body"; two lists drift,
+   so one is written as the other's complement.
+3. **Ask what else consumes the thing you changed.** A behavioural test of a
+   generated consumer passes whether or not it is in the route table; only an
+   assertion about the table catches that.
+4. **Name them in the commit.** "Checked X, Y, Z; Y was already right; Z is a
+   spec slated for deletion" is a reviewable claim. Silence is not.
+
+---
+
 ## Mistakes agents make in this repo
 
 Named specifically, because generic advice does not prevent them:
@@ -711,6 +745,9 @@ Named specifically, because generic advice does not prevent them:
     differ, the spec is corrected in the same pull request — not later.
 14. **Proposing a spike or a prototype.** Research it, put the options to the
     human, and agree the decision. Then build it once.
+15. **Fixing one producer of a defect and declaring the defect fixed.** Three
+    incidents, same shape — see "Before you call a fix done" above. Enumerate
+    the others and say which you checked.
 
 ---
 

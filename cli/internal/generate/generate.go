@@ -828,11 +828,12 @@ func (p *plan) apply() (string, error) {
 	}
 
 	if p.dryRun {
-		return p.describe(existing), nil
+		return p.describe(existing, nil), nil
 	}
 
 	// From here on anything written is undone on failure.
 	undo := &rollback{dir: p.dir, original: original}
+	backups := map[string]string{}
 	for _, path := range sortedKeys(p.files) {
 		full := filepath.Join(p.dir, path)
 		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
@@ -841,6 +842,12 @@ func (p *plan) apply() (string, error) {
 		if existing[path] {
 			if prev, rerr := os.ReadFile(full); rerr == nil {
 				undo.original[path] = prev
+				if backup, berr := saveOriginal(full, prev); berr != nil {
+					return "", undo.after(berr)
+				} else if backup != "" {
+					backups[path] = backup
+					undo.created = append(undo.created, backup)
+				}
 			}
 		} else {
 			undo.created = append(undo.created, path)
@@ -854,7 +861,34 @@ func (p *plan) apply() (string, error) {
 			return "", undo.after(errCannotWrite(path, err))
 		}
 	}
-	return p.describe(existing), nil
+	return p.describe(existing, backups), nil
+}
+
+// saveOriginal copies a file this run is about to overwrite to <path>.orig,
+// and returns the backup's path relative to nothing — the caller holds the
+// project-relative one.
+//
+// --force used to destroy without a copy. Field test #15: `warren g repository
+// --driver postgres --force` replaced 100 lines of hand-written repository,
+// including the List method the domain port required, with a template that
+// knows id, created_at and version — and clobbered two hand-written migration
+// files in the same run. The compiler caught the first; nothing caught the
+// second, and there was nothing to recover from either. A tool that silently
+// destroys uncommitted work is not a papercut.
+//
+// AN EXISTING .orig IS NEVER OVERWRITTEN. The second --force in a row would
+// otherwise back up the FIRST run's generated output over the hand-written
+// original, which is precisely the content worth keeping. The oldest backup is
+// the valuable one.
+func saveOriginal(full string, prev []byte) (string, error) {
+	backup := full + ".orig"
+	if _, err := os.Stat(backup); err == nil {
+		return "", nil // an earlier run's backup: older, and worth more
+	}
+	if err := os.WriteFile(backup, prev, 0o644); err != nil {
+		return "", errCannotWrite(filepath.Base(backup), err)
+	}
+	return backup, nil
 }
 
 // rollback restores what a half-finished run changed.
@@ -892,17 +926,40 @@ func (r *rollback) after(cause error) error {
 // reports afterwards. It distinguishes create from overwrite, because a
 // plan that calls an overwrite "create" is how a hand-wired file gets lost
 // without anyone noticing.
-func (p *plan) describe(existing map[string]bool) string {
+func (p *plan) describe(existing map[string]bool, backups map[string]string) string {
 	var b strings.Builder
+	var destroyed []string
 	for _, path := range sortedKeys(p.files) {
 		verb := "create   "
 		if existing[path] {
 			verb = "overwrite"
+			destroyed = append(destroyed, path)
 		}
 		fmt.Fprintf(&b, "  %s  %s\n", verb, path)
 	}
 	for _, e := range p.edits {
 		fmt.Fprintf(&b, "  edit       %s  (%s)\n", e.path, e.what)
+	}
+	// Naming the overwrite in a list is not enough when the content is gone.
+	// --force overwrote hand-written files silently until 2026-09-02; it now
+	// says what it replaced and where the previous content went.
+	if len(destroyed) > 0 {
+		b.WriteString("\n")
+		if p.dryRun {
+			fmt.Fprintf(&b, "  --force WILL REPLACE %d existing file(s), listed above.\n"+
+				"  Each one's current content is copied to <file>.orig first.\n", len(destroyed))
+		} else {
+			fmt.Fprintf(&b, "  --force replaced %d existing file(s). The previous content is in:\n\n", len(destroyed))
+			for _, path := range destroyed {
+				if _, ok := backups[path]; ok {
+					fmt.Fprintf(&b, "      %s.orig\n", path)
+				} else {
+					fmt.Fprintf(&b, "      %s.orig  (kept from an earlier run — the older backup is the valuable one)\n", path)
+				}
+			}
+			b.WriteString("\n  Diff them before deleting: a generated template knows the aggregate's\n" +
+				"  id, created_at and version, and nothing you added by hand.\n")
+		}
 	}
 	// What the generator could NOT do for you. A generator that reports only
 	// what it wrote leaves the user believing the wiring is finished, and the
