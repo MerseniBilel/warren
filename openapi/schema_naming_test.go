@@ -370,3 +370,54 @@ func TestAnOptedOutFieldIsNotAPublishedParameter(t *testing.T) {
 		t.Errorf("the query parameter beside it was dropped too:\n%s", raw)
 	}
 }
+
+// receiveStock is field test #16, finding 9: the idiomatic numeric bound.
+type receiveStock struct {
+	SKU      string `json:"sku" validate:"required,min=3"`
+	OnHand   int    `json:"on_hand" validate:"gte=0,lte=1000"`
+	Delta    int    `json:"delta" validate:"gt=0,lt=100"`
+	Nickname string `json:"nickname" validate:"gt=2"`
+}
+
+type stockRes struct {
+	OK bool `json:"ok"`
+}
+
+// TestGteAndGtAreExpressibleInJSONSchema — the emitter refused `gte` with "no
+// JSON Schema keyword expresses it", three lines below the code that emits
+// minLength and enum, and stamped three of nine operations in a real service
+// x-warren-undescribed for it.
+//
+// JSON Schema has had `minimum` since draft-01 and `exclusiveMinimum` as a
+// NUMBER since 2020-12, which is what OpenAPI 3.1 is. Declaring the easy
+// constraint impossible while emitting the harder ones is the detail that
+// makes a reader doubt everything else in the document.
+func TestGteAndGtAreExpressibleInJSONSchema(t *testing.T) {
+	t.Parallel()
+
+	doc, raw := emit(t, func(r *transport.Registrar) {
+		r.Post("/skus", app.HandlerFunc[receiveStock, stockRes](
+			func(context.Context, receiveStock) (stockRes, error) { return stockRes{}, nil }))
+	})
+
+	for _, ref := range doc.Refusals() {
+		for _, tag := range []string{"gte", "gt", "lte", "lt"} {
+			if strings.Contains(ref.Reason, "`"+tag+"`") {
+				t.Errorf("%s was refused as inexpressible: %+v", tag, ref)
+			}
+		}
+	}
+	for _, want := range []string{
+		`"minimum": 0`,            // gte=0
+		`"maximum": 1000`,         // lte=1000
+		`"exclusiveMinimum": 0`,   // gt=0
+		`"exclusiveMaximum": 100`, // lt=100
+		// gt on a STRING is a length bound, and a length is an integer — so
+		// "longer than 2" is minLength 3 with nothing lost.
+		`"minLength": 3`,
+	} {
+		if !strings.Contains(raw, want) {
+			t.Errorf("the document does not carry %s:\n%s", want, raw)
+		}
+	}
+}
