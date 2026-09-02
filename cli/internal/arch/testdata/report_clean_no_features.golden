@@ -7,3 +7,11 @@ No violations in 4 packages.
   finds by a `modules` path segment — internal/modules/<feature>/… , the tree
   `warren new` generates — and this project has none, so nothing was compared
   across features.
+
+  NOT checked: _test.go files. A test importing its own feature's
+  infrastructure is how a test is written, so the walk skips them — which
+  also means a test file is the one place these rules do not reach.
+
+  Carve-out: a feature's module.go MAY import a sibling feature. That is
+  where a module value is wired, so the cross-module rule exempts that one
+  filename and no other.

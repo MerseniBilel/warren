@@ -69,7 +69,7 @@ type AggregateRoot[T ID] struct {
 // save under an empty key. Repositories reconstitute through this
 // constructor, never by filling in the struct.
 func NewAggregateRoot[T ID](id T) AggregateRoot[T] {
-	return AggregateRoot[T]{Entity: Entity[T]{id: id}}
+	return AggregateRoot[T]{id: id}
 }
 
 // Raise records a domain event on the aggregate. It publishes nothing. Like

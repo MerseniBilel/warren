@@ -15,8 +15,8 @@ type uploadHandler struct{ name string }
 
 type rawController struct{ h *uploadHandler }
 
-func (c *rawController) Register(r transport.Registrar) {
-	transport.Raw(r, transport.ProtocolHTTP, "POST /uploads", c.h)
+func (c *rawController) Register(r *transport.Registrar) {
+	r.Raw(transport.ProtocolHTTP, "POST /uploads", c.h)
 }
 
 func TestRawRouteReachesTheTable(t *testing.T) {
@@ -60,7 +60,7 @@ func TestRawRouteCarriesItsGuardsAndName(t *testing.T) {
 
 	b := transport.NewBuilder()
 	r := b.For("user")
-	transport.Raw(r, transport.ProtocolHTTP, "POST /uploads", &uploadHandler{},
+	r.Raw(transport.ProtocolHTTP, "POST /uploads", &uploadHandler{},
 		transport.Named("user.upload"), transport.Guard(denyAll{}))
 	tbl, err := b.Table()
 	if err != nil {
@@ -100,7 +100,7 @@ func TestRawRefusesEmptyPattern(t *testing.T) {
 	t.Parallel()
 
 	b := transport.NewBuilder()
-	transport.Raw(b.For("user"), transport.ProtocolHTTP, "", &uploadHandler{})
+	b.For("user").Raw(transport.ProtocolHTTP, "", &uploadHandler{})
 	if _, err := b.Table(); err == nil {
 		t.Fatal("an empty raw pattern must be a boot error")
 	}
@@ -118,7 +118,7 @@ func TestRawNilHandlerIsARegistrationFailure(t *testing.T) {
 		}
 	}()
 	b := transport.NewBuilder()
-	transport.Raw(b.For("user"), transport.ProtocolHTTP, "POST /uploads", nil)
+	b.For("user").Raw(transport.ProtocolHTTP, "POST /uploads", nil)
 	if _, err := b.Table(); err == nil {
 		t.Fatal("a nil raw handler built a table")
 	}
@@ -155,7 +155,7 @@ func TestFillReportsRegistrationErrors(t *testing.T) {
 
 	b := transport.NewBuilder()
 	r := b.For("user")
-	transport.Raw(r, transport.ProtocolHTTP, "", &uploadHandler{})
+	r.Raw(transport.ProtocolHTTP, "", &uploadHandler{})
 
 	if err := b.Fill(&transport.Table{}); err == nil {
 		t.Fatal("Fill must report what Table would have reported")

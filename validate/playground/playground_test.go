@@ -217,8 +217,8 @@ func (c *controller) register(_ context.Context, cmd registerUser) (struct{}, er
 	return struct{}{}, nil
 }
 
-func (c *controller) Register(r transport.Registrar) {
-	transport.Post(r, "/users", app.HandlerFunc[registerUser, struct{}](c.register))
+func (c *controller) Register(r *transport.Registrar) {
+	r.Post("/users", app.HandlerFunc[registerUser, struct{}](c.register))
 }
 
 // The route closure is compiled at boot step 5 with this validator, so the

@@ -84,7 +84,7 @@ var _ inbox.Store = (*inboxStore)(nil)
 func (s *inboxStore) verify(ctx context.Context) error {
 	var one int
 	err := s.pool.boxed.QueryRow(ctx, `SELECT 1 FROM `+quoteIdent(s.cfg.table)+` LIMIT 1`).Scan(&one)
-	if err != nil && !errorsAs2(err, ErrNoRows) {
+	if err != nil && !errorsIs(err, ErrNoRows) {
 		return errTableMissing(s.cfg.table)
 	}
 	return nil

@@ -26,8 +26,8 @@ func (u *{{.Lower}}UoW) Do(ctx context.Context, fn func(context.Context) error) 
 	h := application.New{{.Name}}Handler(uow)
 {{end}}
 	got, err := h.Handle(context.Background(), application.{{.Name}}{
-		{{.FirstField}}: "{{.Snake}}-1",
-	})
+{{if .FirstField}}		{{.FirstField}}: "{{.Snake}}-1",
+{{end}}	})
 	if err != nil {
 		t.Fatalf("Handle: %v", err)
 	}

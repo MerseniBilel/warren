@@ -77,11 +77,11 @@ func (c *controller) fail(_ context.Context, f failing) (struct{}, error) {
 	return struct{}{}, io.ErrUnexpectedEOF
 }
 
-func (c *controller) Register(r transport.Registrar) {
-	transport.Post(r, "/users", app.HandlerFunc[registerUser, userDTO](c.register))
-	transport.Get(r, "/users/{id}", app.HandlerFunc[getUser, userDTO](c.get))
-	transport.Delete(r, "/users/{id}", app.HandlerFunc[deleteUser, struct{}](c.remove))
-	transport.Post(r, "/fail", app.HandlerFunc[failing, struct{}](c.fail))
+func (c *controller) Register(r *transport.Registrar) {
+	r.Post("/users", app.HandlerFunc[registerUser, userDTO](c.register))
+	r.Get("/users/{id}", app.HandlerFunc[getUser, userDTO](c.get))
+	r.Delete("/users/{id}", app.HandlerFunc[deleteUser, struct{}](c.remove))
+	r.Post("/fail", app.HandlerFunc[failing, struct{}](c.fail))
 }
 
 func userModule() warren.Module {
@@ -134,7 +134,12 @@ func do(t *testing.T, method, url, body string) (*http.Response, string) {
 	if err != nil {
 		t.Fatalf("read: %v", err)
 	}
-	return res, string(out)
+	// Every body this adapter writes ends with a newline, as
+	// encoding/json.Encoder's does. These tests assert on the JSON, so the
+	// terminator is trimmed here once rather than repeated in every
+	// comparison; that it is PRESENT is asserted over the wire in
+	// servertest's "every body ends with a newline".
+	return res, strings.TrimSuffix(string(out), "\n")
 }
 
 // --- end to end -----------------------------------------------------------
@@ -308,14 +313,20 @@ func TestWrongMethodIs405WithAllow(t *testing.T) {
 	}
 	// NOT_FOUND would be a lie with consequences: a client switching on
 	// error.code would conclude the resource is gone and stop retrying,
-	// when in fact it exists and answers other verbs — the Allow header
-	// two lines up says which. §2.6's table maps codes raised by HANDLERS;
-	// 405 is raised by the adapter, before any handler exists.
-	if !strings.Contains(body, `"code":"INVALID"`) {
-		t.Errorf("a 405 must not claim the resource does not exist: %s", body)
+	// when in fact it exists and answers other verbs — the Allow header two
+	// lines up says which.
+	//
+	// And not INVALID either, which is what it carried until 2026-08-29:
+	// INVALID means "change the request before retrying", and a client could
+	// not tell a wrong METHOD from a malformed body. The remedies have
+	// nothing in common.
+	if !strings.Contains(body, `"code":"METHOD_NOT_ALLOWED"`) {
+		t.Errorf("a 405 must carry its own code: %s", body)
 	}
-	if strings.Contains(body, "NOT_FOUND") {
-		t.Errorf("405 still carries NOT_FOUND: %s", body)
+	for _, wrong := range []string{"NOT_FOUND", `"code":"INVALID"`} {
+		if strings.Contains(body, wrong) {
+			t.Errorf("405 still carries %s: %s", wrong, body)
+		}
 	}
 }
 

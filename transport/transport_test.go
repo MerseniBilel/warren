@@ -49,11 +49,11 @@ func (c *userController) get(_ context.Context, q getUser) (userDTO, error) {
 }
 
 // Register is called once, at boot: one controller, three exposures.
-func (c *userController) Register(r transport.Registrar) {
-	transport.Post(r, "/users", app.Handler[registerUser, userDTO](app.HandlerFunc[registerUser, userDTO](c.register)))
-	transport.Method(r, "user.v1.UserService/Register", app.Handler[registerUser, userDTO](app.HandlerFunc[registerUser, userDTO](c.register)))
-	transport.OnEvent(r, "billing.customer.created", app.Handler[registerUser, userDTO](app.HandlerFunc[registerUser, userDTO](c.register)))
-	transport.Get(r, "/users/{id}", app.Handler[getUser, userDTO](app.HandlerFunc[getUser, userDTO](c.get)))
+func (c *userController) Register(r *transport.Registrar) {
+	r.Post("/users", app.Handler[registerUser, userDTO](app.HandlerFunc[registerUser, userDTO](c.register)))
+	r.Method("user.v1.UserService/Register", app.Handler[registerUser, userDTO](app.HandlerFunc[registerUser, userDTO](c.register)))
+	r.OnEvent("billing.customer.created", app.Handler[registerUser, userDTO](app.HandlerFunc[registerUser, userDTO](c.register)))
+	r.Get("/users/{id}", app.Handler[getUser, userDTO](app.HandlerFunc[getUser, userDTO](c.get)))
 }
 
 var _ transport.Controller = (*userController)(nil)
@@ -270,7 +270,7 @@ func TestEventOptionsReachTheRoute(t *testing.T) {
 
 	b := transport.NewBuilder()
 	r := b.For("billing")
-	transport.OnEvent(r, "billing.subscription.created",
+	r.OnEvent("billing.subscription.created",
 		app.Handler[registerUser, userDTO](app.HandlerFunc[registerUser, userDTO](
 			func(context.Context, registerUser) (userDTO, error) { return userDTO{}, nil })),
 		broker.WithRetry(broker.ExponentialBackoff(5)),
@@ -291,7 +291,7 @@ func TestGuardsRunBeforeDecode(t *testing.T) {
 
 	denied := werrors.PermissionDenied("create users")
 	b := transport.NewBuilder()
-	transport.Post(b.For("user"), "/users",
+	b.For("user").Post("/users",
 		app.Handler[registerUser, userDTO](app.HandlerFunc[registerUser, userDTO](
 			func(context.Context, registerUser) (userDTO, error) {
 				t.Error("the handler ran despite a denied guard")
@@ -322,8 +322,8 @@ func TestDuplicateRouteIsABootError(t *testing.T) {
 	r := b.For("user")
 	h := app.Handler[registerUser, userDTO](app.HandlerFunc[registerUser, userDTO](
 		func(context.Context, registerUser) (userDTO, error) { return userDTO{}, nil }))
-	transport.Post(r, "/users", h)
-	transport.Post(r, "/users", h)
+	r.Post("/users", h)
+	r.Post("/users", h)
 
 	_, err := b.Table()
 	if err == nil {
@@ -371,9 +371,9 @@ func TestRegistrationErrorsAccumulate(t *testing.T) {
 	type unsupported struct {
 		Ch chan int `param:"ch"`
 	}
-	transport.Get(r, "/a", app.Handler[unsupported, userDTO](app.HandlerFunc[unsupported, userDTO](
+	r.Get("/a", app.Handler[unsupported, userDTO](app.HandlerFunc[unsupported, userDTO](
 		func(context.Context, unsupported) (userDTO, error) { return userDTO{}, nil })))
-	transport.Get(r, "", app.Handler[registerUser, userDTO](app.HandlerFunc[registerUser, userDTO](
+	r.Get("", app.Handler[registerUser, userDTO](app.HandlerFunc[registerUser, userDTO](
 		func(context.Context, registerUser) (userDTO, error) { return userDTO{}, nil })))
 
 	_, err := b.Table()
@@ -400,7 +400,7 @@ func TestNilHandlerDoesNotPanicAtRegistration(t *testing.T) {
 		}
 	}()
 	b := transport.NewBuilder()
-	transport.Post(b.For("user"), "/users", app.Handler[registerUser, userDTO](nil))
+	b.For("user").Post("/users", app.Handler[registerUser, userDTO](nil))
 	if b.Failures() == nil {
 		t.Fatal("a nil handler was accepted silently")
 	}
@@ -451,7 +451,7 @@ func TestNestedParamTagIsARegistrationError(t *testing.T) {
 		}
 	}
 	b := transport.NewBuilder()
-	transport.Get(b.For("m"), "/x/{id}", app.Handler[nested, userDTO](app.HandlerFunc[nested, userDTO](
+	b.For("m").Get("/x/{id}", app.Handler[nested, userDTO](app.HandlerFunc[nested, userDTO](
 		func(context.Context, nested) (userDTO, error) { return userDTO{}, nil })))
 	_, err := b.Table()
 	if err == nil {
@@ -469,7 +469,7 @@ func TestValidatorIsConfigurable(t *testing.T) {
 		Email string `json:"email" validate:"required,email"`
 	}
 	reg := func(b *transport.Builder) {
-		transport.Post(b.For("user"), "/users", app.Handler[richer, userDTO](app.HandlerFunc[richer, userDTO](
+		b.For("user").Post("/users", app.Handler[richer, userDTO](app.HandlerFunc[richer, userDTO](
 			func(context.Context, richer) (userDTO, error) { return userDTO{}, nil })))
 	}
 
@@ -507,7 +507,7 @@ func TestChainedHandlerGetsAMeaningfulName(t *testing.T) {
 	)
 
 	b := transport.NewBuilder()
-	transport.Post(b.For("inventory"), "/x", chained)
+	b.For("inventory").Post("/x", chained)
 	tbl, err := b.Table()
 	if err != nil {
 		t.Fatalf("Table: %v", err)
@@ -531,7 +531,7 @@ func TestNonStructRequestIsRefusedNotSkipped(t *testing.T) {
 
 	b := transport.NewBuilder()
 	r := b.For("catalogue")
-	transport.Post(r, "/tags", app.HandlerFunc[[]string, struct{}](
+	r.Post("/tags", app.HandlerFunc[[]string, struct{}](
 		func(context.Context, []string) (struct{}, error) { return struct{}{}, nil },
 	))
 
@@ -548,20 +548,20 @@ func TestNonStructRequestIsRefusedNotSkipped(t *testing.T) {
 
 // A verb baked into a typed pattern used to boot clean and serve an
 // unreachable route: the adapter builds "<verb> <pattern>", so
-// transport.Get(r, "GET /x", h) became "GET GET /x" — host "GET", path "/x".
+// r.Get("GET /x", h) became "GET GET /x" — host "GET", path "/x".
 // Found by field-testing, 2026-08-02.
 func TestTypedPatternWithAMethodIsARegistrationError(t *testing.T) {
 	t.Parallel()
 
 	b := transport.NewBuilder()
-	transport.Get(b.For("user"), "GET /oops", app.HandlerFunc[getUser, userDTO](
+	b.For("user").Get("GET /oops", app.HandlerFunc[getUser, userDTO](
 		func(context.Context, getUser) (userDTO, error) { return userDTO{}, nil }))
 
 	_, err := b.Table()
 	if err == nil {
 		t.Fatal("a method inside a typed pattern must be a boot error")
 	}
-	for _, want := range []string{"contains a method", `transport.Get(r, "/oops"`} {
+	for _, want := range []string{"contains a method", `r.Get("/oops"`} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("diagnostic must contain %q:\n%s", want, err)
 		}
@@ -572,7 +572,7 @@ func TestTypedPatternMustBeAPath(t *testing.T) {
 	t.Parallel()
 
 	b := transport.NewBuilder()
-	transport.Post(b.For("user"), "users", app.HandlerFunc[registerUser, userDTO](
+	b.For("user").Post("users", app.HandlerFunc[registerUser, userDTO](
 		func(context.Context, registerUser) (userDTO, error) { return userDTO{}, nil }))
 
 	_, err := b.Table()
@@ -590,7 +590,7 @@ func TestRawPatternMayCarryAMethod(t *testing.T) {
 	t.Parallel()
 
 	b := transport.NewBuilder()
-	transport.Raw(b.For("user"), transport.ProtocolHTTP, "POST /uploads", &uploadHandler{})
+	b.For("user").Raw(transport.ProtocolHTTP, "POST /uploads", &uploadHandler{})
 	if _, err := b.Table(); err != nil {
 		t.Fatalf("Raw must accept \"METHOD /path\": %v", err)
 	}
@@ -613,7 +613,7 @@ func TestParamTagWithNoWildcardIsARegistrationError(t *testing.T) {
 		Reason string `json:"reason"`
 	}
 	b := transport.NewBuilder()
-	transport.Post(b.For("catalog"), "/products/{productId}/discontinue",
+	b.For("catalog").Post("/products/{productId}/discontinue",
 		app.Handler[req, userDTO](app.HandlerFunc[req, userDTO](
 			func(context.Context, req) (userDTO, error) { return userDTO{}, nil })))
 	_, err := b.Table()
@@ -639,7 +639,7 @@ func TestParamTagsThatDoMatchStillRegister(t *testing.T) {
 		Page int    `query:"page"`
 	}
 	b := transport.NewBuilder()
-	transport.Get(b.For("catalog"), "/products/{id}/files/{rest...}",
+	b.For("catalog").Get("/products/{id}/files/{rest...}",
 		app.Handler[req, userDTO](app.HandlerFunc[req, userDTO](
 			func(context.Context, req) (userDTO, error) { return userDTO{}, nil })))
 	if _, err := b.Table(); err != nil {
@@ -835,7 +835,7 @@ func TestEventRoutesCannotBeMadeStrict(t *testing.T) {
 // README's headline is that every error the framework can detect surfaces at
 // boot, never on request 1. This one is detectable at the call site, and the
 // fix was already written twice in the same codebase — app.Authorized and
-// transport.Raw both refuse their nil the same way.
+// r.Raw both refuse their nil the same way.
 func TestGuardRefusesANilPolicy(t *testing.T) {
 	t.Parallel()
 
@@ -877,8 +877,8 @@ func (*nilPolicy) Authorize(context.Context) error { return nil }
 // path and has no wildcards, so the check refused the canonical Warren
 // handler — the very handler gRPC exists to share with HTTP:
 //
-//	transport.Get(r, "/users/{id}", h)                    // fine
-//	transport.Method(r, "user.v1.UserService/GetUser", h) // BOOT FAILED
+//	r.Get("/users/{id}", h)                    // fine
+//	r.Method("user.v1.UserService/GetUser", h) // BOOT FAILED
 //
 // OnEvent already exempts itself; gRPC was the odd one out.
 func getUserByID(context.Context, getUser) (userDTO, error) { return userDTO{ID: "u-1"}, nil }
@@ -888,8 +888,8 @@ func TestGRPCAcceptsAParamTaggedHandler(t *testing.T) {
 
 	b := transport.NewBuilder()
 	r := b.For("user")
-	transport.Get(r, "/users/{id}", app.HandlerFunc[getUser, userDTO](getUserByID))
-	transport.Method(r, "user.v1.UserService/GetUser",
+	r.Get("/users/{id}", app.HandlerFunc[getUser, userDTO](getUserByID))
+	r.Method("user.v1.UserService/GetUser",
 		app.HandlerFunc[getUser, userDTO](getUserByID))
 	tbl, err := b.Table()
 	if err != nil {
@@ -909,7 +909,7 @@ func TestHTTPStillRefusesAParamWithNoWildcard(t *testing.T) {
 	t.Parallel()
 
 	b := transport.NewBuilder()
-	transport.Get(b.For("user"), "/users",
+	b.For("user").Get("/users",
 		app.HandlerFunc[getUser, userDTO](getUserByID))
 
 	if _, err := b.Table(); err == nil {
@@ -937,7 +937,7 @@ func TestATransactionalHandlerKeepsItsOwnName(t *testing.T) {
 		app.Transactional[registerUser, userDTO](noopUoW{}))
 
 	b := transport.NewBuilder()
-	transport.Post(b.For("inventory"), "/x", chained)
+	b.For("inventory").Post("/x", chained)
 	tbl, err := b.Table()
 	if err != nil {
 		t.Fatalf("Table: %v", err)
@@ -993,8 +993,8 @@ type nilHandlerController struct {
 	h app.Handler[registerUser, userDTO] // never assigned
 }
 
-func (c *nilHandlerController) Register(r transport.Registrar) {
-	transport.Post(r, "/users", c.h)
+func (c *nilHandlerController) Register(r *transport.Registrar) {
+	r.Post("/users", c.h)
 }
 
 func TestNilHandlerIsARegistrationFailureNotAPanic(t *testing.T) {
@@ -1045,7 +1045,7 @@ func TestNilHandlerDiagnosticIsGolden(t *testing.T) {
 		t.Parallel()
 		b := transport.NewBuilder()
 		var h app.Handler[registerUser, userDTO]
-		transport.OnEvent(b.For("user"), "user.registered", h)
+		b.For("user").OnEvent("user.registered", h)
 		_, err := b.Table()
 		if err == nil {
 			t.Fatal("a nil handler built a table")
@@ -1057,7 +1057,7 @@ func TestNilHandlerDiagnosticIsGolden(t *testing.T) {
 		t.Parallel()
 		b := transport.NewBuilder()
 		var h app.Handler[registerUser, userDTO]
-		transport.Method(b.For("user"), "user.v1.UserService/Register", h)
+		b.For("user").Method("user.v1.UserService/Register", h)
 		_, err := b.Table()
 		if err == nil {
 			t.Fatal("a nil handler built a table")
@@ -1068,7 +1068,7 @@ func TestNilHandlerDiagnosticIsGolden(t *testing.T) {
 	t.Run("raw", func(t *testing.T) {
 		t.Parallel()
 		b := transport.NewBuilder()
-		transport.Raw(b.For("user"), transport.ProtocolHTTP, "POST /uploads", nil)
+		b.For("user").Raw(transport.ProtocolHTTP, "POST /uploads", nil)
 		_, err := b.Table()
 		if err == nil {
 			t.Fatal("a nil raw handler built a table")
@@ -1086,11 +1086,11 @@ func TestNilHandlerJoinsOtherRegistrationFailures(t *testing.T) {
 	b := transport.NewBuilder()
 	r := b.For("user")
 	var h app.Handler[registerUser, userDTO]
-	transport.Post(r, "/users", h)
+	r.Post("/users", h)
 	good := app.Handler[registerUser, userDTO](app.HandlerFunc[registerUser, userDTO](
 		func(context.Context, registerUser) (userDTO, error) { return userDTO{}, nil }))
-	transport.Get(r, "/users/{id}", good)
-	transport.Get(r, "/users/{id}", good)
+	r.Get("/users/{id}", good)
+	r.Get("/users/{id}", good)
 
 	_, err := b.Table()
 	if err == nil {
@@ -1119,11 +1119,11 @@ func TestEveryJoinedFailureLeadsWithItsOwnHeadline(t *testing.T) {
 	b := transport.NewBuilder()
 	r := b.For("user")
 	var nilHandler app.Handler[registerUser, userDTO]
-	transport.Post(r, "/users", nilHandler)
+	r.Post("/users", nilHandler)
 	good := app.Handler[registerUser, userDTO](app.HandlerFunc[registerUser, userDTO](
 		func(context.Context, registerUser) (userDTO, error) { return userDTO{}, nil }))
-	transport.Get(r, "/users/{id}", good)
-	transport.Get(r, "/users/{id}", good)
+	r.Get("/users/{id}", good)
+	r.Get("/users/{id}", good)
 
 	_, err := b.Table()
 	if err == nil {
@@ -1159,5 +1159,94 @@ func TestEveryJoinedFailureLeadsWithItsOwnHeadline(t *testing.T) {
 	}
 	if len(seen) > 1 {
 		t.Errorf("the joined failures sit at %d different indents, so one nests under another: %v\n%s", len(seen), seen, report)
+	}
+}
+
+// concreteRegisterHandler is a CONCRETE handler struct — not an
+// app.HandlerFunc — because that is the case warren.md once claimed inference
+// could not cover. TestRegistrationNeedsNoTypeArguments is the standing proof
+// that it can.
+type concreteRegisterHandler struct{}
+
+func (concreteRegisterHandler) Handle(context.Context, registerUser) (userDTO, error) {
+	return userDTO{ID: "u1"}, nil
+}
+
+// TestRegistrationNeedsNoTypeArguments pins §3.5's headline ergonomic claim:
+// every registration method infers [Req, Res] from the handler, so a call site
+// writes none. This is a COMPILE-TIME assertion — if inference regressed, this
+// file would not build, which is the point. warren.md carried the opposite
+// claim ("explicit type arguments are mandatory in both shapes") until
+// 2026-08-29; this test exists so that error cannot come back unnoticed.
+func TestRegistrationNeedsNoTypeArguments(t *testing.T) {
+	t.Parallel()
+
+	b := transport.NewBuilder()
+	r := b.For("user")
+	h := concreteRegisterHandler{}
+
+	r.Post("/users", h)
+	r.Get("/users/{id}", h)
+	r.Put("/users/{id}", h)
+	r.Patch("/users/{id}", h)
+	r.Delete("/users/{id}", h)
+	r.Method("user.v1.UserService/Register", h)
+	r.OnEvent("user.registered", h)
+
+	if err := b.Failures(); err != nil {
+		t.Fatalf("registration failed: %v", err)
+	}
+	table, err := b.Table()
+	if err != nil {
+		t.Fatalf("Table: %v", err)
+	}
+	if got := len(table.HTTP()); got != 5 {
+		t.Errorf("5 HTTP routes registered with no type arguments, table has %d", got)
+	}
+	if got := len(table.GRPC()); got != 1 {
+		t.Errorf("1 gRPC route registered with no type arguments, table has %d", got)
+	}
+	if got := len(table.Events()); got != 1 {
+		t.Errorf("1 event subscription registered with no type arguments, table has %d", got)
+	}
+}
+
+// TestZeroRegistrarPanicsWithItsOwnDiagnostic covers the one case option A
+// introduced: making Registrar concrete made `var r transport.Registrar`
+// constructible for the first time. Unguarded it would nil-dereference r.b,
+// which is a strictly worse diagnostic than the "foreign Registrar" panics
+// this replaced. Every entry point must refuse it by name.
+func TestZeroRegistrarPanicsWithItsOwnDiagnostic(t *testing.T) {
+	t.Parallel()
+
+	const want = "zero Registrar"
+
+	for _, tc := range []struct {
+		name string
+		call func(r *transport.Registrar)
+	}{
+		{"Get", func(r *transport.Registrar) { r.Get("/x", concreteRegisterHandler{}) }},
+		{"Post", func(r *transport.Registrar) { r.Post("/x", concreteRegisterHandler{}) }},
+		{"Put", func(r *transport.Registrar) { r.Put("/x", concreteRegisterHandler{}) }},
+		{"Patch", func(r *transport.Registrar) { r.Patch("/x", concreteRegisterHandler{}) }},
+		{"Delete", func(r *transport.Registrar) { r.Delete("/x", concreteRegisterHandler{}) }},
+		{"Method", func(r *transport.Registrar) { r.Method("p.S/M", concreteRegisterHandler{}) }},
+		{"OnEvent", func(r *transport.Registrar) { r.OnEvent("t", concreteRegisterHandler{}) }},
+		{"Raw", func(r *transport.Registrar) { r.Raw(transport.ProtocolHTTP, "POST /x", &uploadHandler{}) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			defer func() {
+				got, ok := recover().(string)
+				if !ok {
+					t.Fatalf("%s on a zero Registrar did not panic with a string", tc.name)
+				}
+				if !strings.Contains(got, want) {
+					t.Errorf("panic must name the cause %q, got:\n%s", want, got)
+				}
+			}()
+			var zero transport.Registrar
+			tc.call(&zero)
+		})
 	}
 }

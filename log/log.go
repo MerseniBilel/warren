@@ -11,6 +11,7 @@ package log
 import (
 	"context"
 	"log/slog"
+	"slices"
 )
 
 type loggerKey struct{}
@@ -208,8 +209,7 @@ func (c *contextHandler) regroup(r slog.Record) slog.Attr {
 		inner = append(inner, a)
 		return true
 	})
-	for i := len(c.deferred) - 1; i >= 0; i-- {
-		op := c.deferred[i]
+	for _, op := range slices.Backward(c.deferred) {
 		if op.group == "" {
 			// Attributes added under the group they follow, so they sit
 			// beside the record's own rather than around them.

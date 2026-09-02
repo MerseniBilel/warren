@@ -130,8 +130,8 @@ func TestRingPosition(t *testing.T) {
 	// CONTRACTS package may see (§1.1). No kgo, no amqp, no OTel, ever.
 	allowed := map[string]bool{
 		"context": true, "errors": true, "fmt": true, "maps": true,
-		"math/rand/v2": true, "strconv": true, "strings": true,
-		"sync": true, "time": true,
+		"math/rand/v2": true, "slices": true, "strconv": true,
+		"strings": true, "sync": true, "time": true,
 		// runtime/debug is stdlib, and Recover needs it for the same reason
 		// transport/http does: a panic's stack exists only in the frame that
 		// recovers it. The invariant here is "no driver, no OTel" — this list

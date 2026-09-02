@@ -100,9 +100,16 @@ That is a per-route option, in the same position as the broker options of §5.1
 own `Registrar` example registers the same route without the third argument, so
 the option parameter is variadic.
 
-**Nothing else is specified.** The signature of `RequireScope`, the type of the
-option it returns, and which of `HTTPRegistrar`/`GRPCRegistrar`/`EventRegistrar`
-accept it are all absent. Provisionally, and pending Open question 1:
+**Nothing else is specified.** The signature of `RequireScope` and the type of
+the option it returns are absent. Provisionally, and pending Open question 1:
+
+> **Corrected 2026-08-29.** This paragraph used to ask which of
+> `HTTPRegistrar`/`GRPCRegistrar`/`EventRegistrar` accepts the option. §3.5
+> shipped **one** `Registrar`, not three, and the sub-registrar shape above
+> (`r.Events().On(...)`, `r.GRPC()`) was never built — registration is
+> `r.Get`/`r.Post`/`r.Method`/`r.OnEvent` as generic methods on the single
+> concrete `Registrar`. Read the examples in this spec as illustrative of
+> intent, not of the shipped API.
 
 ```go
 // Package auth validates caller credentials at the transport edge, places the
@@ -213,16 +220,22 @@ credential in transport envelope
 warren.md gives this package one paragraph and one line of code. Most of it is
 undetermined, and none of it should be guessed.
 
-1. **What is the option type returned by `RequireScope`?** §7.2 passes it to
-   `r.HTTP().Get`, but §3.5's `Registrar` shows no options parameter at all, and
-   §5.1's consumer options are `broker.*`. Is there one shared route-option type
-   in `transport`, one per registrar, or does each package define its own?
-2. **What is the identity type on the context, and how is it read back?**
-   "Identity lands on the context" is the whole seam between the two rings and
-   warren.md names neither a type nor an accessor. Is it a struct, an interface,
-   or a claims map? Which package declares it — `auth` is an adapter, so a
-   handler reading identity from it would import an adapter.
-3. **What is `policy` in `app.Authorized(policy)`?** Its type must live in the
+1. **RESOLVED (2026-08-29).** *What is the option type returned by
+   `RequireScope`?* — `transport.RouteOption`. There is ONE shared route-option
+   type, and every registration method takes `opts ...RouteOption`; the guard
+   form is `transport.Guard(policy)`. The question reasoned from two premises
+   that are both now false: it said §3.5's `Registrar` "shows no options
+   parameter at all" (it does, on all eight methods) and it referenced
+   `r.HTTP().Get`, a sub-registrar shape that was never built.
+2. **RESOLVED (2026-08-29).** *What is the identity type on the context?* —
+   `app.Identity`, a struct, declared in `app` precisely so a handler reading
+   it imports no adapter. Read it with `app.IdentityFromContext(ctx)` and typed claims
+   with the generic free function `app.Claim[T]`.
+3. **RESOLVED, and the spec already answered it below.** *What is `policy` in
+   `app.Authorized(policy)`?* — `app.AuthorizationPolicy`. Marked here on
+   2026-08-29 because the status table said questions 1–3 were resolved while
+   this section still listed them open, which is the drift AGENT.md's spec
+   rule 4 exists to stop. Its type must live in the
    core module for §3.2 to compile there, but a JWT-scope policy is an
    implementation, and core is stdlib-and-dig only (invariant 1) with zero
    implementations in contract packages (invariant 5). Same mechanism as

@@ -7,6 +7,7 @@ import (
 	"maps"
 	"math/rand/v2"
 	"runtime/debug"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -32,11 +33,11 @@ func Chain(h MessageHandler, mw ...Middleware) MessageHandler {
 	if h == nil {
 		panic("broker: Chain composed around a nil handler")
 	}
-	for i := len(mw) - 1; i >= 0; i-- {
-		if mw[i] == nil {
+	for i, m := range slices.Backward(mw) {
+		if m == nil {
 			panic(fmt.Sprintf("broker: Chain middleware %d of %d is nil — append a conditional middleware only when it is enabled", i+1, len(mw)))
 		}
-		h = mw[i](h)
+		h = m(h)
 		if h == nil {
 			panic(fmt.Sprintf("broker: middleware %d of %d returned a nil handler", i+1, len(mw)))
 		}

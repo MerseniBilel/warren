@@ -1,6 +1,6 @@
 module github.com/MerseniBilel/warren/validate/playground
 
-go 1.26.3
+go 1.27.0
 
 require (
 	github.com/MerseniBilel/warren v0.1.0

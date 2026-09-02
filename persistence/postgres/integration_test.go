@@ -1163,3 +1163,57 @@ func TestTheInboxMarkIsASeparateCommit(t *testing.T) {
 			"consumer that has no unit of work.", inboxXmin)
 	}
 }
+
+// TestCommitWithNoSinkIsRefusedAndWritesNothing is FT14-2 against a real
+// database, and it is the assertion the field test had to make by hand.
+//
+// Before the refusal, this exact configuration — postgres.Module with NO
+// WithOutbox, so no commit sink — committed the row and destroyed the events
+// the aggregate raised. The row was there, warren_outbox was empty, the
+// aggregate's pending queue was empty, and nothing anywhere reported it.
+func TestCommitWithNoSinkIsRefusedAndWritesNothing(t *testing.T) {
+	url := isolated(t)
+
+	// Deliberately NO WithOutbox: this is the configuration that used to lose
+	// events. bootApp always adds it, so the module is built by hand.
+	var (
+		db  postgres.DB
+		uow *postgres.UnitOfWork
+	)
+	pgModule := postgres.Module(postgres.DSN(url))
+	probe := warren.NewModule("probe",
+		warren.Imports(pgModule),
+		warren.Providers(func(d postgres.DB, u *postgres.UnitOfWork) *struct{} {
+			db, uow = d, u
+			return &struct{}{}
+		}),
+		warren.Eager[*struct{}](),
+	)
+	a := warren.New(probe)
+	ctx := context.Background()
+	if err := a.Start(ctx); err != nil {
+		t.Fatalf("boot: %v", err)
+	}
+	t.Cleanup(func() { _ = a.Stop(context.Background()) })
+
+	repo := userRepo{db: db}
+	err := uow.Do(ctx, func(ctx context.Context) error {
+		return repo.Save(ctx, newUser("u-1", "bob@example.com"))
+	})
+	if err == nil {
+		t.Fatal("the commit succeeded with no sink — the user's events were destroyed")
+	}
+	if !strings.Contains(err.Error(), "nowhere to put them") {
+		t.Errorf("unexpected error: %v", err)
+	}
+
+	// The refusal must ROLL BACK. A row that committed while its events were
+	// destroyed is exactly the half-done state this refusal prevents.
+	var n int
+	if qerr := db(ctx).QueryRow(ctx, "SELECT count(*) FROM users").Scan(&n); qerr != nil {
+		t.Fatalf("counting users: %v", qerr)
+	}
+	if n != 0 {
+		t.Errorf("users has %d rows after a refused commit — the write was not rolled back", n)
+	}
+}

@@ -5,7 +5,7 @@
       POST /users was registered with a nil handler
         in module "user"
 
-    transport.Post was given a nil app.Handler[Req, Res]. The usual cause is a
+    r.Post was given a nil app.Handler[Req, Res]. The usual cause is a
     controller field the constructor does not assign: the struct literal in
     NewController omits it, so the field is nil and Register passes that nil
     straight through.

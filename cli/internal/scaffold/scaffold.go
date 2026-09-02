@@ -155,8 +155,8 @@ func New(opts Options) error {
 }
 
 // goVersion is the toolchain the scaffold declares. It tracks the framework
-// (AGENT.md invariant 9: Go 1.27 on its release, 1.26.x until then).
-const goVersion = "1.26.3"
+// (AGENT.md invariant 9: Warren tracks the current Go major release).
+const goVersion = "1.27.0"
 
 // render executes every template, formatting the Go ones. A template that
 // produces unparseable Go is a bug in the CLI, not in the user's project, so
@@ -184,6 +184,13 @@ var driverOnly = map[string]driverTemplate{
 	"internal__platform__module_postgres.go.tmpl": {
 		db: "postgres", as: "internal__platform__module.go.tmpl",
 	},
+	// A postgres project gets the memory repository TOO, at its own path and
+	// under its own name. It is what user.MemoryModule wires, so `go test`
+	// boots the feature with no database — the alternative, which shipped
+	// until 2026-08-29, was four tests that skipped and a suite that was
+	// green and empty.
+	"internal__modules__user__infrastructure__user_repository_memory.go.tmpl": {db: "postgres"},
+
 	"internal__modules__user__infrastructure__user_repository_postgres.go.tmpl": {
 		db: "postgres", as: "internal__modules__user__infrastructure__user_repository.go.tmpl",
 	},
@@ -340,12 +347,35 @@ func checkModulePath(path, name string) error {
 // what happened at v0.2.1, and what that test caught within the minute.
 const DefaultVersion = "v0.2.1"
 
+// unreleasedModules are modules of this repository that exist, are listed in
+// frameworkModules, and have deliberately NOT been tagged at DefaultVersion.
+// The value is why, and it is shown to a user who asks for one.
+//
+// This map is a confession, not a feature. A module in it cannot be reached
+// by `go get` at all, so `--framework` is the only route to it — which is the
+// exact opposite of the happy path invariant 8 exists to protect, and the
+// reason each entry carries a reason rather than only a name.
+//
+// It is held to be TRUE in both directions by TestUnreleasedModulesAreUntagged:
+// an entry here that turns out to be tagged fails, so releasing a module and
+// forgetting to delete its line is caught rather than silently suppressing
+// the check for a module that no longer needs suppressing.
+var unreleasedModules = map[string]string{
+	"/openapi": "implemented 2026-08-29 and never tagged; README lists it as " +
+		"shipped, so field test #14 wired it up, got no replace directive for " +
+		"it, and resolved it from the proxy while the other six came from the " +
+		"checkout — two versions of the framework in one build",
+}
+
 // frameworkModules is every Warren module, as a path suffix. EVERY one, not
 // only those a given scaffold requires today: a replace for an unrequired
 // module is inert, but the moment a user runs `go get` for one that is
 // missing it resolves from GITHUB instead of the local checkout, silently,
 // and they are running two versions of the framework at once. A field test
-// hit exactly that with validate/playground.
+// hit exactly that with validate/playground, and field test #14 hit it again
+// with openapi — the same defect, in the same list, three lines under the
+// comment explaining why it must not happen. A comment is not an enforcement
+// mechanism: TestFrameworkModulesCoversTheWorkspace is.
 var frameworkModules = []string{
 	"",
 	"/transport/http",
@@ -353,6 +383,7 @@ var frameworkModules = []string{
 	"/observability",
 	"/broker/kafka",
 	"/validate/playground",
+	"/openapi",
 }
 
 // Replaces renders a replace directive per framework module, each prefixed

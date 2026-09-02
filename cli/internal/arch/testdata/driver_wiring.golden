@@ -1,0 +1,28 @@
+✗ handler imports a driver
+
+    internal/modules/orders/application/place.go:3
+      package example.com/fix/internal/modules/orders/application          (layer: application)
+        imports github.com/MerseniBilel/warren/observability
+
+  This is a wiring module, not an API:
+
+      github.com/MerseniBilel/warren/observability
+
+  installs the exporters and composes app.Traced and app.Metered around
+  every route at BOOT (warren.md §7.1). A handler that imports it changes
+  nothing about what it is instrumented with, and pays for the module's
+  transitive dependencies in every build that names it.
+
+  Fix one of:
+    • A handler that needs a SPAN takes the tracer from OpenTelemetry's own
+      global provider, which this module has already configured at boot.
+      No Warren import is involved.
+    • Correlation fields — trace_id, span_id, correlation_id — are already
+      on log.FromContext(ctx). Log through it and they are there, with no
+      import at all.
+    • Everything else the module exposes is setup, and setup belongs in
+      main.go.
+
+1 violation(s) in 1 packages.
+
+  Checked 1 feature module for cross-module imports.

@@ -473,12 +473,6 @@ func (r *Relay) Run(ctx context.Context) error {
 				waitCtx, cancelWait := context.WithCancel(ctx)
 				waited := make(chan struct{})
 				go func() { waiter.Wait(waitCtx); close(waited) }()
-				if !timer.Stop() {
-					select {
-					case <-timer.C:
-					default:
-					}
-				}
 				timer.Reset(r.poll)
 				stopping := false
 				select {
@@ -499,12 +493,6 @@ func (r *Relay) Run(ctx context.Context) error {
 				continue
 			}
 
-			if !timer.Stop() {
-				select {
-				case <-timer.C:
-				default:
-				}
-			}
 			timer.Reset(r.poll)
 			select {
 			case <-timer.C:

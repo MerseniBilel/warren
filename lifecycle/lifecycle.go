@@ -34,6 +34,14 @@ import (
 // application's own error path with a "✗ lifecycle hook panicked" block, not
 // through a Go stack dump.
 //
+// A hook that EXITS without returning is contained the same way, with the
+// same rollback and the same drain, and reported as "✗ lifecycle hook exited
+// without returning". That is runtime.Goexit — and t.Fatal, t.Fatalf,
+// t.FailNow and t.Skip are all runtime.Goexit, so an assertion written inside
+// a hook lands here. recover() sees nil on such an exit, so Warren can report
+// that the hook ended but never why; assert outside the hook, or return an
+// error.
+//
 // A panic in a goroutine the hook SPAWNED is not Warren's to catch — Go
 // gives no one but that goroutine the chance — so a hook that starts a loop
 // recovers inside it or the process dies. This is the same goroutine whose
@@ -282,24 +290,45 @@ func runHook(ctx context.Context, h Hook, fn func(context.Context) error, phase 
 
 	done := make(chan error, 1)
 	go func() {
+		// The report is sent from a DEFERRED function because panics.Do is not
+		// guaranteed to return: runtime.Goexit runs the deferred recover, which
+		// sees nil, and then terminates this goroutine, so every statement
+		// after the call is dead. A plain send there left nobody to wake the
+		// select below and the boot hung forever, with no diagnostic and no
+		// timeout — and t.Fatal, t.Fatalf, t.FailNow and t.Skip are all
+		// runtime.Goexit, so an assertion in a hook was enough to cause it.
+		// done is buffered with one sender, so neither send can block.
+		var err error
+		var returned bool
+		defer func() {
+			if !returned {
+				done <- errHookExited(h.Name, phase)
+			}
+		}()
+
 		// The containment is INSIDE the goroutine because that is the only
 		// place the panic can be caught: it is raised on a stack Warren
 		// created, and the user's own main never sees it. Without this a
 		// panicking OnStart skipped the rollback three documents guarantee and
 		// a panicking OnStop abandoned the rest of the drain — the process
 		// died holding whatever the hooks below it had acquired.
-		var err error
 		if caught := panics.Do(func() { err = fn(hctx) }); caught != nil {
 			err = errHookPanicked(h.Name, phase, caught)
 		}
+		returned = true
 		done <- err
 	}()
 
 	classify := func(err error) error {
 		var panicked *hookPanickedError
+		var exited *hookExitedError
 		switch {
 		case err == nil:
 			return nil
+		case errors.As(err, &exited):
+			// The hook's goroutine is gone, not wedged: this is neither a
+			// timeout nor an abandonment, and it is already the diagnostic.
+			return err
 		case errors.As(err, &panicked):
 			// Already the diagnostic, and already the right classification:
 			// the goroutine RETURNED, so this is neither a timeout nor an
@@ -399,6 +428,79 @@ func errHookPanicked(name, phase string, caught *panics.Caught) error {
 	// never the answer to "where did this come from".
 	block := caught.Diagnostic("lifecycle hook panicked", detail, "github.com/MerseniBilel/warren/lifecycle.")
 	return &hookPanickedError{name: name, phase: phase, text: block.Error()}
+}
+
+// hookExitedError is a hook whose goroutine terminated without returning and
+// without panicking — runtime.Goexit, which is what t.Fatal, t.Fatalf,
+// t.FailNow and t.Skip all are. Like hookPanickedError its message is the
+// whole rendered diagnostic.
+//
+// It is deliberately NOT hookAbandonedError. "Abandoned" means "we stopped
+// waiting; the hook may still be running", and its remedy is about timeouts.
+// This is the opposite: nothing is still running, the hook exited. Reusing the
+// other sentinel would send a reader hunting a hang that does not exist.
+type hookExitedError struct {
+	name  string
+	phase string
+	text  string
+}
+
+func (e *hookExitedError) Error() string { return e.text }
+
+// errHookExited renders a hook's Goexit as the boot- or drain-time
+// diagnostic. Like the panic pair the two phases differ in one paragraph, for
+// the same reason: OnStart rolled back, OnStop did not abandon the rest.
+//
+// It names t.Fatal explicitly because the overwhelmingly likely reader is
+// someone whose test just died at the binary timeout with the assertion
+// message destroyed — the exit is all Warren has left to report.
+func errHookExited(name, phase string) error {
+	var intro, remedy string
+	if phase == "OnStop" {
+		intro = fmt.Sprintf("Hook %q ended its goroutine during OnStop without\n", name) +
+			"returning and without panicking. The remaining hooks were stopped anyway —\n" +
+			"shutdown does not abandon the drain because one hook failed — and this is\n" +
+			"reported with whatever else failed on the way down. The resources this hook\n" +
+			"owns may not have been released."
+		remedy = "is reported the same way"
+	} else {
+		intro = fmt.Sprintf("Hook %q ended its goroutine during %s without\n", name, phase) +
+			"returning and without panicking, so Warren stopped the hooks that had\n" +
+			"already started, in reverse order, and the process never opened readiness."
+		remedy = "gets the same rollback"
+	}
+	detail := intro + "\n" +
+		"\n" +
+		"That is what runtime.Goexit does — and t.Fatal, t.Fatalf, t.FailNow and\n" +
+		"t.Skip are all runtime.Goexit. An assertion inside a lifecycle hook ends the\n" +
+		"hook's goroutine where it stands, and recover() sees nil on the way out, so\n" +
+		"Warren reports the exit and cannot report its cause: the message you wrote\n" +
+		"is already gone.\n" +
+		"\n" +
+		"Two ways to fix it:\n" +
+		"\n" +
+		"  • Assert outside the hook. Let the hook record what it saw and return,\n" +
+		"    then call t.Fatal from the test's own goroutine, where the message\n" +
+		"    survives.\n" +
+		"  • Return an error instead of failing inside the hook. A hook that returns\n" +
+		"    an error " + remedy + ", and the error reaches you intact."
+	return &hookExitedError{name: name, phase: phase, text: exitedBlock(detail)}
+}
+
+// exitedBlock renders the diagnostic. It is panics.Caught.Diagnostic's shape —
+// "✗ headline", then the detail indented two spaces — minus the value and the
+// stack, because a hook that called runtime.Goexit leaves neither.
+func exitedBlock(detail string) string {
+	var b strings.Builder
+	b.WriteString("✗ lifecycle hook exited without returning\n\n")
+	for _, line := range strings.Split(strings.TrimRight(detail, "\n"), "\n") {
+		if line == "" {
+			b.WriteString("\n")
+			continue
+		}
+		b.WriteString("  " + line + "\n")
+	}
+	return strings.TrimRight(b.String(), "\n")
 }
 
 type hookTimeoutError struct {

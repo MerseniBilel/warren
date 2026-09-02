@@ -179,9 +179,26 @@ done
 # config/yaml's File, a module deliberately not built yet, and a manifest is
 # allowed to describe what is coming. That direction stays a review matter.
 #
+# METHODS COUNT. Both sides used to match /^func [A-Z]/, which sees a
+# free function and nothing else. That was harmless until the Go 1.27
+# migration turned transport's seven registration verbs into methods on
+# Registrar: they begin "func (", so they vanished from BOTH sides at once
+# and the comparison went quietly green over a package whose entire public
+# surface it had stopped reading. It stayed green while §3.5 drifted — the
+# block still documented Put/Patch/Delete as free functions taking a
+# Registrar, and Builder.For as returning a value rather than a pointer.
+# A check that silently stops checking is worse than no check.
+#
 # Narrow by design: only sections that CHOSE to publish a Surface block are
 # held to completeness. Packages documented in prose are not forced into a
 # block by this check — that is an editorial decision, not a mechanical one.
+# Strip a method receiver, then take every exported name. Handles both
+# "func New(...)" and "func (r *Registrar) Get[Req, Res any](...)".
+exported_funcs() {
+	sed -E 's/^func \([^)]*\) /func /' |
+		grep -oE '^func [A-Z][A-Za-z0-9_]*' | awk '{print $2}' | sort -u
+}
+
 for pkg in $(awk '
 	function flush() { if (cur != "" && has) print cur }
 	/^### / {
@@ -203,8 +220,8 @@ for pkg in $(awk '
 		seen && !inblk && /^```/ { inblk = 1; next }
 		inblk && /^```/ { inblk = 0; next }
 		inblk { print }
-	' warren.md | grep -oE '^func [A-Z][A-Za-z0-9_]*' | awk '{print $2}' | sort -u)
-	real=$(go doc -all "$dir" 2>/dev/null | grep -oE '^func [A-Z][A-Za-z0-9_]*' | awk '{print $2}' | sort -u)
+	' warren.md | exported_funcs)
+	real=$(go doc -all "$dir" 2>/dev/null | exported_funcs)
 	undocumented=$(comm -13 <(echo "$declared") <(echo "$real"))
 	if [ -n "$undocumented" ]; then
 		echo "doc drift: $pkg exports functions its warren.md Surface block omits:"

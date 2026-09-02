@@ -83,7 +83,12 @@ To run it:
 		db  postgres.DB
 		uow *postgres.UnitOfWork
 	)
-	pg := postgres.Module(postgres.DSN(dsn))
+	// WithOutbox() is not optional here. Without a commit sink the unit of
+	// work REFUSES any transaction that raised events — because dropping
+	// them is silent and permanent — so a contract test without it would
+	// ship in a configuration the generated application itself rejects.
+	// The outbox table is already created by the Migrate call above.
+	pg := postgres.Module(postgres.DSN(dsn), postgres.WithOutbox())
 	probe := warren.NewModule("user_contract",
 		warren.Imports(pg),
 		warren.Providers(func(d postgres.DB, u *postgres.UnitOfWork) *userContractProbe {

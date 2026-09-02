@@ -24,6 +24,10 @@ func statusFor(code errors.Code) int {
 	switch code {
 	case errors.CodeInvalid:
 		return http.StatusBadRequest
+	case errors.CodeUnsupportedMedia:
+		return http.StatusUnsupportedMediaType
+	case errors.CodeMethodNotAllowed:
+		return http.StatusMethodNotAllowed
 	case errors.CodeNotFound:
 		return http.StatusNotFound
 	case errors.CodeConflict, errors.CodeContention:
@@ -105,6 +109,33 @@ func writeError(w http.ResponseWriter, r *http.Request, err error) {
 		body.Message = werr.Message()
 		body.Details = werr.Details()
 	}
+	if code == errors.CodePermissionDenied || code == errors.CodeUnauthenticated {
+		// A denial says as little as possible on the wire, deliberately: the
+		// response must not describe the authorization model to a caller who
+		// just failed it. That leaves the operator with nothing either — and
+		// a scope typo, the most common auth bug there is, then has no
+		// diagnosis at all.
+		//
+		// So the full reason goes to the LOG, at DEBUG, correlated with the
+		// response by the same id the body carries. Off in production by
+		// default, on when someone is actually debugging, and never on the
+		// wire.
+		log.FromContext(ctx).DebugContext(ctx, "request denied",
+			"code", string(code), "reason", err.Error(), "path", r.URL.Path, "method", r.Method)
+	}
+	if code == errors.CodeContention {
+		// CONTENTION and CONFLICT share 409 deliberately (see statusFor), and
+		// the code field is how a client tells them apart. But 409 by itself
+		// says "do not retry" in RFC terms, and CONTENTION is precisely the
+		// retryable one — app.Retrying retries it, and RetryingOn(p,
+		// CodeConflict) is a boot panic to keep the two from being confused.
+		//
+		// Retry-After carries that distinction to clients that read headers
+		// rather than bodies, without moving the status. 0 means "at once":
+		// a contended write lost a race, and the next attempt is not rate
+		// limited.
+		w.Header().Set("Retry-After", "0")
+	}
 	writeJSON(w, statusFor(code), errorBody{Error: body})
 }
 
@@ -128,7 +159,11 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	}
 	w.Header()[contentType] = jsonContentType
 	w.WriteHeader(status)
-	_, _ = w.Write(buf)
+	// The trailing newline is what encoding/json.Encoder writes and what
+	// every line-oriented tool expects. Without it a curl body runs straight
+	// into the next shell prompt, which is felt on every hand-driven request
+	// during development — the framework's most-used debugging tool.
+	_, _ = w.Write(append(buf, '\n'))
 }
 
 // Canonical key and a shared value, assigned straight into the header map:
@@ -197,7 +232,7 @@ func (s *server) typed(rt transport.HTTPRoute) http.Handler {
 		// posts a body without the header.
 		if ct := r.Header.Get(contentType); checkMedia && ct != "" && !mediaMatches(ct, media) {
 			writeJSON(w, http.StatusUnsupportedMediaType, errorBody{Error: errorPayload{
-				Code:          string(errors.CodeInvalid),
+				Code:          string(errors.CodeUnsupportedMedia),
 				Message:       "unsupported media type " + ct + "; this route accepts " + media,
 				CorrelationID: log.CorrelationID(ctx),
 			}})
@@ -247,7 +282,12 @@ func (s *server) typed(rt transport.HTTPRoute) http.Handler {
 		// net/http, which computes it for a response it can buffer.
 		w.Header()[contentType] = jsonContentType
 		w.WriteHeader(success)
-		_, _ = w.Write(out)
+		// Trailing newline, for the same reason writeJSON adds one: every
+		// body this framework emits ends with it, so a curl during
+		// development does not run into the shell prompt. Consistency across
+		// the success and error paths is the point — a client that trims one
+		// and not the other is the bug this avoids.
+		_, _ = w.Write(append(out, '\n'))
 	})
 }
 
@@ -287,14 +327,22 @@ func (s *server) raw(rr transport.RawRoute, h http.Handler) http.Handler {
 func (s *server) methodNotAllowed(allow string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Allow", allow)
-		// INVALID, not NOT_FOUND. The path EXISTS — the Allow header above
-		// lists the verbs it answers — so telling the client the resource was
-		// not found is a lie it acts on: a client switching on error.code
-		// concludes the thing is gone and stops asking. §2.6's table maps the
-		// codes HANDLERS raise; a 405 is decided by the adapter before any
-		// handler is reached, and INVALID is the honest one of those codes.
+		// METHOD_NOT_ALLOWED, and emphatically not NOT_FOUND. The path EXISTS
+		// — the Allow header above lists the verbs it answers — so telling
+		// the client the resource was not found is a lie it acts on: a client
+		// switching on error.code concludes the thing is gone and stops
+		// asking.
+		//
+		// It was INVALID until 2026-08-29, on the reasoning that §2.6's table
+		// maps the codes HANDLERS raise and a 405 is decided by the adapter
+		// before any handler runs, so INVALID was "the honest one of those
+		// codes". That was the wrong conclusion from a correct premise: the
+		// answer to a code the table lacked was to add it, not to overload
+		// one whose meaning is "change the request before retrying". A client
+		// could not tell a wrong METHOD from a malformed body, which have
+		// nothing in common as remedies — the same defect the 415 carried.
 		writeJSON(w, http.StatusMethodNotAllowed, errorBody{Error: errorPayload{
-			Code:          string(errors.CodeInvalid),
+			Code:          string(errors.CodeMethodNotAllowed),
 			Message:       r.Method + " is not allowed on " + r.URL.Path,
 			CorrelationID: log.CorrelationID(r.Context()),
 		}})

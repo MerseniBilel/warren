@@ -18,7 +18,9 @@ type NewDriver[T domain.Root[K], K domain.ID] func(t *testing.T) (UnitOfWork, Re
 // driver here, Postgres and Mongo behind a build tag. It asserts only what
 // every driver can promise: identity round-trips, NOT_FOUND is a code and
 // not a nil, a rolled-back transaction leaves nothing behind, and Save
-// enlists the aggregate so its events reach the outbox.
+// enlists the aggregate, and that the events it raised are DELIVERED to a
+// commit sink rather than merely drained — the two are different, and only
+// the second is what "reaches the outbox" means.
 //
 // newAggregate builds a fresh aggregate with the given identity and at least
 // one pending event. The suite calls it with DISTINCT, non-zero identities —
@@ -224,14 +226,72 @@ func RunContract[T domain.Root[K], K domain.ID](t *testing.T, newDriver NewDrive
 		}
 		drained = agg.PullEvents()
 		if len(drained) != 0 {
-			t.Errorf("%d events were still pending after commit — Save did not Track, so they never reached the outbox", len(drained))
+			// DRAINING, not delivery. An empty queue says the unit of work
+			// pulled the events; it says nothing about where they went. That
+			// distinction is why this assertion could not catch a driver that
+			// drained and dropped, and why the delivery subtest below exists.
+			t.Errorf("%d events were still pending after commit — Save did not Track, so the unit of work never drained them", len(drained))
+		}
+	})
+
+	// The subtest the suite was missing, and the reason a driver could drain
+	// an aggregate's events and destroy them while every other assertion here
+	// passed. "Pending queue is empty" is equally true of events that reached
+	// the outbox and events that reached the floor.
+	t.Run("Save's events are DELIVERED to a commit sink", func(t *testing.T) {
+		uow, repo := newDriver(t)
+		source, ok := uow.(EventSource)
+		if !ok {
+			t.Fatal(errNotAnEventSource)
+		}
+
+		var (
+			mu       sync.Mutex
+			got      [][]domain.Event
+			duringDo bool
+		)
+		source.OnCommit(func(_ context.Context, events []domain.Event) error {
+			mu.Lock()
+			defer mu.Unlock()
+			got = append(got, events)
+			duringDo = true
+			return nil
+		})
+
+		agg := newAggregate(first)
+		want := len(agg.PullEvents())
+		agg = newAggregate(first) // PullEvents was destructive; build a fresh one
+		if err := uow.Do(context.Background(), func(ctx context.Context) error {
+			return repo.Save(ctx, agg)
+		}); err != nil {
+			t.Fatalf("Do: %v", err)
+		}
+
+		mu.Lock()
+		defer mu.Unlock()
+		if !duringDo {
+			t.Fatal("the commit sink never ran — the events this aggregate raised were destroyed at commit")
+		}
+		if len(got) != 1 {
+			t.Fatalf("the sink ran %d times, want exactly 1 — events must be delivered once", len(got))
+		}
+		if len(got[0]) != want {
+			t.Errorf("the sink received %d events, want %d — the aggregate's own", len(got[0]), want)
 		}
 	})
 }
 
+// errNotAnEventSource is the failure a driver sees when it drains events and
+// has nowhere to put them. It is a Fatal rather than a Skip because a driver
+// that cannot deliver is not an incomplete driver — it is one that destroys
+// every event a handler raises, silently, at commit.
+const errNotAnEventSource = `this unit of work does not implement persistence.EventSource, so it has
+nowhere to deliver the events it drains — every event a handler raises is
+destroyed at commit. Add: func (u *T) OnCommit(fn persistence.EventSink)`
+
 // versionedContractIDs is how many distinct identities RunVersionedContract
 // needs: one per subtest.
-const versionedContractIDs = 7
+const versionedContractIDs = 8
 
 // RunVersionedContract certifies a driver's optimistic concurrency, and is
 // run IN ADDITION to RunContract by drivers whose aggregates embed
@@ -294,6 +354,41 @@ func RunVersionedContract[T domain.Root[K], K domain.ID](t *testing.T, newDriver
 		// makes the next save in the same request look like an insert.
 		if got := any(agg).(domain.Versioned).Version(); got != 1 {
 			t.Errorf("version = %d after the first save, want 1 — the driver did not advance the aggregate it just wrote", got)
+		}
+	})
+
+	// The subtest the suite was missing, and the reason two drivers could
+	// implement domain.Versioned differently for months without anything
+	// noticing. Every assertion around it measures AFTER the commit, where
+	// both drivers agree; the divergence was visible only from INSIDE the
+	// transaction, which is the one place a handler can act on it.
+	t.Run("the version is advanced INSIDE the transaction, not only at commit", func(t *testing.T) {
+		uow, repo := newDriver(t)
+		agg := newAggregate(next())
+
+		var insideDo int64
+		if err := uow.Do(context.Background(), func(ctx context.Context) error {
+			if err := repo.Save(ctx, agg); err != nil {
+				return err
+			}
+			insideDo = any(agg).(domain.Versioned).Version()
+			return nil
+		}); err != nil {
+			t.Fatalf("Do: %v", err)
+		}
+
+		// domain.Versioned: a repository "sets it after a successful write".
+		// A handler building a view or an ETag from the aggregate it just
+		// saved reads it here — so a driver that waits for commit hands back
+		// a number that is already wrong.
+		if insideDo != 1 {
+			t.Errorf("version inside the transaction = %d after Save, want 1 — "+
+				"the driver advanced only at commit, so a handler reading the aggregate "+
+				"it just wrote sees the pre-write version", insideDo)
+		}
+		if after := any(agg).(domain.Versioned).Version(); after != insideDo {
+			t.Errorf("version changed from %d to %d between Save and the end of the commit — "+
+				"the two must agree, or the value a handler read was provisional", insideDo, after)
 		}
 	})
 
@@ -370,11 +465,11 @@ func RunVersionedContract[T domain.Root[K], K domain.ID](t *testing.T, newDriver
 		// OnCommit is on the concrete drivers, not on the port — the port
 		// deliberately does not expose sink registration to a handler, so a
 		// driver without it cannot have this defect.
-		sinker, ok := uow.(interface {
-			OnCommit(func(context.Context, []domain.Event) error)
-		})
+		sinker, ok := uow.(EventSource)
 		if !ok {
-			t.Skip("driver exposes no OnCommit; there is no sink to fire early")
+			// Was a Skip. A driver with no sink registration does not have
+			// "no window to observe" — it has nowhere to put what it drains.
+			t.Fatal(errNotAnEventSource)
 		}
 
 		var mu sync.Mutex

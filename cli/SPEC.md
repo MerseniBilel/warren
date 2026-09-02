@@ -479,7 +479,7 @@ and not `go/ast`.
       adopted; the other two rejected, and warren.md corrected to match.
 - [ ] `warren/cli` is its own module (§1.6) and appears in no other module's
       `go.mod`; no package outside it imports it.
-- [ ] No committed `replace` directive (invariant 8); Go 1.26, no `toolchain`
+- [ ] No committed `replace` directive (invariant 8); Go 1.27, no `toolchain`
       directive (invariant 9).
 - [ ] Templates embedded via `embed.FS` and ejectable.
 - [x] AST editor performs real AST-located edits; no regex or marker-comment

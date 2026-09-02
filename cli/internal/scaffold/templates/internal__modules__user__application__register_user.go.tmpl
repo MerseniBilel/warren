@@ -38,9 +38,15 @@ type registerUser struct {
 //
 // Transactional wraps the handler in the unit of work, so the user row and
 // the outbox row for UserRegistered commit together or not at all.
-func NewRegisterUserHandler(users domain.UserRepository, uow app.UnitOfWork) app.Handler[RegisterUser, UserView] {
+// NewRegisterUserHandler takes the CLOCK as a dependency rather than calling
+// time.Now inside the handler. That is the difference between a time-dependent
+// rule you can test — pass a closure over a fixed instant and assert an exact
+// result — and one you can only assert a range about and hope. platform.Module
+// provides app.Clock; this is the shape to copy for every handler that needs
+// the time.
+func NewRegisterUserHandler(users domain.UserRepository, uow app.UnitOfWork, clock app.Clock) app.Handler[RegisterUser, UserView] {
 	return app.Chain[RegisterUser, UserView](
-		&registerUser{users: users, now: time.Now},
+		&registerUser{users: users, now: clock},
 		app.Transactional[RegisterUser, UserView](uow),
 	)
 }

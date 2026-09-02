@@ -2,9 +2,20 @@ package domain
 
 // Versioned is the optional interface an aggregate implements to get
 // optimistic concurrency. A repository that finds it on a root writes the
-// version into the WHERE clause and reports errors.Conflict when the write
-// matches no row — which is what makes §3.3's CodeConflict reachable for a
-// real write conflict rather than only for a uniqueness violation.
+// version into the WHERE clause and reports errors.Contention when the write
+// matches no row.
+//
+// CONTENTION, not CONFLICT, and the difference decides what happens next: a
+// consumer ACKS a CONFLICT and destroys the message, and NACKS a CONTENTION so
+// it is redelivered. app.Retrying retries CONTENTION and RetryingOn(p,
+// CodeConflict) is a boot panic precisely to stop the two being confused.
+// Losing a version race is the retryable one — the same request may well
+// succeed on the next attempt against the version it now reads.
+//
+// This comment said CodeConflict until 2026-08-29, while errors.go, the
+// postgres driver, the memory driver and warren.md §3.3 all said CONTENTION.
+// CodeConflict remains right for a UNIQUENESS violation, which is a different
+// thing: a second attempt finds the row still there.
 //
 // It is optional, and deliberately so: the version costs a column, and an
 // aggregate whose writes are already serialised by something else — a single

@@ -1,5 +1,5 @@
 {{- if eq .DB "postgres" }}
-.PHONY: run migrate test fmt vet
+.PHONY: ci run migrate test fmt vet lint
 
 # A deploy step, run once before the new replicas start — never at boot.
 migrate:
@@ -8,11 +8,16 @@ migrate:
 run:
 	go run ./cmd/{{.Name}}
 {{- else }}
-.PHONY: run test fmt vet
+.PHONY: ci run test fmt vet lint
 
 run:
 	go run ./cmd/{{.Name}}
 {{- end }}
+
+# ci is what .github/workflows/ci.yml runs, and what to run before pushing.
+# It passes on a clean checkout with nothing exported and nothing installed
+# except Go — no database, no broker, no Docker.
+ci: fmt vet lint test
 
 test:
 	go test -race ./...
@@ -22,3 +27,12 @@ fmt:
 
 vet:
 	go vet ./...
+
+# The architecture rules, enforced. This is the check that makes the layering
+# real rather than aspirational: it refuses a domain package that imports
+# infrastructure, a handler that imports a transport, and one feature that
+# reaches into another.
+#
+# It needs the warren binary:  go install github.com/MerseniBilel/warren/cli/cmd/warren@latest
+lint:
+	warren lint arch

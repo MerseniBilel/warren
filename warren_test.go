@@ -82,9 +82,9 @@ type invoiceService struct{ repo userRepository }
 // the Register the boot now requires of everything listed in Controllers or
 // Consumers. Registering nothing is the point: these tests are about the
 // module graph, not about routes.
-func (*pool) Register(transport.Registrar)           {}
-func (*userService) Register(transport.Registrar)    {}
-func (*invoiceService) Register(transport.Registrar) {}
+func (*pool) Register(*transport.Registrar)           {}
+func (*userService) Register(*transport.Registrar)    {}
+func (*invoiceService) Register(*transport.Registrar) {}
 
 func TestNewModuleIsInert(t *testing.T) {
 	t.Parallel()

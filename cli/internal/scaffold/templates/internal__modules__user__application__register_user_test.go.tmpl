@@ -1,6 +1,7 @@
 package application_test
 
 import (
+	"time"
 	"context"
 	"testing"
 
@@ -40,7 +41,11 @@ func TestRegisterUserSavesAndRaises(t *testing.T) {
 	t.Parallel()
 
 	repo := &fakeRepo{existing: map[domain.Email]*domain.User{}}
-	h := application.NewRegisterUserHandler(repo, noopUoW{})
+	// The clock is a CLOSURE, not a fake type and not a mocking library.
+	// That is the payoff of app.Clock being a function type: a test that
+	// needs a fixed instant writes one line and asserts an exact value.
+	at := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	h := application.NewRegisterUserHandler(repo, noopUoW{}, func() time.Time { return at })
 
 	view, err := h.Handle(context.Background(), application.RegisterUser{
 		Email: "bob@example.com", Name: "Bob",

@@ -7,6 +7,8 @@
 package platform
 
 import (
+	"github.com/MerseniBilel/warren/domain"
+	"time"
 	"context"
 	"log/slog"
 {{- if eq .Broker "kafka" }}
@@ -39,20 +41,40 @@ var ConfigModule = sync.OnceValue(func() warren.Module {
 	return wconfig.Module[appconfig.Config](wconfig.WithEnvPrefix("{{.EnvPrefix}}"))
 })
 
-{{- if eq .Broker "kafka" }}
 
 // Broker is the messaging adapter, and it is a MODULE rather than a
 // constructor — which is why it is declared here and imported, not provided.
+//
+// A module is also the only thing that can CLAIM a protocol, and claiming
+// transport.ProtocolEvent is what makes a subscription registered with
+// r.OnEvent actually served. A service that registers one and imports no
+// broker fails its boot rather than dropping every message in silence.
 //
 // Anything that consumes events imports this module DIRECTLY, beside
 // platform: a module may export only what its own providers return, so
 // platform cannot import this and pass broker.Publisher on to its own
 // importers. Warren refuses that at boot and names this shape.
+{{- if eq .Broker "kafka" }}
 //
 // The seed list is read from the environment because kafka.Broker builds its
 // providers: its options are needed while the module graph is being DECLARED,
 // before the config module's value exists.
+{{- else }}
+//
+// It is the in-process driver: channels and goroutines, no network, and every
+// unacknowledged message lost when the process stops. That is the right trade
+// for development and for a modular monolith that accepts it; a service
+// needing durability scaffolds with --broker kafka.
+{{- end }}
 var Broker = sync.OnceValue(func() warren.Module {
+{{- if ne .Broker "kafka" }}
+	// The in-process broker as a MODULE, not as three hand-rolled providers.
+	// It claims transport.ProtocolEvent, which is what makes a subscription
+	// registered with r.OnEvent actually SERVED — and what makes a service
+	// that registers one and imports no broker fail its boot rather than
+	// drop every message in silence.
+	return memory.Module()
+{{- else }}
 	return kafka.Broker(
 		kafka.Brokers(seeds()...),
 		// One group per SERVICE, not per instance: that is what makes
@@ -69,7 +91,24 @@ var Broker = sync.OnceValue(func() warren.Module {
 		// one of each — and it is a poor first run.
 		kafka.AutoCreateTopics(),
 	)
+{{- end }}
 })
+{{- if eq .Broker "kafka" }}
+
+// Consumers SERVES the subscriptions registered with r.OnEvent. It is
+// separate from Broker because a service that only publishes should not
+// acquire a consumer group — a group holds partition assignments and
+// rebalances, and a member that never commits an offset slows every rebalance
+// for the services that do consume.
+//
+// The in-process driver needs no equivalent: memory.Module both provides the
+// ports and serves the table, because there is no group to acquire.
+var Consumers = sync.OnceValue(func() warren.Module {
+	return kafka.Consumers()
+})
+{{- end }}
+
+{{- if eq .Broker "kafka" }}
 
 // seeds reads the seed broker list.
 //
@@ -91,51 +130,50 @@ func seeds() []string {
 // boot error. sync.OnceValue reads like a function and yields one identity.
 var Module = sync.OnceValue(func() warren.Module {
 	return warren.NewModule("platform",
-		warren.Imports(ConfigModule(){{if eq .Broker "kafka"}}, Broker(){{end}}),
+		warren.Imports(ConfigModule(), Broker(){{if eq .Broker "kafka"}}, Consumers(){{end}}),
 		warren.Providers(
-{{- if ne .Broker "kafka" }}
-			newBroker,
-			publisher,
-			subscriber,
-{{- end }}
 			newInbox,
 			newOutboxStore,
 			newUnitOfWork,
 			unitOfWork,
 			appUnitOfWork,
+			clock,
+			ids,
 			newRelay,
 		),
-{{- if ne .Broker "kafka" }}
-		warren.Exports[broker.Publisher](),
-		warren.Exports[broker.Subscriber](),
-{{- end }}
 		warren.Exports[inbox.Store](),
 		warren.Exports[persistence.UnitOfWork](),
 		// The concrete unit of work too: the memory repository is built on
 		// it, and a real driver would export its own pool the same way.
 		warren.Exports[*persistence.MemoryUnitOfWork](),
 		warren.Exports[app.UnitOfWork](),
+		warren.Exports[app.Clock](),
+		warren.Exports[domain.IDs](),
 		// Nothing consumes the relay, so without Eager it would never be
 		// built — and the outbox would never drain.
 		warren.Eager[*outbox.Relay](),
 	)
 })
 
-{{- if ne .Broker "kafka" }}
+func unitOfWork(u *persistence.MemoryUnitOfWork) persistence.UnitOfWork { return u }
 
-// broker returns one in-process broker as both ports. Two constructors would
-// build two brokers, and the publisher's messages would never reach the
-// subscriber.
-type brokerPorts struct {
-	pub broker.Publisher
-	sub broker.Subscriber
-}
+// clock is where every handler gets the time. Injecting it rather than
+// calling time.Now() inside a handler is what makes a time-dependent rule
+// testable: a test passes a closure over a fixed instant and asserts an exact
+// result, instead of asserting a range and hoping.
+func clock() app.Clock { return time.Now }
 
-func newBroker() brokerPorts {
-	b := memory.New()
-	return brokerPorts{pub: b, sub: b}
-}
-{{- end }}
+// ids generates aggregate identifiers, as time-ordered UUIDv7 — so a primary
+// key index appends rather than fragmenting. Convert at the point of
+// creation: UserID(ids()).
+//
+// It costs no dependency: uuid is in the Go 1.27 standard library.
+func ids() domain.IDs { return domain.UUIDs() }
+
+// appUnitOfWork is the seam app.Transactional takes: the two interfaces
+// differ only in Do's transaction options, which app deliberately does not
+// know about.
+func appUnitOfWork(u persistence.UnitOfWork) app.UnitOfWork { return persistence.ForApp(u) }
 
 func newInbox() inbox.Store { return inbox.NewMemoryStore() }
 
@@ -198,23 +236,3 @@ func newRelay(
 	// is fine". Register one here when you have something real to ask.
 	return relay, nil
 }
-
-{{- if ne .Broker "kafka" }}
-
-// The ports the feature modules actually inject.
-//
-// The publisher is Correlating: a direct publish then carries the correlation
-// ID of the request that made it, so the consumer's log lines belong to the
-// same causal chain instead of to no request at all. Events that go through
-// the outbox are already stamped at commit by outbox.Sink — the relay
-// publishes long after the request is gone — and Correlating leaves a header
-// that is already there alone.
-func publisher(p brokerPorts) broker.Publisher   { return broker.Correlating(p.pub) }
-func subscriber(p brokerPorts) broker.Subscriber { return p.sub }
-{{- end }}
-func unitOfWork(u *persistence.MemoryUnitOfWork) persistence.UnitOfWork { return u }
-
-// appUnitOfWork is the seam app.Transactional takes: the two interfaces
-// differ only in Do's transaction options, which app deliberately does not
-// know about.
-func appUnitOfWork(u persistence.UnitOfWork) app.UnitOfWork { return persistence.ForApp(u) }

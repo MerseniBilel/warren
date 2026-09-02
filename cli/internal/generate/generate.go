@@ -162,7 +162,7 @@ func Command(opts Options) (string, error) {
 	if verb == "Get" {
 		data["Read"] = "yes"
 	}
-	data["RequestFields"], data["FirstField"] = requestFields(data["Route"])
+	data["RequestFields"], data["FirstField"] = requestFields(data["Route"], verb)
 	handler, err := render("command.go.tmpl", data)
 	if err != nil {
 		return "", err
@@ -184,6 +184,27 @@ func Command(opts Options) (string, error) {
 		declares: []decl{{base + "/application", []string{
 			opts.Name, opts.Name + "Result", data["Lower"], "New" + opts.Name + "Handler",
 		}}},
+	}
+	// Say so when the path was a FALLBACK rather than a derivation. Only
+	// Create<X> has a REST shape that can be inferred safely; every other
+	// name keeps the literal snake_case of the method, which reads as
+	// POST /register_courier — a path essentially nobody ships. That made
+	// --route effectively mandatory while the flag described itself as
+	// optional, so the generator now names the gap at the moment it appears
+	// rather than leaving it to be discovered in review.
+	if opts.Route == "" && !strings.HasPrefix(opts.Name, "Create") {
+		p.next = fmt.Sprintf(`  The path %s is the method name, not a REST shape.
+
+  Only Create<X> can be derived safely — GetCourier would want a {id} the
+  generated handler does not bind, so guessing would produce code that does
+  not compile. Everything else keeps the literal path.
+
+  If that is not the path you want, re-run with --route:
+
+      warren g command %s %s --route "/couriers/{id}/register"
+
+  and give the request a `+"`param:\"id\"`"+` field to bind the wildcard.
+`, data["Route"], opts.Module, opts.Name)
 	}
 	return p.apply()
 }
@@ -285,9 +306,14 @@ func Repository(opts Options) (string, error) {
 		// sent the reader to `DUPE_DATABASE_URL is not set` — advice that
 		// fails on the first line you paste.
 		dsnVar := envPrefix(opts.Dir) + "_DATABASE_URL"
-		p.next = fmt.Sprintf(`  Still to do — the repository needs a pool and a table.
-
-  1. Declare the Postgres module ONCE, in internal/platform, and export what
+		// Step 1 is only "still to do" when it has not been done. A project
+		// scaffolded with --db postgres already declares platform.Postgres,
+		// and this generator has just added the warren.Imports line that
+		// calls it — so printing the instruction anyway told the reader to
+		// create a file that exists, naming a path the scaffold does not use.
+		// A postamble that is wrong on its first step is one people learn to
+		// skim, and steps 2 and 3 are real.
+		step1 := fmt.Sprintf(`  1. Declare the Postgres module ONCE, in internal/platform, and export what
      the features need:
 
          // internal/platform/postgres.go
@@ -307,7 +333,16 @@ func Repository(opts Options) (string, error) {
      an ARGUMENT to a feature's factory does not work — modules are
      deduplicated by identity, so a factory called twice is two modules
      sharing a name, which is a boot error.
+`, dsnVar, data["Feature"])
+		if where := platformPostgresFile(opts.Dir); where != "" {
+			step1 = fmt.Sprintf(`  1. Already done. platform.Postgres is declared in
+     %s, and the warren.Imports line that
+     reaches it was added above.
+`, where)
+		}
+		p.next = fmt.Sprintf(`  Still to do — the repository needs a pool and a table.
 
+%s
   2. Apply the schema as a DEPLOY STEP — Warren never migrates at boot.
      cmd/migrate was generated for you:
 
@@ -319,9 +354,36 @@ func Repository(opts Options) (string, error) {
 
   3. Check %s — it has the aggregate's id and created_at, and nothing else.
      Add your columns and the Save/FindByID statements that read them.
-`, dsnVar, data["Feature"], dsnVar, migrationFile)
+`, step1, dsnVar, migrationFile)
 	}
 	return p.apply()
+}
+
+// platformPostgresFile reports the file in internal/platform that already
+// declares Postgres, or "" if none does. It is how the postamble avoids
+// telling a reader to create something the scaffold already wrote — and it
+// names the REAL path rather than the one the instructions suggest, because
+// `warren new` puts it in module.go, not postgres.go.
+func platformPostgresFile(dir string) string {
+	entries, err := os.ReadDir(filepath.Join(dir, "internal", "platform"))
+	if err != nil {
+		return ""
+	}
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".go") || strings.HasSuffix(e.Name(), "_test.go") {
+			continue
+		}
+		rel := filepath.Join("internal", "platform", e.Name())
+		src, readErr := os.ReadFile(filepath.Join(dir, rel))
+		if readErr != nil {
+			continue
+		}
+		text := string(src)
+		if strings.Contains(text, "Postgres = sync.OnceValue") || strings.Contains(text, "func Postgres(") {
+			return filepath.ToSlash(rel)
+		}
+	}
+	return ""
 }
 
 // repositoryTemplates maps a driver to the files it generates. Adding a
@@ -481,7 +543,7 @@ func Consumer(opts Options) (string, error) {
 				fn: func(src []byte) ([]byte, error) {
 					// Providers plus Eager, not Consumers: the generated
 					// subscription wires its own pipeline and lifecycle hook
-					// rather than registering through transport.OnEvent, so
+					// rather than registering through r.OnEvent, so
 					// it is not a transport.Controller. Eager is what builds
 					// a type at boot that nothing else depends on.
 					src, err := astedit.AddArgument(src, "warren.Providers", "new"+opts.Name+"Subscription")
@@ -622,7 +684,7 @@ func provide(data map[string]string, base, layer, ctor string) edit {
 func expose(data map[string]string, base string) edit {
 	field := data["Lower"]
 	handler := fmt.Sprintf("app.Handler[application.%s, application.%sResult]", data["Name"], data["Name"])
-	route := fmt.Sprintf("transport.%s(r, %q, c.%s)", data["Verb"], data["Route"], field)
+	route := fmt.Sprintf("r.%s(%q, c.%s)", data["Verb"], data["Route"], field)
 	appPkg := data["Module"] + "/internal/modules/" + data["Feature"] + "/application"
 
 	return edit{
@@ -892,9 +954,32 @@ func featureData(opts Options) (map[string]string, string, error) {
 // handler mutated another, with a 201 either way. The generator is the one
 // party that knows both halves, so it is the one that has to agree with
 // itself.
-func requestFields(route string) (fields, first string) {
+// It takes the VERB as well as the route for the same reason. Without it, a
+// route with no wildcard got a required `json:"id"` body field whatever the
+// method — so `--method get --route /things` generated a GET that answered
+// 400 to every request, because a GET carries no body to satisfy a required
+// body field. It compiled, it vetted, it passed `lint arch`, and it passed
+// its own generated test, because that test calls Handle directly and never
+// crosses the transport. A generator that knows the verb cannot make that
+// mistake.
+func requestFields(route, verb string) (fields, first string) {
 	params := wildcardsOf(route)
 	if len(params) == 0 {
+		// A read with no wildcard takes no body. Emitting a required body
+		// field here is the SBX-002 defect; emitting an empty struct with the
+		// two real options is both correct and the only place the binding
+		// contract is taught at the moment it is needed.
+		if verb == "Get" || verb == "Delete" {
+			return "\t// No input. A " + verb + " carries no body, so a `json:` field here\n" +
+				"\t// would be unsatisfiable. Take input one of two ways:\n" +
+				"\t//\n" +
+				"\t//\tID    string `param:\"id\"`    // from the route: --route \"/things/{id}\"\n" +
+				"\t//\tLimit int    `query:\"limit\"` // from the query string: ?limit=20\n" +
+				"\t//\n" +
+				"\t// A `param:` field must match a {wildcard} in the route or the boot\n" +
+				"\t// fails; a `query:` field is optional and binds the zero value when\n" +
+				"\t// absent.", ""
+		}
 		return "\tID string `json:\"id\" validate:\"required\"`", "ID"
 	}
 	var b strings.Builder
@@ -1245,7 +1330,7 @@ func errMissingName(what string) error {
 
 // verbs maps a --method value to the transport function that registers it.
 // The map is the whole validation: an unrecognised verb must not silently
-// become a POST, and it must not become transport.Fetch either — a
+// become a POST, and it must not become r.Fetch either — a
 // generator that interpolates unvalidated input into an identifier writes
 // code that does not compile and blames the template.
 var verbs = map[string]string{

@@ -96,6 +96,25 @@ func errNoDSN() error {
 			"      host=localhost user=app dbname=app sslmode=disable")
 }
 
+// errEmptyDSN is the case a scaffolded project actually hits, and it used to
+// be reported as errNoDSN — which told the reader that postgres.DSN(...) was
+// missing while it sat two lines away in the file the message pointed at. The
+// option is there; the value handed to it is empty, and in a scaffold that
+// value comes from an environment variable nobody exported.
+func errEmptyDSN() error {
+	return diagnostic(
+		"✗ postgres connection string is empty\n\n" +
+			"    postgres.DSN(...) was given an empty string.\n\n" +
+			"  The option is present — this is about the VALUE, not the wiring.\n" +
+			"  If it reads an environment variable, that variable is unset:\n\n" +
+			"      postgres.DSN(os.Getenv(\"MYAPP_DATABASE_URL\"))\n\n" +
+			"  A scaffolded project reads <APPNAME>_DATABASE_URL, upper-cased,\n" +
+			"  with dashes as underscores. Export it, or pass the DSN directly.\n\n" +
+			"  Either form works:\n" +
+			"      postgres://user:pass@localhost:5432/app?sslmode=disable\n" +
+			"      host=localhost user=app dbname=app sslmode=disable")
+}
+
 func errBadDSN(dsn string, cause error) error {
 	return diagnostic(fmt.Sprintf(
 		"✗ postgres connection string is not valid\n\n    %s\n    %v\n\n"+
@@ -111,7 +130,7 @@ func errCannotConnect(dsn string, cause error) error {
 			"  or the credentials. Check that the server is reachable from here and\n"+
 			"  that the role exists — using the variable you set the DSN in, since\n"+
 			"  the one printed above has its password removed and would fail auth:\n\n"+
-			"      psql \"$DATABASE_URL\" -c 'select 1'",
+			"      psql \"$YOUR_DSN_VARIABLE\" -c 'select 1'",
 		redact(dsn), cause))
 }
 

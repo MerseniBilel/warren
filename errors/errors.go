@@ -29,6 +29,27 @@ const (
 	// The caller must change the request before retrying.
 	CodeInvalid Code = "INVALID"
 
+	// CodeUnsupportedMedia means the request's payload format is one this
+	// route does not accept. The caller must change the encoding, not the
+	// content — which is what separates it from CodeInvalid.
+	//
+	// It exists because the two have different fixes and shared one code.
+	// Warren asks clients to switch on the CODE rather than the status —
+	// that is the stated reason CONFLICT and CONTENTION may share 409 — and
+	// a 415 that answered INVALID made that promise false for the one case
+	// where the remedy is "fix your HTTP client" rather than "fix your
+	// body".
+	CodeUnsupportedMedia Code = "UNSUPPORTED_MEDIA"
+
+	// CodeMethodNotAllowed means the resource exists but does not answer this
+	// method. The caller changes the VERB, not the request.
+	//
+	// It exists for the same reason CodeUnsupportedMedia does: it shared
+	// INVALID, and a client switching on the code — which is what Warren asks
+	// clients to do — could not tell "your body is wrong" from "your method
+	// is wrong", which have nothing in common as remedies.
+	CodeMethodNotAllowed Code = "METHOD_NOT_ALLOWED"
+
 	// CodeNotFound means the addressed resource does not exist.
 	CodeNotFound Code = "NOT_FOUND"
 
@@ -161,7 +182,8 @@ func Contention(msg string, args ...any) *Error {
 // forgotten adapter renders 500 with no compile error and no test failure.
 func Codes() []Code {
 	return []Code{
-		CodeInvalid, CodeNotFound, CodeConflict, CodeContention,
+		CodeInvalid, CodeUnsupportedMedia, CodeMethodNotAllowed, CodeNotFound,
+		CodeConflict, CodeContention,
 		CodeUnauthenticated, CodePermissionDenied, CodeUnavailable, CodeInternal,
 	}
 }
@@ -183,6 +205,21 @@ func PermissionDenied(action string) *Error {
 // retryable code.
 func Unavailable(dependency string, err error) *Error {
 	return &Error{code: CodeUnavailable, msg: dependency + " is unavailable", cause: err}
+}
+
+// UnsupportedMedia reports that the payload format is one this route does not
+// accept: got is what arrived, want is what the route takes. The caller
+// changes the ENCODING, not the content, which is what separates it from
+// Invalid.
+func UnsupportedMedia(got, want string) *Error {
+	return &Error{code: CodeUnsupportedMedia, msg: "unsupported media type " + got + "; this route accepts " + want}
+}
+
+// MethodNotAllowed reports that the resource exists but does not answer this
+// method: got is the method that arrived, allow is the comma-separated list
+// the resource does answer, which the adapter also sends as the Allow header.
+func MethodNotAllowed(got, allow string) *Error {
+	return &Error{code: CodeMethodNotAllowed, msg: got + " is not allowed; this resource answers " + allow}
 }
 
 // Internal reports an unanticipated failure, wrapping err as the cause.

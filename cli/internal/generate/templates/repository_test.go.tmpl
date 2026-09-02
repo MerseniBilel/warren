@@ -42,7 +42,7 @@ func Test{{.Name}}RepositoryVersionedContract(t *testing.T) {
 		domain.{{.Name}}ID("version-1"), domain.{{.Name}}ID("version-2"),
 		domain.{{.Name}}ID("version-3"), domain.{{.Name}}ID("version-4"),
 		domain.{{.Name}}ID("version-5"), domain.{{.Name}}ID("version-6"),
-		domain.{{.Name}}ID("version-7"))
+		domain.{{.Name}}ID("version-7"), domain.{{.Name}}ID("version-8"))
 }
 
 // new{{.Name}}RepositoryForContract builds a fresh store for one subtest. The
@@ -51,6 +51,12 @@ func Test{{.Name}}RepositoryVersionedContract(t *testing.T) {
 func new{{.Name}}RepositoryForContract(t *testing.T) (persistence.UnitOfWork, persistence.Repository[*domain.{{.Name}}, domain.{{.Name}}ID]) {
 	t.Helper()
 	uow := persistence.NewMemoryUnitOfWork()
+	// A unit of work with no commit sink REFUSES any transaction whose
+	// aggregates raised events — dropping them would be silent and
+	// permanent. The contract suite registers its own recording sink for
+	// the delivery subtest; this one answers the other subtests, which
+	// are about storage rather than publication.
+	uow.OnCommit(persistence.Discard)
 	return uow, New{{.Name}}Repository(uow).(*{{.Name}}Repository)
 }
 

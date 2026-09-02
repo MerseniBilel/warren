@@ -10,8 +10,8 @@ This file adds only what is specific to Claude Code.
 ## Quick orientation
 
 Warren is a DDD-first framework and CLI for Go. Multi-module repository,
-Go 1.27 on its release — toolchain 1.26.x until then, and nothing may depend on
-a 1.27 feature before it ships (AGENT.md invariant 9). Apache-2.0, module path
+Go 1.27, adopted on release (AGENT.md invariant 9) — every module declares
+`go 1.27.0` and the scaffold writes the same. Apache-2.0, module path
 `github.com/MerseniBilel/warren`.
 
 **The repository was reset in July 2026** — everything except the licence and

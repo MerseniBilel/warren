@@ -45,8 +45,8 @@ module in the Makefile's `MODULES` list. Do not claim a check passed without
 running it. The invariants grep cannot see (driver types in public signatures,
 ring imports) still bind you in review either way.
 
-Module path: `github.com/MerseniBilel/warren`. Go 1.27 on its release
-(invariant 9); toolchain 1.26.x until then.
+Module path: `github.com/MerseniBilel/warren`. Go 1.27, adopted on release
+(invariant 9).
 
 ---
 
@@ -196,11 +196,11 @@ depends only on the core module's contract packages.
 `domain`, `app`, `persistence`, `broker`, `transport` are interfaces, types, and
 pure functions. A concrete driver in a contract package collapses the ring.
 
-**The one deliberate exception:** the three protocol registrars in
-`warren/transport` (§3.5) are concrete structs with generic methods. Go 1.27
+**The one deliberate exception:** the single `Registrar` in
+`warren/transport` (§3.5) is a concrete struct with generic methods. Go 1.27
 permits type parameters on methods of concrete types and forbids them on
 interface methods permanently, so the registrar API is only expressible this
-way. They hold no driver type — they erase handlers into route closures. No
+way. It holds no driver type — it erases handlers into route closures. No
 other concrete type enters the contracts ring without amending this invariant.
 
 ### 6. Handlers import no transport
@@ -249,14 +249,18 @@ regression fails CI rather than drifting in a benchmark nobody reads.
 It breaks `go get` for users, silently. Use a git-ignored `go.work` for
 cross-module development.
 
-### 9. Go 1.27, from the day it ships
+### 9. The current Go major release, from the day it ships
 
-Warren tracks the current Go major release. Go 1.27 (expected August 2026)
-delivers the generic methods that §3.5's registrars require, and Warren adopts
-it on release. Until it ships the installed toolchain is 1.26.x and **nothing
-may depend on a 1.27 feature** — which is why the transport layer waits while
-the kernel is built. No `toolchain` directive in any module, and no
-compatibility path to older releases.
+Warren tracks the current Go major release. **Go 1.27 shipped, and Warren
+adopted it on 2026-08-29**: every module declares `go 1.27.0`, CI pins
+`1.27.x`, and a scaffold writes `go 1.27.0` into the project it generates. The
+generic methods that §3.5's registrars require are available, and the waiting
+that this invariant used to describe is over.
+
+No `toolchain` directive in any module, and no compatibility path to older
+releases. A 1.27 feature needs no justification; a construct that exists only
+because 1.26 lacked something is a defect to be removed, not a style to be
+preserved.
 
 ---
 

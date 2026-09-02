@@ -17,6 +17,8 @@ import (
 func sampleErrors() map[errors.Code]error {
 	return map[errors.Code]error{
 		errors.CodeInvalid:          errors.Invalid("email", stderrors.New("bad")),
+		errors.CodeUnsupportedMedia: errors.UnsupportedMedia("text/plain", "application/json"),
+		errors.CodeMethodNotAllowed: errors.MethodNotAllowed("DELETE", "GET, POST"),
 		errors.CodeNotFound:         errors.NotFound("user", 42),
 		errors.CodeConflict:         errors.Conflict("already applied"),
 		errors.CodeContention:       errors.Contention("the version moved"),

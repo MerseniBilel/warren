@@ -97,6 +97,10 @@ func (s *server) build(tbl *transport.Table, reg health.Registry) (err error) {
 	for _, rt := range tbl.HTTP() {
 		s.mux.Handle(rt.Verb+" "+rt.Pattern, s.wrap(s.typed(rt)))
 		verbs[rt.Pattern] = append(verbs[rt.Pattern], rt.Verb)
+		if s.cfg.logRoutes {
+			slog.Info("route", "method", rt.Verb, "pattern", rt.Pattern,
+				"handler", rt.Name, "module", ModuleName)
+		}
 	}
 
 	// Raw routes: the escape hatch. The handler is opaque to core, so this is
@@ -108,6 +112,13 @@ func (s *server) build(tbl *transport.Table, reg health.Registry) (err error) {
 		h, ok := rr.Handler.(http.Handler)
 		if !ok {
 			return errNotAHandler(rr)
+		}
+		if s.cfg.logRoutes {
+			// A raw route's PATTERN carries its method, so there is no
+			// separate verb to print — that asymmetry is real and worth
+			// seeing in the listing rather than hidden by a fabricated one.
+			slog.Info("route", "pattern", rr.Pattern, "handler", rr.Name,
+				"raw", true, "module", ModuleName)
 		}
 		s.mux.Handle(rr.Pattern, s.wrap(s.raw(rr, h)))
 		// A raw pattern carries its own method — "POST /uploads" — so it
@@ -168,8 +179,8 @@ func (s *server) build(tbl *transport.Table, reg health.Registry) (err error) {
 // have none, and it follows trace extraction so a middleware's own span is
 // parented to the caller's.
 func (s *server) wrap(h http.Handler) http.Handler {
-	for i := len(s.cfg.middleware) - 1; i >= 0; i-- {
-		h = s.cfg.middleware[i](h)
+	for _, m := range slices.Backward(s.cfg.middleware) {
+		h = m(h)
 	}
 	if s.tel != nil {
 		h = s.telemetry(h)
@@ -431,7 +442,7 @@ func errNotAHandler(rr transport.RawRoute) error {
 		"✗ raw route is not an http.Handler\n\n"+
 			"    route %q, registered by %s,\n"+
 			"    was given a value of type %T.\n\n"+
-			"  transport.Raw hands its handler to whichever adapter serves the\n"+
+			"  r.Raw hands its handler to whichever adapter serves the\n"+
 			"  protocol, and this one is HTTP: the value must implement\n"+
 			"  net/http.Handler. Wrap a function with http.HandlerFunc(fn).",
 		rr.Pattern, rr.Name, rr.Handler))

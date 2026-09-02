@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/MerseniBilel/warren/app"
@@ -727,30 +728,31 @@ func (durableStore) Durable() bool { return true }
 // anywhere: two relays over one table, each marking rows published, each
 // delivering to its own in-process broker.
 func TestStandaloneOverADurableStoreWarns(t *testing.T) {
-	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
 
-	var buf bytes.Buffer
-	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
-	ctx, cancel := context.WithCancel(log.WithLogger(context.Background(), logger))
+		var buf bytes.Buffer
+		logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+		ctx, cancel := context.WithCancel(log.WithLogger(context.Background(), logger))
 
-	relay := outbox.NewRelay(durableStore{Store: outbox.NewMemoryStore()}, &capturePublisher{},
-		outbox.PollInterval(10*time.Millisecond))
+		relay := outbox.NewRelay(durableStore{Store: outbox.NewMemoryStore()}, &capturePublisher{},
+			outbox.PollInterval(10*time.Millisecond))
 
-	done := make(chan struct{})
-	go func() { defer close(done); _ = relay.Run(ctx) }()
-	time.Sleep(50 * time.Millisecond)
-	cancel()
-	<-done
+		done := make(chan struct{})
+		go func() { defer close(done); _ = relay.Run(ctx) }()
+		synctest.Wait()
+		cancel()
+		<-done
 
-	out := buf.String()
-	if !strings.Contains(out, "leading unconditionally over a durable store") {
-		t.Errorf("no warning was emitted:\n%s", out)
-	}
-	// The fix must name a symbol that EXISTS — the old doc named one that did
-	// not, which is worse than saying nothing.
-	if !strings.Contains(out, "postgres.WithAdvisoryLock()") {
-		t.Errorf("the warning does not name a real fix:\n%s", out)
-	}
+		out := buf.String()
+		if !strings.Contains(out, "leading unconditionally over a durable store") {
+			t.Errorf("no warning was emitted:\n%s", out)
+		}
+		// The fix must name a symbol that EXISTS — the old doc named one that did
+		// not, which is worse than saying nothing.
+		if !strings.Contains(out, "postgres.WithAdvisoryLock()") {
+			t.Errorf("the warning does not name a real fix:\n%s", out)
+		}
+	})
 }
 
 // TestStandaloneOverAMemoryStoreIsSilent — the warning must not fire for the
@@ -758,24 +760,25 @@ func TestStandaloneOverADurableStoreWarns(t *testing.T) {
 // the one every scaffolded app starts in. A warning everyone sees and nobody
 // can act on is noise that trains people to ignore warnings.
 func TestStandaloneOverAMemoryStoreIsSilent(t *testing.T) {
-	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
 
-	var buf bytes.Buffer
-	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
-	ctx, cancel := context.WithCancel(log.WithLogger(context.Background(), logger))
+		var buf bytes.Buffer
+		logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+		ctx, cancel := context.WithCancel(log.WithLogger(context.Background(), logger))
 
-	relay := outbox.NewRelay(outbox.NewMemoryStore(), &capturePublisher{},
-		outbox.PollInterval(10*time.Millisecond))
+		relay := outbox.NewRelay(outbox.NewMemoryStore(), &capturePublisher{},
+			outbox.PollInterval(10*time.Millisecond))
 
-	done := make(chan struct{})
-	go func() { defer close(done); _ = relay.Run(ctx) }()
-	time.Sleep(50 * time.Millisecond)
-	cancel()
-	<-done
+		done := make(chan struct{})
+		go func() { defer close(done); _ = relay.Run(ctx) }()
+		synctest.Wait()
+		cancel()
+		<-done
 
-	if strings.Contains(buf.String(), "leading unconditionally") {
-		t.Errorf("the in-process store triggered a warning it cannot act on:\n%s", buf.String())
-	}
+		if strings.Contains(buf.String(), "leading unconditionally") {
+			t.Errorf("the in-process store triggered a warning it cannot act on:\n%s", buf.String())
+		}
+	})
 }
 
 // TestDurableStoreWithANonRedeliveringBrokerWarns — field test #7, defect B3,
@@ -792,52 +795,54 @@ func TestStandaloneOverAMemoryStoreIsSilent(t *testing.T) {
 // needed to see it already ship: outbox.Durable on the store, and
 // broker.Redeliverer on the publisher.
 func TestDurableStoreWithANonRedeliveringBrokerWarns(t *testing.T) {
-	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
 
-	var buf bytes.Buffer
-	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
-	ctx, cancel := context.WithCancel(log.WithLogger(context.Background(), logger))
+		var buf bytes.Buffer
+		logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+		ctx, cancel := context.WithCancel(log.WithLogger(context.Background(), logger))
 
-	relay := outbox.NewRelay(durableStore{Store: outbox.NewMemoryStore()}, nonRedeliveringPublisher{},
-		outbox.LeaderElection(outbox.Standalone()),
-		outbox.PollInterval(10*time.Millisecond))
+		relay := outbox.NewRelay(durableStore{Store: outbox.NewMemoryStore()}, nonRedeliveringPublisher{},
+			outbox.LeaderElection(outbox.Standalone()),
+			outbox.PollInterval(10*time.Millisecond))
 
-	done := make(chan struct{})
-	go func() { defer close(done); _ = relay.Run(ctx) }()
-	time.Sleep(50 * time.Millisecond)
-	cancel()
-	<-done
+		done := make(chan struct{})
+		go func() { defer close(done); _ = relay.Run(ctx) }()
+		synctest.Wait()
+		cancel()
+		<-done
 
-	out := buf.String()
-	if !strings.Contains(out, "durable outbox is publishing to a broker that cannot redeliver") {
-		t.Errorf("no warning for the lossy pairing:\n%s", out)
-	}
+		out := buf.String()
+		if !strings.Contains(out, "durable outbox is publishing to a broker that cannot redeliver") {
+			t.Errorf("no warning for the lossy pairing:\n%s", out)
+		}
+	})
 }
 
 // TestDurableStoreWithADurableBrokerIsSilent — the warning must not fire for
 // Kafka, which is the whole point of pairing a durable outbox with a durable
 // broker.
 func TestDurableStoreWithADurableBrokerIsSilent(t *testing.T) {
-	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
 
-	var buf bytes.Buffer
-	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
-	ctx, cancel := context.WithCancel(log.WithLogger(context.Background(), logger))
+		var buf bytes.Buffer
+		logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+		ctx, cancel := context.WithCancel(log.WithLogger(context.Background(), logger))
 
-	// capturePublisher implements no Redeliverer, so it is assumed durable.
-	relay := outbox.NewRelay(durableStore{Store: outbox.NewMemoryStore()}, &capturePublisher{},
-		outbox.LeaderElection(outbox.Standalone()),
-		outbox.PollInterval(10*time.Millisecond))
+		// capturePublisher implements no Redeliverer, so it is assumed durable.
+		relay := outbox.NewRelay(durableStore{Store: outbox.NewMemoryStore()}, &capturePublisher{},
+			outbox.LeaderElection(outbox.Standalone()),
+			outbox.PollInterval(10*time.Millisecond))
 
-	done := make(chan struct{})
-	go func() { defer close(done); _ = relay.Run(ctx) }()
-	time.Sleep(50 * time.Millisecond)
-	cancel()
-	<-done
+		done := make(chan struct{})
+		go func() { defer close(done); _ = relay.Run(ctx) }()
+		synctest.Wait()
+		cancel()
+		<-done
 
-	if strings.Contains(buf.String(), "cannot redeliver") {
-		t.Errorf("the warning fired for a durable broker:\n%s", buf.String())
-	}
+		if strings.Contains(buf.String(), "cannot redeliver") {
+			t.Errorf("the warning fired for a durable broker:\n%s", buf.String())
+		}
+	})
 }
 
 type nonRedeliveringPublisher struct{}

@@ -2,9 +2,7 @@ package config_test
 
 import (
 	"os"
-{{- if eq .DB "postgres" }}
 	"strings"
-{{- end }}
 	"testing"
 	"time"
 
@@ -14,12 +12,6 @@ import (
 )
 
 func TestDefaults(t *testing.T) {
-{{- if eq .DB "postgres" }}
-	// Required, so it has to be set for the OTHER defaults to be reachable.
-	// The value is never connected to here — Load only reads and validates.
-	t.Setenv("{{.EnvPrefix}}_DATABASE_URL", "postgres://localhost:5432/{{.Name}}?sslmode=disable")
-{{- end }}
-
 	cfg, err := wconfig.Load[config.Config](wconfig.WithEnvPrefix("{{.EnvPrefix}}"))
 	if err != nil {
 		t.Fatalf("Load: %v", err)
@@ -47,23 +39,21 @@ func TestDefaults(t *testing.T) {
 // meet, and it is worth knowing the shape of it: warren/config collects every
 // missing value and names the exact variable that supplies each one.
 func TestARequiredVariableNamesItself(t *testing.T) {
-{{- if eq .DB "postgres" }}
-	if err := os.Unsetenv("{{.EnvPrefix}}_DATABASE_URL"); err != nil {
-		t.Fatalf("unsetting: %v", err)
+	// Every field in this app's Config has a default, so the lesson is shown
+	// on a struct declared here rather than by marking a production field
+	// required that nothing reads. Add a required field to config.Config —
+	// one with no `default` tag — and this is the failure you get.
+	type needsAKey struct {
+		APIKey string `config:"api_key" validate:"required"`
 	}
-	_, err := wconfig.Load[config.Config](wconfig.WithEnvPrefix("{{.EnvPrefix}}"))
+
+	_, err := wconfig.Load[needsAKey](wconfig.WithEnvPrefix("{{.EnvPrefix}}"))
 	if err == nil {
-		t.Fatal("Load succeeded without {{.EnvPrefix}}_DATABASE_URL")
+		t.Fatal("Load succeeded with no {{.EnvPrefix}}_API_KEY set")
 	}
-	if !strings.Contains(err.Error(), "{{.EnvPrefix}}_DATABASE_URL") {
-		t.Errorf("error does not name the variable: %v", err)
+	if !strings.Contains(err.Error(), "{{.EnvPrefix}}_API_KEY") {
+		t.Errorf("error does not name the variable that supplies the value: %v", err)
 	}
-{{- else }}
-	// Every field in this Config has a default, so there is no required
-	// variable to demonstrate yet. Add one — a required field with no
-	// `default` tag — and it fails the boot naming itself.
-	t.Skip("no required field in this configuration")
-{{- end }}
 }
 
 // TestAnEmptyVariableIsAValue documents a semantic that surprises people, so

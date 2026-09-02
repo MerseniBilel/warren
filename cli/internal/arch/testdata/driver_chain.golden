@@ -5,9 +5,10 @@
         ↳ example.com/fix/internal/store
         imports github.com/jackc/pgx/v5
 
-  A use case says WHAT must happen, never HOW it is stored, and that holds
-  through a helper as much as directly: this package does not import
-  github.com/jackc/pgx/v5 itself, but everything it depends on comes with it.
+  A use case says WHAT must happen, never HOW it is stored or delivered, and
+  that holds through a helper as much as directly: this package does not
+  import github.com/jackc/pgx/v5 itself, but everything it depends on comes
+  with it.
 
   The import is in example.com/fix/internal/store.
 
@@ -17,8 +18,8 @@
       that talks to the store needs github.com/jackc/pgx/v5.
       Two packages, and the handler imports the half without it.
     • If the handler needs the STORE, declare a port in the domain and put
-      the driver code in infrastructure, where a driver is allowed.
-      `warren g repository` writes both halves.
+      the github.com/jackc/pgx/v5 code in infrastructure, where a driver is
+      allowed. `warren g repository` writes both halves.
 
 1 violation(s) in 2 packages.
 

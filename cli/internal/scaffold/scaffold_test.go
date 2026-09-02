@@ -33,6 +33,10 @@ func TestNewWritesTheWholeTree(t *testing.T) {
 		"Makefile",
 		"README.md",
 		"cmd/myapp/main.go",
+		// The architecture rules are a headline claim, so the scaffold ships
+		// the job that enforces them rather than leaving it to be wired by
+		// hand — which, in practice, meant never.
+		".github/workflows/ci.yml",
 		"internal/config/config.go",
 		"internal/config/config_test.go",
 		"internal/platform/module.go",
@@ -501,10 +505,18 @@ func TestMemoryBrokerRemainsTheDefault(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 	platform := read(t, dir, "internal/platform/module.go")
-	if !strings.Contains(platform, "memory.New()") {
-		t.Errorf("the default scaffold lost its in-process broker:\n%s", platform)
+	// memory.Module(), not memory.New(). The in-process broker is wired as a
+	// MODULE now, which is what claims transport.ProtocolEvent and therefore
+	// what makes an r.OnEvent subscription actually served. It used to be
+	// three hand-rolled providers on platform, and a subscription registered
+	// against them was silently never delivered.
+	if !strings.Contains(platform, "memory.Module()") {
+		t.Errorf("the default scaffold lost its in-process broker module:\n%s", platform)
 	}
-	if strings.Contains(platform, "kafka.") {
+	// kafka.Broker(, not "kafka." — the loose form matched the word in a
+	// PROSE comment ("a service needing durability scaffolds with --broker
+	// kafka."), which is documentation doing its job, not wiring.
+	if strings.Contains(platform, "kafka.Broker(") {
 		t.Errorf("the default scaffold wires kafka:\n%s", platform)
 	}
 	if gomod := read(t, dir, "go.mod"); strings.Contains(gomod, "broker/kafka") {
@@ -652,4 +664,75 @@ func funcBody(t *testing.T, src, sig string) string {
 		return rest[:j+3]
 	}
 	return rest
+}
+
+// TestEveryBrokerVariantServesItsSubscriptions is the gap that opened the
+// moment the scaffold's consumer collapsed to r.OnEvent.
+//
+// A subscription registered with r.OnEvent is served by whichever module
+// CLAIMS transport.ProtocolEvent, and Table.Unserved() fails the boot when
+// nothing does. The two drivers claim it in different places — memory.Module
+// both provides the ports and serves, while kafka splits Broker (publish and
+// subscribe) from Consumers (serve), so that a publish-only service does not
+// acquire a consumer group. A scaffold that wired only Broker compiled
+// perfectly and failed its boot, which is exactly the shape of defect the
+// generated code is supposed to be immune to.
+func TestEveryBrokerVariantServesItsSubscriptions(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		broker string
+		want   string
+	}{
+		{"memory", "Broker()"},
+		{"kafka", "Consumers()"},
+	} {
+		t.Run(tc.broker, func(t *testing.T) {
+			t.Parallel()
+
+			dir := t.TempDir()
+			opts := scaffold.Options{
+				Dir: dir, Name: "app", ModulePath: "example.com/app", Version: "v0.1.0",
+			}
+			if tc.broker == "kafka" {
+				opts.Broker = "kafka"
+			}
+			if err := scaffold.New(opts); err != nil {
+				t.Fatalf("New: %v", err)
+			}
+
+			platform := read(t, dir, "internal/platform/module.go")
+			// The IMPORTS line, not the file. Declaring a module that claims
+			// the protocol and never importing it is exactly the failure this
+			// guards: the declaration compiles, the claim never happens, and
+			// the boot fails on a subscription nothing serves.
+			imports := importsLine(t, platform)
+			if !strings.Contains(imports, tc.want) {
+				t.Errorf("the %s scaffold's platform does not IMPORT what claims ProtocolEvent (want %s):\n%s",
+					tc.broker, tc.want, imports)
+			}
+			// And the generated consumer must register the modern way, or the
+			// claim serves nothing.
+			notification := read(t, dir, "internal/modules/notification/module.go")
+			if !strings.Contains(notification, "r.OnEvent(") {
+				t.Errorf("the generated consumer does not register through r.OnEvent:\n%s", notification)
+			}
+		})
+	}
+}
+
+// importsLine returns the warren.Imports(...) call from a module file, so an
+// assertion about WIRING cannot be satisfied by a declaration elsewhere.
+func importsLine(t *testing.T, src string) string {
+	t.Helper()
+	i := strings.Index(src, "warren.Imports(")
+	if i < 0 {
+		t.Fatalf("no warren.Imports in:\n%s", src)
+	}
+	rest := src[i:]
+	j := strings.IndexByte(rest, '\n')
+	if j < 0 {
+		return rest
+	}
+	return rest[:j]
 }

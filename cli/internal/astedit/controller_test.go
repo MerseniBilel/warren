@@ -37,8 +37,8 @@ func NewController(
 }
 
 // Register declares the routes.
-func (c *Controller) Register(r transport.Registrar) {
-	transport.Post(r, "/products", c.createProduct)
+func (c *Controller) Register(r *transport.Registrar) {
+	r.Post("/products", c.createProduct)
 }
 `
 
@@ -103,11 +103,11 @@ func TestAddStatement(t *testing.T) {
 	t.Parallel()
 
 	got, err := astedit.AddStatement([]byte(controller), "Register",
-		`transport.Post(r, "/discontinue", c.discontinue)`)
+		`r.Post("/discontinue", c.discontinue)`)
 	if err != nil {
 		t.Fatalf("AddStatement: %v", err)
 	}
-	if !strings.Contains(string(got), `transport.Post(r, "/discontinue", c.discontinue)`) {
+	if !strings.Contains(string(got), `r.Post("/discontinue", c.discontinue)`) {
 		t.Errorf("statement not added:\n%s", got)
 	}
 	// Order matters for readability, not correctness: the new route goes
@@ -118,7 +118,7 @@ func TestAddStatement(t *testing.T) {
 		t.Errorf("the new route did not land after the existing one:\n%s", got)
 	}
 
-	again, err := astedit.AddStatement(got, "Register", `transport.Post(r, "/discontinue", c.discontinue)`)
+	again, err := astedit.AddStatement(got, "Register", `r.Post("/discontinue", c.discontinue)`)
 	if err != nil {
 		t.Fatalf("second AddStatement: %v", err)
 	}

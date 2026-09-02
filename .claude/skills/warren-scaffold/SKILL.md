@@ -65,7 +65,7 @@ repository following the three rules in warren.md §6.1.
 
 **Do not hand-roll a `net/http` server against the handlers.** Handlers
 import no transport package by invariant; register routes from the feature's
-`controller.go` with `transport.Post(r, "/path", c.handler)` and let the
+`controller.go` with `r.Post("/path", c.handler)` and let the
 adapter serve them.
 
 ## Logs you can join to a request

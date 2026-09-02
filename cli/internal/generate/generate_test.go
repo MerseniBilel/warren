@@ -281,7 +281,7 @@ func TestGenerateConsumer(t *testing.T) {
 
 	// Providers plus Eager, not Consumers: the subscription wires its own
 	// pipeline and lifecycle hook rather than registering through
-	// transport.OnEvent, so it is not a transport.Controller — and boot now
+	// r.OnEvent, so it is not a transport.Controller — and boot now
 	// refuses a Consumers entry that registers nothing.
 	mod := read(t, dir, "internal/modules/user/module.go")
 	if strings.Contains(mod, "warren.Consumers") {
@@ -465,7 +465,7 @@ func TestCommandWiresItsOwnRoute(t *testing.T) {
 		"createProduct",
 		"app.Handler[application.CreateProduct, application.CreateProductResult]",
 		// Create<X> derives the resource path; see TestCommandRouteIsResourceShaped.
-		`transport.Post(r, "/products", c.createProduct)`,
+		`r.Post("/products", c.createProduct)`,
 		"/internal/modules/catalog/application",
 	} {
 		if !strings.Contains(got, want) {
@@ -586,7 +586,7 @@ func TestCommandRouteIsResourceShaped(t *testing.T) {
 		t.Fatalf("Command: %v", err)
 	}
 	src := read(t, dir, "internal/modules/user/controller.go")
-	if !strings.Contains(src, `transport.Post(r, "/shipments"`) {
+	if !strings.Contains(src, `r.Post("/shipments"`) {
 		t.Errorf("CreateShipment did not produce a resource-shaped route:\n%s", src)
 	}
 	if strings.Contains(src, "/create_shipment") {
@@ -606,7 +606,7 @@ func TestCommandRouteFlagWins(t *testing.T) {
 		t.Fatalf("Command: %v", err)
 	}
 	src := read(t, dir, "internal/modules/user/controller.go")
-	if !strings.Contains(src, `transport.Post(r, "/users/{id}/suspend"`) {
+	if !strings.Contains(src, `r.Post("/users/{id}/suspend"`) {
 		t.Errorf("--route was not used:\n%s", src)
 	}
 }
@@ -621,7 +621,7 @@ func TestAnUnrecognisedVerbKeepsTheLiteralPath(t *testing.T) {
 	if _, err := generate.Command(generate.Options{Dir: dir, Module: "user", Name: "SuspendUser"}); err != nil {
 		t.Fatalf("Command: %v", err)
 	}
-	if !strings.Contains(read(t, dir, "internal/modules/user/controller.go"), `transport.Post(r, "/suspend_user"`) {
+	if !strings.Contains(read(t, dir, "internal/modules/user/controller.go"), `r.Post("/suspend_user"`) {
 		t.Error("an unrecognised verb did not keep its literal path")
 	}
 }
@@ -737,8 +737,8 @@ func TestMemoryProjectDoesNotImportPostgres(t *testing.T) {
 // the path from the name and appended it, leaving a second, un-asked-for
 // public endpoint:
 //
-//	transport.Post(r, "/copies/{id}/checkout", c.checkoutCopy)
-//	transport.Post(r, "/checkout_copy", c.checkoutCopy)      ← new
+//	r.Post("/copies/{id}/checkout", c.checkoutCopy)
+//	r.Post("/checkout_copy", c.checkoutCopy)      ← new
 //
 // A route is identified by the HANDLER it serves, not by its path.
 func TestForceDoesNotAddASecondRoute(t *testing.T) {
@@ -952,7 +952,7 @@ func TestCommandMethodSelectsTheVerb(t *testing.T) {
 	}
 
 	got := read(t, dir, "internal/modules/ticket/controller.go")
-	if !strings.Contains(got, `transport.Get(r, "/tickets/{id}", c.getTicket)`) {
+	if !strings.Contains(got, `r.Get("/tickets/{id}", c.getTicket)`) {
 		t.Errorf("the route was not registered as a GET:\n%s", got)
 	}
 }
@@ -968,7 +968,7 @@ func TestCommandMethodDefaultsToPost(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("g command: %v", err)
 	}
-	if !strings.Contains(read(t, dir, "internal/modules/user/controller.go"), "transport.Post(r,") {
+	if !strings.Contains(read(t, dir, "internal/modules/user/controller.go"), "r.Post(") {
 		t.Error("the default verb is no longer POST")
 	}
 }
@@ -1028,10 +1028,17 @@ func TestConsumerImportsTheBrokerAdapterModule(t *testing.T) {
 	}
 }
 
-// TestMemoryBrokerProjectDoesNotImportBroker — with --broker memory the
-// driver is providers on platform, re-exported, so there is no platform.Broker
-// to import and adding one would not compile.
-func TestMemoryBrokerProjectDoesNotImportBroker(t *testing.T) {
+// TestMemoryBrokerProjectImportsBrokerToo — the two drivers used to have
+// different SHAPES: kafka was a module behind platform.Broker(), memory was
+// three providers platform re-exported. A generated consumer therefore had to
+// import platform.Broker() in one project and must not in the other, and the
+// generator knew about only one of the two shapes — field test #8.
+//
+// Both are modules now, because serving r.OnEvent requires one: a module is
+// what can claim transport.ProtocolEvent. So platform.Broker() exists in
+// every project and a consumer imports it either way. The generator needs no
+// branch, because it looks for the DECLARATION rather than guessing.
+func TestMemoryBrokerProjectImportsBrokerToo(t *testing.T) {
 	t.Parallel()
 
 	dir := app(t)
@@ -1041,8 +1048,8 @@ func TestMemoryBrokerProjectDoesNotImportBroker(t *testing.T) {
 	if _, err := generate.Consumer(generate.Options{Dir: dir, Module: "orders", Name: "OrderPlaced"}); err != nil {
 		t.Fatalf("g consumer: %v", err)
 	}
-	if src := read(t, dir, "internal/modules/orders/module.go"); strings.Contains(src, "platform.Broker()") {
-		t.Errorf("a memory-broker project imported a platform.Broker that does not exist:\n%s", src)
+	if src := read(t, dir, "internal/modules/orders/module.go"); !strings.Contains(src, "platform.Broker()") {
+		t.Errorf("a consumer was generated without importing the module that serves it:\n%s", src)
 	}
 }
 
@@ -1275,4 +1282,118 @@ func skipMessage(src string) string {
 		end = len(rest)
 	}
 	return rest[:end]
+}
+
+// TestABodylessVerbGetsNoRequiredBodyField is SBX-002, pinned.
+//
+// The generator used to emit `ID string `+"`"+`json:"id" validate:"required"`+"`"+`
+// whenever a route had no wildcard, whatever the method — so
+// `warren g command thing ListThings --method get --route /things` produced a
+// GET that answered 400 to every request, because a GET carries no body to
+// satisfy a required body field.
+//
+// It shipped because everything downstream was green: it compiled, it vetted,
+// it passed `warren lint arch`, and it passed its OWN generated test, since
+// that test calls Handle directly and never crosses the transport. Nothing in
+// the build could see it. This test is the thing that can.
+func TestABodylessVerbGetsNoRequiredBodyField(t *testing.T) {
+	t.Parallel()
+
+	for _, method := range []string{"get", "delete"} {
+		t.Run(method, func(t *testing.T) {
+			t.Parallel()
+
+			dir := app(t)
+			if _, err := generate.Module(generate.Options{Dir: dir, Name: "thing"}); err != nil {
+				t.Fatalf("g module: %v", err)
+			}
+			if _, err := generate.Command(generate.Options{
+				Dir: dir, Module: "thing", Name: "ListThings",
+				Route: "/things", Method: method,
+			}); err != nil {
+				t.Fatalf("g command: %v", err)
+			}
+
+			file := read(t, dir, "internal/modules/thing/application/list_things.go")
+			// Scope to the REQUEST struct: the Result struct carries json
+			// tags legitimately, and it is the request that must not.
+			decl := structBody(t, file, "type ListThings struct {")
+			got := withoutComments(decl)
+			if strings.Contains(got, "json:") {
+				t.Errorf("a %s with no wildcard was given a JSON BODY field — every request to it 400s:\n%s", method, got)
+			}
+			if strings.Contains(got, `validate:"required"`) {
+				t.Errorf("a %s with no wildcard was given a required field it can never receive:\n%s", method, got)
+			}
+			// The empty struct is not enough on its own: it must teach the
+			// two real ways to take input, because SBX-006 found the binding
+			// contract documented in one sentence nobody finds.
+			// These live in the COMMENTS, so they are asserted against the
+			// declaration rather than the stripped fields.
+			for _, want := range []string{`param:"id"`, `query:"limit"`} {
+				if !strings.Contains(decl, want) {
+					t.Errorf("the generated request struct does not mention %s, so it teaches nothing:\n%s", want, decl)
+				}
+			}
+		})
+	}
+}
+
+// TestAWildcardRouteStillBindsTheParam is the other half: the fix must not
+// have made every request struct empty.
+func TestAWildcardRouteStillBindsTheParam(t *testing.T) {
+	t.Parallel()
+
+	dir := app(t)
+	if _, err := generate.Module(generate.Options{Dir: dir, Name: "thing"}); err != nil {
+		t.Fatalf("g module: %v", err)
+	}
+	if _, err := generate.Command(generate.Options{
+		Dir: dir, Module: "thing", Name: "GetThing",
+		Route: "/things/{id}", Method: "get",
+	}); err != nil {
+		t.Fatalf("g command: %v", err)
+	}
+
+	got := read(t, dir, "internal/modules/thing/application/get_thing.go")
+	if !strings.Contains(got, `param:"id"`) {
+		t.Errorf("a GET with a wildcard must still bind it:\n%s", got)
+	}
+}
+
+// TestAWriteWithNoWildcardStillTakesABody guards the third case: POST/PUT/PATCH
+// with no wildcard legitimately reads the body, and the SBX-002 fix must not
+// have emptied those too.
+func TestAWriteWithNoWildcardStillTakesABody(t *testing.T) {
+	t.Parallel()
+
+	dir := app(t)
+	if _, err := generate.Module(generate.Options{Dir: dir, Name: "thing"}); err != nil {
+		t.Fatalf("g module: %v", err)
+	}
+	if _, err := generate.Command(generate.Options{
+		Dir: dir, Module: "thing", Name: "CreateThing",
+		Route: "/things", Method: "post",
+	}); err != nil {
+		t.Fatalf("g command: %v", err)
+	}
+
+	got := read(t, dir, "internal/modules/thing/application/create_thing.go")
+	if !strings.Contains(got, `json:"id"`) {
+		t.Errorf("a POST with no wildcard reads the body and must keep its json field:\n%s", got)
+	}
+}
+
+// withoutComments strips // lines from a struct body. The generated
+// request struct EXPLAINS why it has no json field, and that explanation
+// necessarily contains the word `json:` — so an assertion that reads the
+// comments would be defeated by the very text that documents the fix.
+func withoutComments(body string) string {
+	var kept []string
+	for _, line := range strings.Split(body, "\n") {
+		if t := strings.TrimSpace(line); t != "" && !strings.HasPrefix(t, "//") {
+			kept = append(kept, line)
+		}
+	}
+	return strings.Join(kept, "\n")
 }

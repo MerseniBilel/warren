@@ -16,6 +16,16 @@
 // and runtime.Goexit are outside it, and a panic in a goroutine the user
 // spawned is theirs to recover. "Contained" is the word; "cannot crash" is
 // not.
+//
+// runtime.Goexit is the one whose consequence is NOT a crash, and it is worse
+// than one: the deferred recover runs, sees nil, and the goroutine then
+// terminates — so Do never returns, and every statement after the call is
+// dead. A caller that reports Do's outcome through a channel must send from a
+// DEFERRED function. A send written after the call simply does not happen, and
+// whoever waits on it waits forever: no panic, no diagnostic, no timeout.
+// warren/lifecycle hung a boot exactly this way until 2026-08-10, and it takes
+// nothing exotic to reach — t.Fatal, t.Fatalf, t.FailNow and t.Skip are all
+// runtime.Goexit, so an assertion inside a lifecycle hook was enough.
 package panics
 
 import (

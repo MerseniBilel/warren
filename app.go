@@ -695,11 +695,11 @@ func errRegistersNothing(m Module, option string, outs []reflect.Type) error {
 		"✗ controller registers nothing\n\n"+
 			"    module %q (%s)\n"+
 			"      └─ %s lists a constructor returning %s,\n"+
-			"           which has no Register(transport.Registrar) method.\n\n"+
+			"           which has no Register(*transport.Registrar) method.\n\n"+
 			"  A controller whose Register has the wrong signature compiles, registers\n"+
 			"  no routes, and 404s in production. Add:\n\n"+
-			"      func (c *%s) Register(r transport.Registrar) {\n"+
-			"          transport.Post(r, \"/things\", c.create)\n"+
+			"      func (c *%s) Register(r *transport.Registrar) {\n"+
+			"          r.Post(\"/things\", c.create)\n"+
 			"      }\n\n"+
 			"  Or, if it registers nothing and only needs building at boot, declare it\n"+
 			"  with warren.Providers and warren.Eager[%s]() instead.",
@@ -716,7 +716,7 @@ func errControllerNotRegistered(m Module, t reflect.Type, _ transport.Controller
 		"✗ controller declared as a plain provider\n\n"+
 			"    module %q (%s)\n"+
 			"      └─ warren.Eager[%s]() builds a type that implements\n"+
-			"           Register(transport.Registrar), but only warren.Controllers\n"+
+			"           Register(*transport.Registrar), but only warren.Controllers\n"+
 			"           and warren.Consumers are registered at boot step 5.\n\n"+
 			"  Its routes would never exist, and with no routes registered nothing\n"+
 			"  else would notice. Move the constructor:\n\n"+
@@ -831,15 +831,15 @@ func constructorName(ctor any) string {
 
 // splitSite turns "module.go:14" back into DeclaredAt's (file, line) pair.
 func splitSite(site string) (string, int) {
-	i := strings.LastIndex(site, ":")
-	if i < 0 {
+	file, num, ok := strings.CutLast(site, ":")
+	if !ok {
 		return site, 0
 	}
-	line, err := strconv.Atoi(site[i+1:])
+	line, err := strconv.Atoi(num)
 	if err != nil {
 		return site, 0
 	}
-	return site[:i], line
+	return file, line
 }
 
 // controllerType is what a constructor's return value is measured against
@@ -1030,7 +1030,7 @@ func errControllerIsAPlainProvider(m Module, t reflect.Type) error {
 		"✗ controller declared as a plain provider\n\n"+
 			"    module %q (%s)\n"+
 			"      └─ warren.Providers lists a constructor returning %s,\n"+
-			"           which implements Register(transport.Registrar) — and nothing\n"+
+			"           which implements Register(*transport.Registrar) — and nothing\n"+
 			"           in the module depends on it.\n\n"+
 			"  Only warren.Controllers is registered at boot step 5. Declared this way\n"+
 			"  the constructor is never called, no route is registered, and every one\n"+

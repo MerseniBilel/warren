@@ -42,7 +42,7 @@ func TestInvoiceRepositoryVersionedContract(t *testing.T) {
 		domain.InvoiceID("version-1"), domain.InvoiceID("version-2"),
 		domain.InvoiceID("version-3"), domain.InvoiceID("version-4"),
 		domain.InvoiceID("version-5"), domain.InvoiceID("version-6"),
-		domain.InvoiceID("version-7"))
+		domain.InvoiceID("version-7"), domain.InvoiceID("version-8"))
 }
 
 // newInvoiceRepositoryForContract builds a fresh store for one subtest. The
@@ -51,6 +51,12 @@ func TestInvoiceRepositoryVersionedContract(t *testing.T) {
 func newInvoiceRepositoryForContract(t *testing.T) (persistence.UnitOfWork, persistence.Repository[*domain.Invoice, domain.InvoiceID]) {
 	t.Helper()
 	uow := persistence.NewMemoryUnitOfWork()
+	// A unit of work with no commit sink REFUSES any transaction whose
+	// aggregates raised events — dropping them would be silent and
+	// permanent. The contract suite registers its own recording sink for
+	// the delivery subtest; this one answers the other subtests, which
+	// are about storage rather than publication.
+	uow.OnCommit(persistence.Discard)
 	return uow, NewInvoiceRepository(uow).(*InvoiceRepository)
 }
 

@@ -16,6 +16,9 @@ import (
 	"github.com/MerseniBilel/warren/domain"
 	werrors "github.com/MerseniBilel/warren/errors"
 	"github.com/MerseniBilel/warren/health"
+	"github.com/MerseniBilel/warren/inbox"
+	"github.com/MerseniBilel/warren/outbox"
+	"github.com/MerseniBilel/warren/persistence"
 	warrentest "github.com/MerseniBilel/warren/testing"
 	"github.com/MerseniBilel/warren/transport"
 	"github.com/MerseniBilel/warren/validate"
@@ -89,7 +92,7 @@ func userModule() warren.Module {
 // listed in warren.Consumers must still be a transport.Controller.
 type probe struct{}
 
-func (*probe) Register(transport.Registrar) {}
+func (*probe) Register(*transport.Registrar) {}
 
 // --- the harness ----------------------------------------------------------
 
@@ -291,8 +294,8 @@ type stockController struct {
 	h app.Handler[reserveStock, reservation]
 }
 
-func (c *stockController) Register(r transport.Registrar) {
-	transport.Post(r, "/stock/reservations", c.h)
+func (c *stockController) Register(r *transport.Registrar) {
+	r.Post("/stock/reservations", c.h)
 }
 
 func stockModule() warren.Module {
@@ -511,3 +514,119 @@ func (f *fatalRecorder) Fatalf(format string, args ...any) {
 }
 
 func (f *fatalRecorder) Helper() {}
+
+// --- WithMemoryPersistence -------------------------------------------------
+
+// ledgerRepo depends on the PORT, which is the case WithMemoryPersistence is
+// for. Contrast ledgerDriverModule below, which imports a driver.
+type ledgerRepo struct{ uow persistence.UnitOfWork }
+
+type recordEntry struct{ Amount int }
+type entryDTO struct{ Stored int }
+
+type ledgerHandler struct{ repo *ledgerRepo }
+
+func (h *ledgerHandler) Handle(ctx context.Context, cmd recordEntry) (entryDTO, error) {
+	err := h.repo.uow.Do(ctx, func(ctx context.Context) error { return nil })
+	if err != nil {
+		return entryDTO{}, err
+	}
+	return entryDTO{Stored: cmd.Amount}, nil
+}
+
+func ledgerModule() warren.Module {
+	return warren.NewModule("ledger",
+		warren.Providers(
+			func(uow persistence.UnitOfWork) *ledgerRepo { return &ledgerRepo{uow: uow} },
+			func(r *ledgerRepo) app.Handler[recordEntry, entryDTO] {
+				return &ledgerHandler{repo: r}
+			},
+		),
+	)
+}
+
+// TestWithMemoryPersistenceBootsAModuleThatNeedsThePorts is the defect this
+// option exists for: before it, a module depending on persistence.UnitOfWork
+// could only be booted in a test by hand-wiring a memory platform, and the
+// scaffold's generated tests skipped instead.
+func TestWithMemoryPersistenceBootsAModuleThatNeedsThePorts(t *testing.T) {
+	t.Parallel()
+
+	a := warrentest.NewModuleTest(t, ledgerModule(), warrentest.WithMemoryPersistence())
+
+	got, err := warrentest.Invoke[recordEntry, entryDTO](context.Background(), a, recordEntry{Amount: 7})
+	if err != nil {
+		t.Fatalf("Invoke: %v", err)
+	}
+	if got.Stored != 7 {
+		t.Errorf("Stored = %d, want 7", got.Stored)
+	}
+}
+
+// TestWithMemoryPersistenceBindsEveryPort pins the whole table, so a port
+// dropped from the option fails here rather than in a user's project.
+func TestWithMemoryPersistenceBindsEveryPort(t *testing.T) {
+	t.Parallel()
+
+	a := warrentest.NewModuleTest(t, ledgerModule(), warrentest.WithMemoryPersistence())
+
+	if uow := warrentest.Resolve[persistence.UnitOfWork](t, a); uow == nil {
+		t.Error("persistence.UnitOfWork is not bound")
+	}
+	if uow := warrentest.Resolve[*persistence.MemoryUnitOfWork](t, a); uow == nil {
+		t.Error("*persistence.MemoryUnitOfWork is not bound — a memory repository takes the concrete type")
+	}
+	if uow := warrentest.Resolve[app.UnitOfWork](t, a); uow == nil {
+		t.Error("app.UnitOfWork is not bound — app.Transactional needs it")
+	}
+	if s := warrentest.Resolve[outbox.Store](t, a); s == nil {
+		t.Error("outbox.Store is not bound")
+	}
+	if s := warrentest.Resolve[inbox.Store](t, a); s == nil {
+		t.Error("inbox.Store is not bound")
+	}
+}
+
+// TestWithMemoryPersistenceWiresTheOutboxToTheUnitOfWork is the trap the doc
+// comment warns about. Without uow.OnCommit(outbox.Sink(...)) every assertion
+// above still passes, an aggregate still commits, and NO outbox row is
+// written — so the failure surfaces later as a missing publication and reads
+// like an application bug. This test is the reason that line exists.
+func TestWithMemoryPersistenceWiresTheOutboxToTheUnitOfWork(t *testing.T) {
+	t.Parallel()
+
+	a := warrentest.NewModuleTest(t, ledgerModule(), warrentest.WithMemoryPersistence())
+
+	uow := warrentest.Resolve[persistence.UnitOfWork](t, a)
+	store := warrentest.Resolve[outbox.Store](t, a)
+
+	root := &ledgerAggregate{}
+	root.raise(registered{User: "u-9", Email: "a@b.c", At: time.Unix(1, 0)})
+
+	ctx := context.Background()
+	if err := uow.Do(ctx, func(ctx context.Context) error {
+		return persistence.Write(ctx, "ledger.save", root, func(context.Context) error { return nil })
+	}); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+
+	rows, err := store.Pending(ctx, 10)
+	if err != nil {
+		t.Fatalf("outbox Pending: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("commit drained %d outbox rows, want 1 — uow.OnCommit(outbox.Sink(...)) is not wired", len(rows))
+	}
+}
+
+// ledgerAggregate is the smallest thing persistence.Write accepts: something
+// with pending events to drain.
+type ledgerAggregate struct{ events []domain.Event }
+
+func (a *ledgerAggregate) raise(e domain.Event) { a.events = append(a.events, e) }
+
+func (a *ledgerAggregate) PullEvents() []domain.Event {
+	out := a.events
+	a.events = nil
+	return out
+}

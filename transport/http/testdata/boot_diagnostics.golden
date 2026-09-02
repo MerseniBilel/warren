@@ -6,7 +6,7 @@
     route "POST /uploads", registered by files.notAHandler,
     was given a value of type http_test.notAHandler.
 
-  transport.Raw hands its handler to whichever adapter serves the
+  r.Raw hands its handler to whichever adapter serves the
   protocol, and this one is HTTP: the value must implement
   net/http.Handler. Wrap a function with http.HandlerFunc(fn).
 

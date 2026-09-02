@@ -38,6 +38,12 @@ func TestUserRepositoryContract(t *testing.T) {
 func newUserRepositoryForContract(t *testing.T) (persistence.UnitOfWork, persistence.Repository[*domain.User, domain.UserID]) {
 	t.Helper()
 	uow := persistence.NewMemoryUnitOfWork()
+	// A unit of work with no commit sink REFUSES any transaction whose
+	// aggregates raised events — dropping them would be silent and
+	// permanent. The contract suite registers its own recording sink for
+	// the delivery subtest; this one answers the other subtests, which
+	// are about storage rather than publication.
+	uow.OnCommit(persistence.Discard)
 	return uow, NewUserRepository(uow).(*UserRepository)
 }
 

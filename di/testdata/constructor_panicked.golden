@@ -1,11 +1,17 @@
-✗ constructor panicked
+✗ panic in the container
 
     warren: a deliberate refusal, raised while composing
 
-  di_test.newPanickingService panicked while the graph for scope "root" was being built.
-  A panic during boot is one of two things: a refusal Warren raises on
-  purpose — the message above says so when it is — or a bug in the
-  constructor. Either way the process never served a request.
+  di_test.newPanickingService panicked, in scope "root".
+  This is one of two things: a refusal Warren raises on purpose — the
+  message above says so when it is — or a bug in the code that panicked.
+
+  READ THE STACK BELOW to see WHICH it is, because this diagnostic
+  cannot tell you. The container calls both constructors (at boot, before
+  any request) and functions handed to Invoke (which may be a handler,
+  mid-request), and it recovers them at the same place. A stack that
+  reaches your Handle method is the second kind, and the graph built
+  fine — look at the handler, not at your wiring.
 
   Where it came from:
 

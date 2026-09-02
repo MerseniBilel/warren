@@ -1,7 +1,7 @@
 # Warren — multi-module repository. `go test ./...` from the root tests one
 # module and exits zero (CLAUDE.md); every target iterates MODULES explicitly.
 # Adapter modules are appended here as they are created.
-MODULES := . cli transport/http persistence/postgres observability broker/kafka validate/playground
+MODULES := . cli transport/http persistence/postgres observability broker/kafka validate/playground openapi
 
 .PHONY: ci fmt vet lint invariants test integration bench workspace
 
@@ -19,9 +19,18 @@ workspace:
 	@rm -f go.work go.work.sum
 	@go work init $(MODULES)
 
+# GOFMT is resolved from the SELECTED toolchain, not from PATH. GOTOOLCHAIN
+# switching applies to the `go` command alone: a bare `gofmt` stays whatever
+# version is installed system-wide, and a 1.26 gofmt cannot PARSE the generic
+# methods §3.5 registers through — it fails with "method must have no type
+# parameters" on correct code, which reads like a compiler error and is not
+# one. `go env GOROOT` reports the toolchain go.mod actually selected, so this
+# tracks the `go` directive automatically and needs no edit at the next bump.
+GOFMT := $(shell go env GOROOT)/bin/gofmt
+
 fmt:
 	@for m in $(MODULES); do \
-		out=$$(cd $$m && gofmt -l .); \
+		out=$$(cd $$m && $(GOFMT) -l .); \
 		if [ -n "$$out" ]; then echo "gofmt: needs formatting in $$m:"; echo "$$out"; exit 1; fi; \
 	done
 

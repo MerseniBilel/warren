@@ -12,6 +12,7 @@ package app
 import (
 	"context"
 	"fmt"
+	"slices"
 )
 
 // Handler is a use case: one request in, one response out, plus an error
@@ -88,11 +89,11 @@ func Chain[Req, Res any](h Handler[Req, Res], mw ...Middleware[Req, Res]) Handle
 	// Whether the Retrying is in THIS call's list or came in with the handler
 	// decides what the refusal can sensibly tell the reader to do.
 	fromHandler := sawRetry
-	for i := len(mw) - 1; i >= 0; i-- {
-		if mw[i] == nil {
+	for i, m := range slices.Backward(mw) {
+		if m == nil {
 			panic(fmt.Sprintf("app: Chain middleware %d of %d is nil — append a conditional middleware only when it is enabled", i+1, len(mw)))
 		}
-		h = mw[i](h)
+		h = m(h)
 		if h == nil {
 			panic(fmt.Sprintf("app: middleware %d of %d returned a nil handler — a middleware must return a handler, usually by wrapping the one it was given", i+1, len(mw)))
 		}

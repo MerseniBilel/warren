@@ -82,6 +82,17 @@ func TestGeneratedCodeCompilesAndPasses(t *testing.T) {
 				Route: "/tenants/{tenantId}/lines/{lineId}",
 			})
 		}},
+		// A GET with NO wildcard: the SBX-002 shape. This generated a
+		// required JSON body field regardless of verb, so every request to
+		// it answered 400 — and it compiled, vetted, passed `lint arch` and
+		// passed its own generated test, because none of those cross the
+		// transport. The route assertion below is what can see it.
+		{"g command billing ListInvoices --method get --route /invoices", func() (string, error) {
+			return generate.Command(generate.Options{
+				Dir: dir, Module: "billing", Name: "ListInvoices",
+				Route: "/invoices", Method: "get",
+			})
+		}},
 		// And a --method, since the verb reaches controller.go.
 		{"g command user ArchiveUser --route /users/{id}/archive --method put", func() (string, error) {
 			return generate.Command(generate.Options{
@@ -156,6 +167,28 @@ func TestGeneratedCodeCompilesAndPasses(t *testing.T) {
 		t.Fatalf("removing the ledger module test: %v", err)
 	}
 
+	// The routes the generators just wrote, driven OVER THE WIRE.
+	//
+	// This is the gap that let a generated GET answer 400 to every request
+	// while every gate stayed green: it compiled, it vetted, it passed
+	// `lint arch`, and it passed its own generated test — because that test
+	// calls Handle directly and crosses none of the transport. Decode,
+	// validation, `param:`/`query:` binding, the status defaults and the
+	// error-code column are all downstream of Handle, so nothing here
+	// exercised them.
+	//
+	// servertest boots the generated app behind a real listener, so a route
+	// that cannot be reached by an HTTP client fails HERE rather than in a
+	// user's browser.
+	for path, src := range map[string]string{
+		"internal/modules/billing/http_test.go": generatedRoutesOverHTTP,
+		"internal/modules/user/http_test.go":    generatedUserRoutesOverHTTP,
+	} {
+		if err := os.WriteFile(filepath.Join(dir, path), []byte(src), 0o644); err != nil {
+			t.Fatalf("writing %s: %v", path, err)
+		}
+	}
+
 	// The generators must not be able to write code that breaks the rules
 	// the framework is built on — a generated layer violation would be the
 	// worst kind, because the user did not write it.
@@ -184,3 +217,114 @@ func TestGeneratedCodeCompilesAndPasses(t *testing.T) {
 		}
 	}
 }
+
+// generatedRoutesOverHTTP is dropped into the generated app and run by its own
+// `go test ./...` below. It is written here rather than emitted by a template
+// because it tests the GENERATORS, not the user's project — a scaffolded app
+// should not ship a test of Warren's own routing.
+//
+// One assertion per generator shape that reaches HTTP:
+//
+//	g command <M> <Name>                       — derived path, body-decoded
+//	g command <M> <Name> --route /x/{id}       — a bound path wildcard
+//	g command <M> <Name> --method put          — a non-POST verb
+//
+// Each asserts the route is REACHABLE and answers a Warren-shaped body. The
+// exact status is deliberately not pinned: these handlers are stubs a user
+// replaces, so pinning their output would make the test about the stub. What
+// must never happen is a 404 (the route was not registered) or a 405 (it was
+// registered under a different verb) — or a 400 on a request that carries
+// everything the route asked for, which is the defect this file exists for.
+const generatedRoutesOverHTTP = `package billing_test
+
+import (
+	"net/http"
+	"testing"
+
+	"github.com/MerseniBilel/warren/transport/http/servertest"
+
+	"example.com/myapp/internal/modules/billing"
+)
+
+func TestGeneratedRoutesAreReachableOverHTTP(t *testing.T) {
+	t.Parallel()
+	s := servertest.New(t, billing.Module())
+
+	for _, tc := range []struct {
+		name string
+		got  *servertest.Response
+	}{
+		// g command billing VoidInvoice — derived path, id in the body.
+		{"derived route", s.Post(t, "/void_invoice", map[string]string{"id": "inv-1"})},
+		// g command billing ListInvoices --method get --route /invoices.
+		// A GET carries NO BODY, so if the generator gave it a required body
+		// field this answers 400 and the assertion below fails. That is the
+		// whole point of this line.
+		{"bodyless GET", s.Get(t, "/invoices")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.got.Status == http.StatusNotFound {
+				t.Fatalf("the generated route was not registered: %s", tc.got)
+			}
+			if tc.got.Status == http.StatusMethodNotAllowed {
+				t.Fatalf("the generated route is registered under a different verb: %s", tc.got)
+			}
+			if tc.got.Status == http.StatusBadRequest {
+				t.Fatalf("a request carrying everything the route asked for was refused: %s", tc.got)
+			}
+		})
+	}
+}
+`
+
+// generatedUserRoutesOverHTTP covers the two generator shapes the billing
+// module does not: a route with BOUND WILDCARDS, and a non-POST verb.
+//
+// The wildcard case is the one with history. `g command user VoidLine --route
+// /tenants/{tenantId}/lines/{lineId}` binds two `param:` fields whose names
+// are derived from the wildcards, and a version of the generator wrote a test
+// saying `VoidLine{ID: …}` regardless — caught then only because the package
+// stopped compiling. Nothing checked that the wildcards actually BIND at
+// request time, which is a different failure: the route is reachable, the
+// handler runs, and every field is the zero value.
+const generatedUserRoutesOverHTTP = `package user_test
+
+import (
+	"net/http"
+	"testing"
+
+	"github.com/MerseniBilel/warren/transport/http/servertest"
+
+	"example.com/myapp/internal/modules/user"
+)
+
+func TestGeneratedUserRoutesAreReachableOverHTTP(t *testing.T) {
+	t.Parallel()
+	s := servertest.New(t, user.Module())
+
+	for _, tc := range []struct {
+		name string
+		got  *servertest.Response
+	}{
+		// g command user VoidLine --route /tenants/{tenantId}/lines/{lineId}
+		{"bound wildcards", s.Post(t, "/tenants/t-1/lines/l-1", nil)},
+		// g command user ArchiveUser --route /users/{id}/archive --method put
+		{"non-POST verb", s.Put(t, "/users/u-1/archive", nil)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.got.Status == http.StatusNotFound {
+				t.Fatalf("the generated route was not registered: %s", tc.got)
+			}
+			if tc.got.Status == http.StatusMethodNotAllowed {
+				t.Fatalf("the generated route is registered under a different verb: %s", tc.got)
+			}
+			// A wildcard route whose params did not bind answers INVALID,
+			// because the generated request struct marks them required. That
+			// is precisely the silent-zero-value failure this asserts against.
+			if tc.got.Status == http.StatusBadRequest {
+				t.Fatalf("the route's path wildcards did not bind: %s", tc.got)
+			}
+		})
+	}
+}
+`
